@@ -34,14 +34,38 @@ proc addHandler*(handler: LogHandler) =
   defer: release logLock
   logHandlers.add handler
 
-proc callHandlers*(level: LogLevel; data: openArray[string]): LogResult =
+proc callHandlers*(level: LogLevel; data: openArray[string]): LogResult {.discardable.} =
   acquire logLock
   defer: release logLock
+  result = Ok
   for handler in logHandlers:
     let res = handler.onLog(level, data)
     if res != Ok:
       return res
-  Ok
+
+template info*(): LogResult {.varargs.} =
+  var data = newSeq[string]()
+  for x in unpack():
+    data.add x
+  callHandlers(Info, data)
+
+template debug*(): LogResult {.varargs.} =
+  var data = newSeq[string]()
+  for x in unpack():
+    data.add x
+  callHandlers(Debug, data)
+
+template warn*(): LogResult {.varargs.} =
+  var data = newSeq[string]()
+  for x in unpack():
+    data.add x
+  callHandlers(Warn, data)
+
+template error*(): LogResult {.varargs.} =
+  var data = newSeq[string]()
+  for x in unpack():
+    data.add x
+  callHandlers(Error, data)
 
 proc initStandardLogger*(): LogHandler =
   proc emit(level: LogLevel; data: openArray[string]): LogResult {.closure.} =
@@ -64,15 +88,3 @@ proc initFileLogger*(path: string): LogHandler =
     stream.write '\n'
     Ok
   LogHandler(onLog: emit)
-
-proc info*(data: openArray[string]): LogResult {.discardable.} =
-  callHandlers Info, data
-
-proc debug*(data: openArray[string]): LogResult {.discardable.} =
-  callHandlers Debug, data
-
-proc warn*(data: openArray[string]): LogResult {.discardable.} =
-  callHandlers Warn, data
-
-proc error*(data: openArray[string]): LogResult {.discardable.} =
-  callHandlers Error, data

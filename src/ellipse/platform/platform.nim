@@ -80,7 +80,7 @@ proc sdlHandle(ok: bool, id: string) {.raises.} =
     let detail =
       if cstr.isNil: ""
       else: fromCString(cstr)
-    error [id, " failed: ", detail]
+    error id, " failed: ", detail
     raise Failure
 
 var activeApp: PlatformApplication
