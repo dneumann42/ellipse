@@ -1,4 +1,4 @@
-import std/[tables, hashes, options]
+import std/[tables, hashes, options, strutils]
 
 type
   Environment* = object
@@ -167,6 +167,79 @@ func hash*(o: Object): Hash =
   of Fun:
     discard
   result = !$result
+
+func `$`*(o: Object): string =
+  result = "(kind: " & $o.kind
+  case o.kind
+  of Nothing, Fun:
+    discard
+  of Number:
+    result.add ", number: " & $o.number
+  of Symbol:
+    result.add ", symbol: " & o.symbol.escape
+  of Boolean:
+    result.add ", isTrue: " & $o.isTrue
+  of List:
+    result.add ", items: @["
+    for i in 0 ..< o.items.len:
+      if i > 0:
+        result.add ", "
+      result.add $o.items[i]
+    result.add "]"
+  of Pair:
+    let head = o.a
+    let tail = o.b
+    result.add ", a: "
+    if head != nil:
+      result.add $head[]
+    else:
+      result.add "nil"
+    result.add ", b: "
+    if tail != nil:
+      result.add $tail[]
+    else:
+      result.add "nil"
+  result.add ")"
+
+func stringifyNumber(n: float64): string =
+  if n > -9.0e15 and n < 9.0e15 and n == float64(int64(n)):
+    result = $int64(n)
+  else:
+    result = $n
+
+func stringify*(o: Object): string =
+  case o.kind
+  of Nothing:
+    result = "()"
+  of Number:
+    result = stringifyNumber(o.number)
+  of Symbol:
+    result = o.symbol
+  of Boolean:
+    result = if o.isTrue: "true" else: "false"
+  of List:
+    result = "("
+    for i in 0 ..< o.items.len:
+      if i > 0:
+        result.add " "
+      result.add stringify(o.items[i])
+    result.add ")"
+  of Pair:
+    let head = o.a
+    let tail = o.b
+    result = "("
+    if head != nil:
+      result.add stringify(head[])
+    else:
+      result.add "()"
+    result.add " = "
+    if tail != nil:
+      result.add stringify(tail[])
+    else:
+      result.add "()"
+    result.add ")"
+  of Fun:
+    result = "<fun>"
 
 proc newEnvironment*(up: nil ref Environment = nil): ref Environment =
   (ref Environment)(up: up, bindings: initTable[Object, Object]())

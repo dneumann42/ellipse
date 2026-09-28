@@ -1,23 +1,13 @@
-import std/[strutils, result]
-import owl/objects
+import std/result
+import owl/[lexer, objects]
 
 type
-  TokKind = enum tkWord, tkOpen, tkClose, tkEq, tkColon
+  ItemKind = enum Object, Eq, Colon
 
-  Token = object
-    kind: TokKind
-    text: string
-
-  Line = object
-    num: int
-    indent: int
-    toks: seq[Token]
-
-  ItemKind = enum itObject, itEq, itColon
   Item = object
     case kind: ItemKind
-    of itObject: value: Object
-    of itEq, itColon: discard
+    of Object: value: objects.Object
+    of Eq, Colon: discard
 
   Parser = object
     lines: seq[Line]
@@ -25,57 +15,11 @@ type
     num: int
     err: string
 
-const
-  Delimiters = {' ', '\t', '(', ')', ';', ':', '='}
-
 proc fail(p: var Parser, msg: string) =
   if p.err.len == 0:
     p.err = "line " & $p.num & ": " & msg
 
-func indentOf(text: string): int =
-  result = 0
-  while result < text.len and text[result] in {' ', '\t'}:
-    inc result
-
-func tokenize(text: string): seq[Token] =
-  result = @[]
-  var i = 0
-  while i < text.len:
-    case text[i]
-    of ' ', '\t':
-      inc i
-    of '(':
-      result.add Token(kind: tkOpen)
-      inc i
-    of ')':
-      result.add Token(kind: tkClose)
-      inc i
-    of ':':
-      result.add Token(kind: tkColon)
-      inc i
-    of '=':
-      result.add Token(kind: tkEq)
-      inc i
-    of ';':
-      break
-    else:
-      var j = i + 1
-      while j < text.len and text[j] notin Delimiters:
-        inc j
-      result.add Token(kind: tkWord, text: text[i ..< j])
-      i = j
-
-func splitLines(text: string): seq[Line] =
-  result = @[]
-  var num = 0
-  for raw in split(text, '\n'):
-    inc num
-    let content = strip(raw)
-    if content.len == 0 or content[0] == ';':
-      continue
-    result.add Line(num: num, indent: indentOf(raw), toks: tokenize(raw))
-
-func tryNumber(text: string): (bool, float64) =
+func tryNumber*(text: string): (bool, float64) =
   var i = 0
   var sign = 1.0
   if i < text.len and text[i] in {'+', '-'}:
@@ -102,32 +46,32 @@ func tryNumber(text: string): (bool, float64) =
   else:
     result = (true, sign * value)
 
-func atom(text: string): Object =
+func atom*(text: string): objects.Object =
   let (isNum, value) = tryNumber(text)
   if isNum:
     result = number(value)
   else:
     result = symbol(text)
 
-proc assemble(p: var Parser, items: seq[Item]): Object =
+proc assemble(p: var Parser, items: seq[Item]): objects.Object =
   result = nothing()
   var eqAt = -1
   for i in 0 ..< items.len:
     case items[i].kind
-    of itObject:
+    of Object:
       discard
-    of itEq:
+    of Eq:
       if eqAt >= 0:
         p.fail("repeated '='")
         return
       eqAt = i
-    of itColon:
+    of Colon:
       p.fail("':' must end the line")
       return
 
-  var before, after: seq[Object]
+  var before, after: seq[objects.Object]
   for i in 0 ..< items.len:
-    if i != eqAt and items[i].kind == itObject:
+    if i != eqAt and items[i].kind == Object:
       if eqAt >= 0 and i > eqAt:
         after.add items[i].value
       else:
@@ -155,29 +99,29 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
   result = @[]
   while i < toks.len:
     case toks[i].kind
-    of tkWord:
-      result.add Item(kind: itObject, value: atom(toks[i].text))
+    of Word:
+      result.add Item(kind: Object, value: atom(toks[i].text))
       inc i
-    of tkEq:
-      result.add Item(kind: itEq)
+    of Eq:
+      result.add Item(kind: Eq)
       inc i
-    of tkColon:
-      result.add Item(kind: itColon)
+    of Colon:
+      result.add Item(kind: Colon)
       inc i
-    of tkOpen:
+    of Open:
       inc i
       let inner = p.parseItems(toks, i)
       if p.err.len > 0:
         return
-      if i >= toks.len or toks[i].kind != tkClose:
+      if i >= toks.len or toks[i].kind != Close:
         p.fail("expected ')'")
         return
       inc i
-      result.add Item(kind: itObject, value: p.assemble(inner))
-    of tkClose:
+      result.add Item(kind: Object, value: p.assemble(inner))
+    of Close:
       break
 
-proc parseExprs(p: var Parser, base: int): seq[Object] =
+proc parseExprs(p: var Parser, base: int): seq[objects.Object] =
   result = @[]
   while p.pos < p.lines.len and p.err.len == 0:
     let ln = p.lines[p.pos]
@@ -195,20 +139,19 @@ proc parseExprs(p: var Parser, base: int): seq[Object] =
     if p.err.len == 0 and i < ln.toks.len:
       p.fail("unexpected ')'")
 
-    var ephemeral = false
-    if p.err.len == 0 and items.len > 0 and items[^1].kind == itColon:
+    if p.err.len == 0 and items.len > 0 and items[^1].kind == Colon:
       items.setLen(items.len - 1)
-      ephemeral = true
-
-    if ephemeral and p.pos < p.lines.len and p.lines[p.pos].indent > ln.indent:
-      for form in p.parseExprs(p.lines[p.pos].indent):
-        items.add Item(kind: itObject, value: form)
+      if p.pos < p.lines.len and p.lines[p.pos].indent > ln.indent:
+        for form in p.parseExprs(p.lines[p.pos].indent):
+          items.add Item(kind: Object, value: form)
+      else:
+        p.fail("missing block after ':'")
 
     if p.err.len == 0:
       result.add p.assemble(items)
 
-proc parseOwl*(source: string): Result[seq[Object], string] =
-  var p = Parser(lines: splitLines(source))
+proc parseOwl*(source: string): Result[seq[objects.Object], string] =
+  var p = Parser(lines: scanLines(source))
   let forms = p.parseExprs(0)
   if p.err.len > 0:
     result = err(p.err)

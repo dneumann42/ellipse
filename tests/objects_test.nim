@@ -8,9 +8,6 @@ proc expect(cond: bool, msg: string) =
     failures += 1
     echo "FAILED: ", msg
 
-# ----------------------------------------------------- objects: predicates and
-# conversions (every object converts to every type; fallbacks are defined)
-
 expect toNumber(number(2.5)) == 2.5 and toSymbol(number(2.5)) == "", "total conversions"
 expect not toBool(nothing()), "nothing is falsy"
 
@@ -39,7 +36,27 @@ expect car(number(1)) == nothing(), "car of non-pair is nothing"
 expect pr == pair(symbol("k"), number(7)), "pairs compare by structure"
 expect xs != list(@[number(1), number(2), number(3)]), "lists by length"
 
-# ------------------------------------------------------------------ environment
+expect $nothing() == "(kind: Nothing)", "$ of nothing"
+expect $number(2.5) == "(kind: Number, number: 2.5)", "$ of number"
+expect $boolean(true) == "(kind: Boolean, isTrue: true)", "$ of boolean"
+expect $symbol("hi") == "(kind: Symbol, symbol: \"hi\")", "$ of symbol"
+expect $list(@[number(1)]) == "(kind: List, items: @[(kind: Number, number: 1.0)])", "$ of list"
+expect $pair(symbol("k"), number(7)) ==
+  "(kind: Pair, a: (kind: Symbol, symbol: \"k\"), b: (kind: Number, number: 7.0))", "$ of pair"
+
+expect stringify(number(42)) == "42", "stringify whole float without decimals"
+expect stringify(number(2.5)) == "2.5", "stringify float"
+expect stringify(number(-3)) == "-3", "stringify negative"
+expect stringify(symbol("foo")) == "foo", "stringify symbol"
+expect stringify(boolean(true)) == "true", "stringify true"
+expect stringify(boolean(false)) == "false", "stringify false"
+expect stringify(nothing()) == "()", "stringify nothing"
+expect stringify(list(@[])) == "()", "stringify empty list"
+expect stringify(list(@[number(1), symbol("x"), list(@[number(2), number(3)])])) ==
+  "(1 x (2 3))", "stringify nested list"
+expect stringify(pair(symbol("k"), number(7))) == "(k = 7)", "stringify pair"
+expect stringify(pair(symbol("k"), list(@[number(1), number(2)]))) == "(k = (1 2))", "pair with list value"
+expect stringify(pair(symbol("k"), pair(symbol("j"), number(1)))) == "(k = (j = 1))", "nested pair"
 
 let global = newEnvironment()
 let x = symbol("x")
