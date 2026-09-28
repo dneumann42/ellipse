@@ -12,7 +12,7 @@ type
     Boolean
     List
     Pair
-    Fun
+    Command
 
   Object* = object
     case kind: ObjectKind
@@ -26,10 +26,18 @@ type
       isTrue: bool
     of List:
       items: seq[Object]
+      bodyStart: int
     of Pair:
       a, b: nil ref Object
-    of Fun:
-      discard
+    of Command:
+      name: string
+      params: seq[Object]
+      body: seq[Object]
+      env: nil ref Environment
+      isFun: bool
+      call: CommandProc
+
+  CommandProc* = nil proc (env: ref Environment, args: seq[Object], body: seq[Object]): Object {.raises.}
 
 func nothing*(): Object =
   Object(kind: Nothing)
@@ -43,8 +51,8 @@ func symbol*(name: string): Object =
 func boolean*(b: bool): Object =
   Object(kind: Boolean, isTrue: b)
 
-func list*(items: seq[Object]): Object =
-  Object(kind: List, items: items)
+func list*(items: seq[Object], bodyStart: int = -1): Object =
+  Object(kind: List, items: items, bodyStart: bodyStart)
 
 func box(o: Object): ref Object =
   result = (ref Object)(kind: Nothing)
@@ -52,6 +60,66 @@ func box(o: Object): ref Object =
 
 func pair*(key, val: Object): Object =
   Object(kind: Pair, a: box(key), b: box(val))
+
+func newCommand*(name: string, params, body: seq[Object], env: nil ref Environment,
+    isFun: bool): Object =
+  Object(kind: Command, name: name, params: params, body: body, env: env, isFun: isFun,
+    call: nil)
+
+func newBuiltin*(name: string, call: CommandProc, isFun: bool): Object =
+  Object(kind: Command, name: name, isFun: isFun, call: call)
+
+func isNothing*(o: Object): bool = o.kind == Nothing
+func isNumber*(o: Object): bool = o.kind == Number
+func isSymbol*(o: Object): bool = o.kind == Symbol
+func isBoolean*(o: Object): bool = o.kind == Boolean
+func isList*(o: Object): bool = o.kind == List
+func isPair*(o: Object): bool = o.kind == Pair
+func isCommand*(o: Object): bool = o.kind == Command
+
+func bodyStart*(o: Object): int =
+  result = -1
+  if o.kind == List:
+    result = o.bodyStart
+
+func setBodyStart*(o: var Object, at: int) =
+  if o.kind == List:
+    o.bodyStart = at
+
+func cmdName*(o: Object): string =
+  result = ""
+  if o.kind == Command:
+    result = o.name
+
+func cmdParams*(o: Object): seq[Object] =
+  result = @[]
+  if o.kind == Command:
+    result = o.params
+
+func cmdBody*(o: Object): seq[Object] =
+  result = @[]
+  if o.kind == Command:
+    result = o.body
+
+func cmdEnv*(o: Object): nil ref Environment =
+  result = nil
+  if o.kind == Command:
+    result = o.env
+
+func isFun*(o: Object): bool =
+  result = false
+  if o.kind == Command:
+    result = o.isFun
+
+func isBuiltin*(o: Object): bool =
+  result = false
+  if o.kind == Command:
+    result = o.call != nil
+
+func builtinCall*(o: Object): CommandProc =
+  result = nil
+  if o.kind == Command:
+    result = o.call
 
 func toNumber*(o: Object): float64 =
   result = 0.0
@@ -114,8 +182,11 @@ func `==`*(a, b: Object): bool =
   if a.kind != b.kind:
     return false
   case a.kind:
-  of Nothing, Fun:
+  of Nothing:
     result = true
+  of Command:
+    result = a.name == b.name and a.isFun == b.isFun and a.env == b.env and
+      (a.call == b.call or (a.call != nil and b.call != nil))
   of Number:
     result = a.number == b.number
   of Symbol:
@@ -164,15 +235,18 @@ func hash*(o: Object): Hash =
       result = result !& hash(head[])
     if tail != nil:
       result = result !& hash(tail[])
-  of Fun:
-    discard
+  of Command:
+    result = result !& hash(o.name)
+    result = result !& hash(o.isFun)
   result = !$result
 
 func `$`*(o: Object): string =
   result = "(kind: " & $o.kind
   case o.kind
-  of Nothing, Fun:
+  of Nothing:
     discard
+  of Command:
+    result.add ", name: " & o.name
   of Number:
     result.add ", number: " & $o.number
   of Symbol:
@@ -238,14 +312,18 @@ func stringify*(o: Object): string =
     else:
       result.add "()"
     result.add ")"
-  of Fun:
-    result = "<fun>"
+  of Command:
+    let kw = if o.isFun: "fun" else: "command"
+    result = "<" & kw & " " & o.name & ">"
 
 proc newEnvironment*(up: nil ref Environment = nil): ref Environment =
   (ref Environment)(up: up, bindings: initTable[Object, Object]())
 
 proc define*(env: ref Environment, name, value: Object) =
   env.bindings[name] = value
+
+func allBindings*(env: ref Environment): Table[Object, Object] =
+  result = env.bindings
 
 proc has*(env: nil ref Environment, name: Object): bool =
   var cur: nil ref Environment = env
@@ -254,6 +332,11 @@ proc has*(env: nil ref Environment, name: Object): bool =
       return true
     cur = cur.up
   return false
+
+proc hasOwn*(env: nil ref Environment, name: Object): bool =
+  result = false
+  if env != nil:
+    result = env.bindings.hasKey(name)
 
 proc lookup*(env: nil ref Environment, name: Object): Option[Object] =
   var cur: nil ref Environment = env

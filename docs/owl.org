@@ -10,5 +10,13 @@ fun factorial n (m = 2):
 res = factorial (n = 5) ; could also just be factorial 5
 echo res
 
-#+end_src
+command invert cond:
+  quote (not (eval cond))
 
+command unless cond then else:
+  newCond = invert cond
+  if (eval newCond):
+    eval(then)
+    eval(else)
+
+#+end_src

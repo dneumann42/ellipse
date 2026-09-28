@@ -53,7 +53,7 @@ func atom*(text: string): objects.Object =
   else:
     result = symbol(text)
 
-proc assemble(p: var Parser, items: seq[Item]): objects.Object =
+proc assemble(p: var Parser, items: seq[Item], bodyAt: int = -1): objects.Object =
   result = nothing()
   var eqAt = -1
   for i in 0 ..< items.len:
@@ -87,13 +87,18 @@ proc assemble(p: var Parser, items: seq[Item]): objects.Object =
     result = if after.len == 1:
       pair(before[0], after[0])
     else:
-      pair(before[0], list(after))
+      var inner = list(after)
+      if bodyAt > eqAt:
+        inner.setBodyStart(bodyAt - eqAt - 1)
+      pair(before[0], inner)
   elif before.len == 0:
     p.fail("empty expression")
   elif before.len == 1:
     result = before[0]
   else:
     result = list(before)
+    if bodyAt >= 0:
+      result.setBodyStart(bodyAt)
 
 proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
   result = @[]
@@ -139,8 +144,10 @@ proc parseExprs(p: var Parser, base: int): seq[objects.Object] =
     if p.err.len == 0 and i < ln.toks.len:
       p.fail("unexpected ')'")
 
+    var bodyAt = -1
     if p.err.len == 0 and items.len > 0 and items[^1].kind == Colon:
       items.setLen(items.len - 1)
+      bodyAt = items.len
       if p.pos < p.lines.len and p.lines[p.pos].indent > ln.indent:
         for form in p.parseExprs(p.lines[p.pos].indent):
           items.add Item(kind: Object, value: form)
@@ -148,7 +155,7 @@ proc parseExprs(p: var Parser, base: int): seq[objects.Object] =
         p.fail("missing block after ':'")
 
     if p.err.len == 0:
-      result.add p.assemble(items)
+      result.add p.assemble(items, bodyAt)
 
 proc parseOwl*(source: string): Result[seq[objects.Object], string] =
   var p = Parser(lines: scanLines(source))
