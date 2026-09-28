@@ -1,0 +1,14 @@
+#+TITLE: Owl Design Document
+
+#+begin_src owl
+
+fun factorial n (m = 2):
+  if (< n m):
+    1
+    * n (factorial (- n 1))
+
+res = factorial (n = 5) ; could also just be factorial 5
+echo res
+
+#+end_src
+

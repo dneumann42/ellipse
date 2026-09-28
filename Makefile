@@ -1,4 +1,4 @@
-.PHONY: clean setup run
+.PHONY: clean setup run test
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -11,6 +11,10 @@ build: bin/ellipse
 
 run: build 
 	./bin/ellipse
+
+test: setup
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/objects_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/reader_test.nim
 
 setup: build/nimony/bin/nimony
 	@echo "Nimony is ready"
