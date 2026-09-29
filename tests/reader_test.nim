@@ -171,6 +171,20 @@ expect toSymbol(car(items[1])) == "n" and toNumber(cdr(items[1])) == 5.0, "named
 expect forms("x = f:\n  a b")[0] ==
   pair(symbol("x"), list(@[symbol("f"), list(@[symbol("a"), symbol("b")])])), "binding with a block"
 
+fs = forms("= 1 1")
+expect fs[0] == list(@[symbol("="), number(1.0), number(1.0)]), "a leading '=' is the equality command"
+expect forms("= 1 1") == forms("(= 1 1)"), "parens around a command call are transparent"
+expect forms("<> 1 2")[0] == list(@[symbol("<>"), number(1.0), number(2.0)]), "'<>' heads a call"
+expect forms("= a b")[0] == list(@[symbol("="), symbol("a"), symbol("b")]), "equality on names"
+expect forms("not (= 1 1)")[0] == list(@[symbol("not"), forms("= 1 1")[0]]),
+  "an equality call is one argument"
+expect forms("= 1 1:\n  2")[0] ==
+  list(@[symbol("="), number(1.0), number(1.0), number(2.0)], 3), "the equality command takes a block"
+expect forms("x = = 1 1")[0] == pair(symbol("x"), fs[0]),
+  "a binding value may start with the equality command"
+expect forms("x = <> 1 2")[0] == pair(symbol("x"), forms("<> 1 2")[0]),
+  "a binding value may start with the inequality command"
+
 fs = forms("a b ; trailing comment\nc")
 expect fs.len == 2 and toSymbol(toSeq(fs[0])[1]) == "b", "trailing comment cut"
 expect fs[1] == symbol("c"), "next line parsed as bare symbol"
@@ -213,9 +227,8 @@ errIs("a b\n  c", "indentation")
 errIs("  indented", "indentation")
 errIs("a:\n  b\n    c", "indentation")
 errIs("x = a = b", "repeated")
-errIs("a = = b", "repeated")
 errIs("a b = c", "single name")
-errIs("= c", "single name")
+errIs("= a = b", "single name")
 errIs("(a b", "expected ')'")
 errIs("a b)", "unexpected ')'")
 errIs("echo \"unclosed", "unterminated string")
@@ -252,6 +265,11 @@ roundTrips("a.b")
 roundTrips("a.b.c")
 roundTrips("a.2.b")
 roundTrips("x = 5")
+roundTrips("= 1 1")
+roundTrips("x = = 1 1")
+roundTrips("a = = b")
+roundTrips("not (= 1 1)")
+roundTrips("<> 1 2")
 roundTrips("res = factorial (n = 5)")
 roundTrips("a (b c)")
 roundTrips("[] 42 2.5 -3")

@@ -27,6 +27,14 @@ proc bodyOf(o: Object): seq[Object] =
     for i in bs ..< it.len:
       result.add it[i]
 
+proc numbersIn*(env: ref Environment, args: seq[Object], what: string): seq[float64] {.raises.} =
+  result = @[]
+  for a in args:
+    let v = eval(a, env)
+    if not isNumber(v) and not isBoolean(v):
+      err(what & " needs numbers, got " & stringify(v))
+    result.add toNumber(v)
+
 proc headSymbol(o: Object): string =
   result = ""
   if isList(o):

@@ -22,6 +22,53 @@ proc ifBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.}
   else:
     evalForms(env, body[1 ..< body.len])
 
+proc nums(env: ref Environment, args: seq[Object]): seq[float64] {.raises.} =
+  numbersIn(env, args, "comparison")
+
+proc ordered(env: ref Environment, args: seq[Object], ascending: bool): Object {.raises.} =
+  let ns = nums(env, args)
+  if ns.len < 2:
+    err("comparisons need at least two arguments")
+  result = boolean(true)
+  for i in 1 ..< ns.len:
+    if ascending:
+      if not (ns[i - 1] < ns[i]):
+        result = boolean(false)
+        return
+    else:
+      if not (ns[i - 1] > ns[i]):
+        result = boolean(false)
+        return
+
+proc ltBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  ordered(env, args, true)
+
+proc gtBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  ordered(env, args, false)
+
+proc equality(env: ref Environment, args: seq[Object], wantSame: bool): Object {.raises.} =
+  if args.len < 2:
+    err("comparisons need at least two arguments")
+  result = boolean(true)
+  var previous = eval(args[0], env)
+  for i in 1 ..< args.len:
+    let current = eval(args[i], env)
+    if (current == previous) != wantSame:
+      result = boolean(false)
+      return
+    previous = current
+
+proc eqBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  equality(env, args, true)
+
+proc neBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  equality(env, args, false)
+
+proc notBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  if args.len != 1:
+    err("not needs exactly one argument")
+  boolean(not toBool(eval(args[0], env)))
+
 proc defineInEnv(env: ref Environment, args, body: seq[Object], isFun: bool): Object {.raises.} =
   if args.len < 1 or not isSymbol(args[0]):
     let kw = if isFun: "fun" else: "command"
@@ -155,6 +202,11 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("quote"), newBuiltin("quote", quoteBuiltin, false))
   define(env, symbol("eval"), newBuiltin("eval", evalBuiltin, false))
   define(env, symbol("if"), newBuiltin("if", ifBuiltin, false))
+  define(env, symbol("<"), newBuiltin("<", ltBuiltin, true))
+  define(env, symbol(">"), newBuiltin(">", gtBuiltin, true))
+  define(env, symbol("="), newBuiltin("=", eqBuiltin, true))
+  define(env, symbol("<>"), newBuiltin("<>", neBuiltin, true))
+  define(env, symbol("not"), newBuiltin("not", notBuiltin, true))
   define(env, symbol("fun"), newBuiltin("fun", funBuiltin, true))
   define(env, symbol("command"), newBuiltin("command", commandBuiltin, false))
   define(env, symbol("{}"), newBuiltin("{}", recordBuiltin, true))

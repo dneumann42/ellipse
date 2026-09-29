@@ -273,6 +273,82 @@ expect toNumber(value(e15, "v")) == 42.0, "a field is just a command, callable t
 expect toNumber(value(e15, "w")) == 12.0, "a dotted call nests"
 expect isCommand(value(e15, "named")), "field reads the record by name"
 
+let e16 = runOk("""
+v1 = {}:
+  a = 1
+
+v2 = {}:
+  a = 1
+
+yes = < 1 2
+same = = 1 1
+diff = <> 1 2
+words = = "owl" "owl"
+kinds = <> 1 yes
+chains = = 2 2 2
+neighbours = <> 1 2 3
+recs = = v1 v2
+mixed = (= (+ 1 1) 2)
+broken = = 1 2 2
+half = <> 1 2 2
+""", "")
+expect toBool(value(e16, "same")), "the equality command compares numbers"
+expect toBool(value(e16, "diff")), "the inequality command reports a difference"
+expect toBool(value(e16, "words")), "equality compares strings"
+expect toBool(value(e16, "kinds")), "a number is not a boolean"
+expect toBool(value(e16, "chains")), "equality chains over equal neighbours"
+expect toBool(value(e16, "neighbours")), "inequality chains over different neighbours"
+expect toBool(value(e16, "recs")), "equality compares records by structure"
+expect toBool(value(e16, "mixed")), "equality compares computed values"
+expect not toBool(value(e16, "broken")), "one unequal neighbour fails the chain"
+expect not toBool(value(e16, "half")), "one equal neighbour fails the inequality chain"
+
+let e17 = runOk("""
+xs = [] 1 2
+n2 = <> (length xs) 3
+ordered = < 1 2 3
+
+if (= (length xs) 2):
+  branch = 1
+  branch = 2
+
+flag = not (= 1 2)
+""", "")
+expect toBool(value(e17, "n2")), "inequality compares computed values"
+expect toBool(value(e17, "ordered")), "the ordering commands still chain"
+expect toNumber(value(e17, "branch")) == 1.0, "equality works as an if condition"
+expect toBool(value(e17, "flag")), "not is installed with base"
+
+var oneArg = false
+clearCaptured()
+try:
+  discard runSrc("x = = 1", "")
+except:
+  oneArg = true
+expect oneArg, "equality needs two values to compare"
+expect find(lastError(), "comparisons need at least two arguments") >= 0,
+  "equality says what it needs, got: " & lastError()
+
+var textOrder = false
+clearCaptured()
+try:
+  discard runSrc("x = < \"a\" \"b\"", "")
+except:
+  textOrder = true
+expect textOrder, "ordering needs numbers"
+expect find(lastError(), "comparison needs numbers") >= 0,
+  "ordering reports the value it got, got: " & lastError()
+
+var badNot = false
+clearCaptured()
+try:
+  discard runSrc("x = not 1 2", "")
+except:
+  badNot = true
+expect badNot, "not takes exactly one argument"
+expect find(lastError(), "not needs exactly one argument") >= 0,
+  "not reports its arity, got: " & lastError()
+
 var noLen = false
 clearCaptured()
 try:

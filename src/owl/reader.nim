@@ -58,16 +58,22 @@ func atom*(text: string): objects.Object =
 
 proc assemble(p: var Parser, items: seq[Item], bodyAt: int = -1): objects.Object =
   result = nothing()
+  # '=' names the equality command when it heads an expression: first in the form
+  # or right behind the '=' that opens a binding. Any other '=' is the binding.
   var eqAt = -1
+  var cmdAt = -1
   for i in 0 ..< items.len:
     case items[i].kind
     of Object:
       discard
     of Eq:
-      if eqAt >= 0:
+      if cmdAt < 0 and (i == 0 or i == eqAt + 1):
+        cmdAt = i
+      elif eqAt >= 0:
         p.fail("repeated '='")
         return
-      eqAt = i
+      else:
+        eqAt = i
     of Colon:
       p.fail("':' must end the line")
       return
@@ -77,11 +83,23 @@ proc assemble(p: var Parser, items: seq[Item], bodyAt: int = -1): objects.Object
 
   var before, after: seq[objects.Object]
   for i in 0 ..< items.len:
-    if i != eqAt and items[i].kind == Object:
+    var value: objects.Object
+    var keep = false
+    case items[i].kind
+    of Object:
+      value = items[i].value
+      keep = true
+    of Eq:
+      if i == cmdAt:
+        value = symbol("=")
+        keep = true
+    of Colon, Dot:
+      discard
+    if keep:
       if eqAt >= 0 and i > eqAt:
-        after.add items[i].value
+        after.add value
       else:
-        before.add items[i].value
+        before.add value
 
   if eqAt >= 0:
     if before.len != 1 or toSymbol(before[0]) == "":

@@ -30,6 +30,26 @@ res = + 1 2
 """))
   expect toNumber(value(env, "res")) == 3.0, "use base and math provide the internal commands"
 
+proc baseComparisonsWork() {.raises.} =
+  let lib = newLibrary("t13")
+  add(lib, baseModule())
+  let env = runProgram(lib, parseForms("""
+use base
+
+r = {}:
+  a = 1
+  b = 2
+
+small = < r.a r.b
+same = = r.a 1
+apart = <> r.a r.b
+flipped = not (= r.a r.b)
+"""))
+  expect toBool(value(env, "small")), "use base provides the ordering commands"
+  expect toBool(value(env, "same")), "use base provides equality"
+  expect toBool(value(env, "apart")), "use base provides inequality"
+  expect toBool(value(env, "flipped")), "use base provides not"
+
 proc indexedWorks() {.raises.} =
   let lib = newLibrary("t12")
   add(lib, baseModule())
@@ -188,6 +208,7 @@ b = nim-double 5
   expect toNumber(value(env, "b")) == 10.0, "internal builtin in the same mixed module"
 
 check("base", baseWorks)
+check("base comparisons", baseComparisonsWork)
 check("index/length/field", indexedWorks)
 check("export/use", exportUseWorks)
 check("recursive", recursiveWorks)
