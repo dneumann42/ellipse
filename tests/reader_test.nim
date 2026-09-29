@@ -112,7 +112,9 @@ expect fs.len == 1, "one form"
 var items = toSeq(fs[0])
 expect items.len == 3, "a b c -> list of 3"
 expect toSymbol(items[0]) == "a" and toSymbol(items[2]) == "c", "head and last arg"
-expect forms("a") == forms("(a)"), "outer parens are transparent"
+expect forms("(a)")[0] == list(@[symbol("a")]), "a one-symbol group is a call"
+expect forms("a")[0] == symbol("a"), "a bare symbol stays a reference"
+expect forms("(a)") != forms("a"), "a call is not a reference"
 expect forms("(a)") == forms("((a))"), "double parens are transparent"
 
 expect toNumber(forms("42")[0]) == 42.0 and toSymbol(forms("42")[0]) == "", "42 is a number"
@@ -126,7 +128,8 @@ expect forms("\"a b\"")[0] == str("a b"), "bare string is one form"
 fs = forms("a (b c)")
 expect toSeq(fs[0]).len == 2, "group is one argument"
 expect toSeq(toSeq(fs[0])[1]).len == 2, "the group is a list"
-expect forms("a (b (c))") == forms("a (b c)"), "nested groups flatten"
+expect forms("a ((b c))") == forms("a (b c)"), "double-paren groups flatten"
+expect forms("(b (c))")[0] == list(@[symbol("b"), list(@[symbol("c")])]), "a group of one symbol stays a call"
 
 fs = forms("a.b")
 expect fs[0] == forms("index a b")[0], "dot is syntax for the index command"

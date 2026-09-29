@@ -84,8 +84,8 @@ command invert cond:
 command unless cond then else:
   newCond = invert cond
   if (eval newCond):
-    eval(then)
-    eval(else)
+    (eval then)
+    (eval else)
 
 a = unless (< 1 2) (quote 10) (quote 20)
 b = unless (> 1 2) (quote 10) (quote 20)

@@ -172,7 +172,10 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
         p.fail("expected ')'")
         return
       inc i
-      result.add Item(kind: Object, value: p.assemble(inner))
+      var value = p.assemble(inner)
+      if inner.len == 1 and inner[0].kind == Object and isSymbol(value):
+        value = list(@[value])
+      result.add Item(kind: Object, value: value)
     of Close:
       break
   result = p.foldDots(result)

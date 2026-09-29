@@ -5,6 +5,8 @@ use math
 fun print-help:
   echo "HELP WIP"
 
+echo (length argv)
+
 if (= (length argv) 0):
-  print-help
+  (print-help)
   echo "HERE?"
