@@ -43,7 +43,7 @@ type
       isFun: bool
       call: CommandProc
 
-  CommandProc* = nil proc (env: ref Environment, args: seq[Object], body: seq[Object]): Object {.raises.}
+  CommandProc* = nil proc (env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.}
 
 func nothing*(): Object =
   Object(kind: Nothing)

@@ -182,7 +182,7 @@ x = one
 """))
   expect toNumber(value(env, "x")) == 1.0, "manually added export via addExport"
 
-proc doubleBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc doubleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   number(toNumber(eval(args[0], env)) * 2.0)
 
 proc mixedWorks() {.raises.} =

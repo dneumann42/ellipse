@@ -6,14 +6,14 @@ proc defaultOutput*(s: string) =
 
 var outputWriter*: proc(s: string) = defaultOutput
 
-proc printBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc printBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   var parts: seq[string] = @[]
   for a in args:
     parts.add stringify(eval(a, env))
   outputWriter(parts.join(" "))
   nothing()
 
-proc readlineBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc readlineBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   var prompt = "> "
   if args.len > 0:
     prompt = stringify(eval(args[0], env))

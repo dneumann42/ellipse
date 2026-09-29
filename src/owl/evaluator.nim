@@ -10,22 +10,16 @@ proc err*(msg: string) {.raises.} =
   errorReport(msg)
   raise ValueError
 
-proc argsOf(o: Object): seq[Object] =
+proc operandsOf(o: Object): seq[Object] =
   let it = toSeq(o)
-  let bs = bodyStart(o)
   result = @[]
-  if it.len > 1:
-    let stop = if bs >= 0 and bs < it.len: bs else: it.len
-    for i in 1 ..< stop:
-      result.add it[i]
+  for i in 1 ..< it.len:
+    result.add it[i]
 
-proc bodyOf(o: Object): seq[Object] =
-  result = @[]
+proc bodyStartOf(o: Object): int =
   let it = toSeq(o)
   let bs = bodyStart(o)
-  if bs >= 0 and bs < it.len:
-    for i in bs ..< it.len:
-      result.add it[i]
+  result = if bs >= 1 and bs < it.len: bs - 1 else: max(it.len - 1, 0)
 
 proc numbersIn*(env: ref Environment, args: seq[Object], what: string): seq[float64] {.raises.} =
   result = @[]
@@ -78,18 +72,16 @@ proc bindParams(cmd: Object, argObjs: seq[Object], callerEnv: ref Environment,
           value = eval(value, child)
         define(child, name, value)
 
-proc apply(cmd: Object, callerEnv: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc apply(cmd: Object, callerEnv: ref Environment, args: seq[Object],
+    bodyStart: int): Object {.raises.} =
   if isBuiltin(cmd):
     let call = builtinCall(cmd)
     if call == nil:
       err("builtin " & cmdName(cmd) & " has no implementation")
-    return call(callerEnv, args, body)
-  var allArgs = args
-  for b in body:
-    allArgs.add b
+    return call(callerEnv, args, bodyStart)
   let upEnv = if isFun(cmd): cmdEnv(cmd) else: callerEnv
   let child = newEnvironment(upEnv)
-  bindParams(cmd, allArgs, callerEnv, child)
+  bindParams(cmd, args, callerEnv, child)
   evalForms(child, cmdBody(cmd))
 
 proc evalForms*(env: ref Environment, forms: seq[Object]): Object {.raises.} =
@@ -127,7 +119,7 @@ proc eval*(obj: Object, env: ref Environment): Object {.raises.} =
       cmd = eval(cmd, env)
     if not isCommand(cmd):
       err("the head of a call must be a command, got " & stringify(cmd))
-    return apply(cmd, env, argsOf(obj), bodyOf(obj))
+    return apply(cmd, env, operandsOf(obj), bodyStartOf(obj))
   if isCommand(obj):
     err("cannot evaluate command " & cmdName(obj) & " directly, call it")
   result = nothing()

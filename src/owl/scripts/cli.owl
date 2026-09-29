@@ -2,11 +2,13 @@ use io
 use base
 use math
 
-fun print-help:
-  echo "HELP WIP"
+add = λ a:
+    λ b:
+        echo:
+            "A: " 
+            a 
+            " B: " 
+            b
+        + a b
 
-echo (length argv)
-
-if (= (length argv) 0):
-  (print-help)
-  echo "HERE?"
+(add 2) 3

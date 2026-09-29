@@ -14,7 +14,7 @@ proc newTestEnv(): ref Environment =
 
 var failCalled = false
 
-proc failBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc failBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   failCalled = true
   nothing()
 

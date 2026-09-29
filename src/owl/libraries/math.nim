@@ -3,13 +3,13 @@ import owl/[objects, evaluator, modules]
 proc nums(env: ref Environment, args: seq[Object]): seq[float64] {.raises.} =
   numbersIn(env, args, "arithmetic")
 
-proc plusBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc plusBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   var total = 0.0
   for v in nums(env, args):
     total += v
   number(total)
 
-proc subBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc subBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   let ns = nums(env, args)
   if ns.len == 0:
     err("- needs at least one argument")
@@ -18,13 +18,13 @@ proc subBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.
     total -= ns[i]
   number(total)
 
-proc mulBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc mulBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   var total = 1.0
   for v in nums(env, args):
     total *= v
   number(total)
 
-proc divBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+proc divBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   let ns = nums(env, args)
   if ns.len == 0:
     err("/ needs at least one argument")
