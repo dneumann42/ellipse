@@ -53,6 +53,14 @@ let e1 = runOk(docExample, "")
 expect toNumber(value(e1, "res")) == 120.0, "factorial 5 = 120"
 expect outputLines == @["120"], "echo res prints 120, got: " & outputLines.join(" | ")
 
+let eStr = runOk("""
+msg = "Hello, World!"
+echo msg
+""", "")
+expect outputLines == @["Hello, World!"],
+  "echo prints a string literal, got: " & outputLines.join(" | ")
+discard eStr
+
 let e2 = runOk("""
 res = factorial 5
 fun factorial n (m = 2):

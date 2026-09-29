@@ -90,7 +90,7 @@ proc evalForms*(env: ref Environment, forms: seq[Object]): Object {.raises.} =
     result = eval(f, env)
 
 proc eval*(obj: Object, env: ref Environment): Object {.raises.} =
-  if isNumber(obj) or isBoolean(obj) or isNothing(obj) or isRecord(obj):
+  if isNumber(obj) or isBoolean(obj) or isNothing(obj) or isRecord(obj) or isString(obj):
     return obj
   if isSymbol(obj):
     let found = lookup(env, obj)

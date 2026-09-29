@@ -1,4 +1,4 @@
-.PHONY: clean setup run test
+.PHONY: clean setup run run_owl test
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -11,6 +11,9 @@ build: bin/ellipse
 
 run: build 
 	./bin/ellipse
+
+run_owl: setup
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./src/owl/owl.nim
 
 test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/objects_test.nim

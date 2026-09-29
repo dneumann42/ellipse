@@ -8,6 +8,7 @@ type
   ObjectKind = enum
     Nothing
     Number
+    String
     Symbol
     Boolean
     List
@@ -21,6 +22,8 @@ type
       discard
     of Number:
       number: float64
+    of String:
+      str: string
     of Symbol:
       symbol: string
     of Boolean:
@@ -47,6 +50,9 @@ func nothing*(): Object =
 
 func number*(n: float64): Object =
   Object(kind: Number, number: n)
+
+func str*(s: string): Object =
+  Object(kind: String, str: s)
 
 func symbol*(name: string): Object =
   Object(kind: Symbol, symbol: name)
@@ -77,6 +83,7 @@ func newBuiltin*(name: string, call: CommandProc, isFun: bool): Object =
 
 func isNothing*(o: Object): bool = o.kind == Nothing
 func isNumber*(o: Object): bool = o.kind == Number
+func isString*(o: Object): bool = o.kind == String
 func isSymbol*(o: Object): bool = o.kind == Symbol
 func isBoolean*(o: Object): bool = o.kind == Boolean
 func isList*(o: Object): bool = o.kind == List
@@ -157,6 +164,14 @@ func toSymbol*(o: Object): string =
   else:
     discard
 
+func toStr*(o: Object): string =
+  result = ""
+  case o.kind
+  of String:
+    result = o.str
+  else:
+    discard
+
 func toSeq*(o: Object): seq[Object] =
   result = @[]
   case o.kind
@@ -221,6 +236,8 @@ func `==`*(a, b: Object): bool =
       (a.call == b.call or (a.call != nil and b.call != nil))
   of Number:
     result = a.number == b.number
+  of String:
+    result = a.str == b.str
   of Symbol:
     result = a.symbol == b.symbol
   of Boolean:
@@ -261,6 +278,8 @@ func hash*(o: Object): Hash =
     discard
   of Number:
     result = result !& hash(o.number)
+  of String:
+    result = result !& hash(o.str)
   of Symbol:
     result = result !& hash(o.symbol)
   of Boolean:
@@ -290,6 +309,8 @@ func `$`*(o: Object): string =
     result.add ", name: " & o.name
   of Number:
     result.add ", number: " & $o.number
+  of String:
+    result.add ", str: " & o.str.escape
   of Symbol:
     result.add ", symbol: " & o.symbol.escape
   of Boolean:
@@ -343,6 +364,8 @@ func stringify*(o: Object): string =
     result = "()"
   of Number:
     result = stringifyNumber(o.number)
+  of String:
+    result = o.str
   of Symbol:
     result = o.symbol
   of Boolean:

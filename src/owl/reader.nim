@@ -107,6 +107,9 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
     of Word:
       result.add Item(kind: Object, value: atom(toks[i].text))
       inc i
+    of Str:
+      result.add Item(kind: Object, value: str(toks[i].text))
+      inc i
     of Eq:
       result.add Item(kind: Eq)
       inc i
@@ -158,7 +161,16 @@ proc parseExprs(p: var Parser, base: int): seq[objects.Object] =
       result.add p.assemble(items, bodyAt)
 
 proc parseOwl*(source: string): Result[seq[objects.Object], string] =
-  var p = Parser(lines: scanLines(source))
+  var t = Tokenizer(err: "", line: 0)
+  var lines: seq[Line] = @[]
+  try:
+    lines = scanLines(t, source)
+  except:
+    discard
+  var p = Parser(lines: lines)
+  if t.err.len > 0:
+    p.num = if t.line > 0: t.line else: 1
+    p.fail(t.err)
   let forms = p.parseExprs(0)
   if p.err.len > 0:
     result = err(p.err)

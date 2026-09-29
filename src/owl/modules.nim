@@ -39,7 +39,15 @@ proc addSource*(m: Module, source: string): Module {.raises.} =
   result = addForms(m, parsed.get(@[]))
 
 proc addFile*(m: Module, path: string): Module {.raises.} =
-  result = addSource(m, readFile(path))
+  var source = ""
+  var failed = false
+  try:
+    source = readFile(path)
+  except:
+    failed = true
+  if failed:
+    fail("module " & m.name & ": cannot open file: " & path)
+  result = addSource(m, source)
 
 proc addExport*(m: Module, name: string, value: Object): Module =
   result = m

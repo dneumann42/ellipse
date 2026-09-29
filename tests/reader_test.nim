@@ -16,9 +16,25 @@ proc errIs(src, needle: string) =
   let e = errText(src)
   expect find(e, needle) >= 0, "error for [" & src & "] mentions '" & needle & "', got: " & e
 
+proc toks(src: string): seq[Token] =
+  var t = Tokenizer(err: "", line: 0)
+  result = @[]
+  try:
+    result = tokenize(t, src)
+  except:
+    discard  # unterminated input is exercised through parseOwl instead
+
+proc scan(src: string): seq[Line] =
+  var t = Tokenizer(err: "", line: 0)
+  result = @[]
+  try:
+    result = scanLines(t, src)
+  except:
+    discard
+
 proc kinds(src: string): seq[TokenKind] =
   result = @[]
-  for t in tokenize(src):
+  for t in toks(src):
     result.add t.kind
 
 func isNum(text: string): bool =
@@ -44,15 +60,18 @@ expect kinds("= :") == @[Eq, Colon], "punctuation tokens"
 expect kinds("2.5") == @[Word], "dot is part of a word"
 expect kinds("a ; comment") == @[Word], "comment cuts the line"
 expect kinds(";x").len == 0, "comment-only text"
-expect kinds("a")[0] == Word and tokenize("a")[0].text == "a", "word keeps its text"
+expect kinds("a")[0] == Word and toks("a")[0].text == "a", "word keeps its text"
+expect kinds("\"a b\"") == @[Str], "quoted text is one string token"
+expect kinds("a \"b\" c") == @[Word, Str, Word], "quotes split surrounding words"
+expect kinds("\"a\"")[0] == Str and toks("\"a\"")[0].text == "a", "string keeps its contents"
 
-let ls = scanLines("a\n\n; c\n  b")
+let ls = scan("a\n\n; c\n  b")
 expect ls.len == 2, "blank and comment lines skipped"
 expect ls[0].num == 1 and ls[1].num == 4, "line numbers count skipped lines"
 expect ls[1].indent == 2, "indent recorded per line"
 expect ls[0].toks.len == 1, "tokens kept per line"
-expect scanLines("").len == 0, "empty source has no lines"
-expect scanLines("  ; c").len == 0, "indented comment skipped"
+expect scan("").len == 0, "empty source has no lines"
+expect scan("  ; c").len == 0, "indented comment skipped"
 
 expect isNum("42") and numVal("42") == 42.0, "integer"
 expect isNum("+5") and numVal("+5") == 5.0, "leading plus"
@@ -92,6 +111,8 @@ expect toNumber(forms("2.5")[0]) == 2.5, "2.5 is a float"
 expect toNumber(forms("-3")[0]) == -3.0, "-3 is a negative number"
 expect toSymbol(forms("5x")[0]) == "5x", "5x is a symbol"
 expect forms("42 2.5 -3")[0] == list(@[number(42.0), number(2.5), number(-3.0)]), "numbers as args"
+expect forms("x = \"hi there\"")[0] == pair(symbol("x"), str("hi there")), "string literal as a value"
+expect forms("\"a b\"")[0] == str("a b"), "bare string is one form"
 
 fs = forms("a (b c)")
 expect toSeq(fs[0]).len == 2, "group is one argument"
@@ -165,6 +186,9 @@ errIs("a b = c", "single name")
 errIs("= c", "single name")
 errIs("(a b", "expected ')'")
 errIs("a b)", "unexpected ')'")
+errIs("echo \"unclosed", "unterminated string")
+errIs("\"", "unterminated string")
+errIs("a\nb \"oops", "line 2: unterminated string")
 errIs("()", "empty expression")
 errIs("a = ", "missing value")
 errIs("a : b", "must end the line")
