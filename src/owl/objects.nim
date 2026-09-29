@@ -12,6 +12,7 @@ type
     Boolean
     List
     Pair
+    Record
     Command
 
   Object* = object
@@ -29,6 +30,8 @@ type
       bodyStart: int
     of Pair:
       a, b: nil ref Object
+    of Record:
+      fields: seq[Object]
     of Command:
       name: string
       params: seq[Object]
@@ -61,6 +64,9 @@ func box(o: Object): ref Object =
 func pair*(key, val: Object): Object =
   Object(kind: Pair, a: box(key), b: box(val))
 
+func record*(fields: seq[Object]): Object =
+  Object(kind: Record, fields: fields)
+
 func newCommand*(name: string, params, body: seq[Object], env: nil ref Environment,
     isFun: bool): Object =
   Object(kind: Command, name: name, params: params, body: body, env: env, isFun: isFun,
@@ -75,6 +81,7 @@ func isSymbol*(o: Object): bool = o.kind == Symbol
 func isBoolean*(o: Object): bool = o.kind == Boolean
 func isList*(o: Object): bool = o.kind == List
 func isPair*(o: Object): bool = o.kind == Pair
+func isRecord*(o: Object): bool = o.kind == Record
 func isCommand*(o: Object): bool = o.kind == Command
 
 func bodyStart*(o: Object): int =
@@ -178,6 +185,31 @@ func cdr*(o: Object): Object =
   else:
     discard
 
+func recordFields*(o: Object): seq[Object] =
+  result = @[]
+  if o.kind == Record:
+    result = o.fields
+
+func fieldNames*(o: Object): seq[string] =
+  result = @[]
+  if o.kind == Record:
+    for f in o.fields:
+      result.add toSymbol(car(f))
+
+func hasField*(o: Object, name: string): bool =
+  result = false
+  if o.kind == Record:
+    for f in o.fields:
+      if toSymbol(car(f)) == name:
+        return true
+
+func field*(o: Object, name: string): Object =
+  result = nothing()
+  if o.kind == Record:
+    for f in o.fields:
+      if toSymbol(car(f)) == name:
+        return cdr(f)
+
 func `==`*(a, b: Object): bool =
   if a.kind != b.kind:
     return false
@@ -214,6 +246,13 @@ func `==`*(a, b: Object): bool =
       if not (aTail[] == bTail[]):
         return false
     result = true
+  of Record:
+    if a.fields.len != b.fields.len:
+      return false
+    for i in 0 ..< a.fields.len:
+      if a.fields[i] != b.fields[i]:
+        return false
+    result = true
 
 func hash*(o: Object): Hash =
   result = hash(o.kind)
@@ -235,6 +274,8 @@ func hash*(o: Object): Hash =
       result = result !& hash(head[])
     if tail != nil:
       result = result !& hash(tail[])
+  of Record:
+    result = result !& hash(o.fields)
   of Command:
     result = result !& hash(o.name)
     result = result !& hash(o.isFun)
@@ -273,6 +314,13 @@ func `$`*(o: Object): string =
       result.add $tail[]
     else:
       result.add "nil"
+  of Record:
+    result.add ", fields: @["
+    for i in 0 ..< o.fields.len:
+      if i > 0:
+        result.add ", "
+      result.add $o.fields[i]
+    result.add "]"
   result.add ")"
 
 func stringifyNumber(n: float64): string =
@@ -280,6 +328,14 @@ func stringifyNumber(n: float64): string =
     result = $int64(n)
   else:
     result = $n
+
+func stringify*(o: Object): string
+
+func stringifyArg(o: Object): string =
+  if o.kind == List or o.kind == Record:
+    result = "(" & stringify(o) & ")"
+  else:
+    result = stringify(o)
 
 func stringify*(o: Object): string =
   case o.kind
@@ -292,12 +348,16 @@ func stringify*(o: Object): string =
   of Boolean:
     result = if o.isTrue: "true" else: "false"
   of List:
-    result = "("
-    for i in 0 ..< o.items.len:
-      if i > 0:
+    if o.items.len > 0 and isSymbol(o.items[0]):
+      result = stringifyArg(o.items[0])
+      for i in 1 ..< o.items.len:
         result.add " "
-      result.add stringify(o.items[i])
-    result.add ")"
+        result.add stringifyArg(o.items[i])
+    else:
+      result = "[]"
+      for i in 0 ..< o.items.len:
+        result.add " "
+        result.add stringifyArg(o.items[i])
   of Pair:
     let head = o.a
     let tail = o.b
@@ -312,6 +372,11 @@ func stringify*(o: Object): string =
     else:
       result.add "()"
     result.add ")"
+  of Record:
+    result = "{}"
+    for i in 0 ..< o.fields.len:
+      result.add " "
+      result.add stringifyArg(o.fields[i])
   of Command:
     let kw = if o.isFun: "fun" else: "command"
     result = "<" & kw & " " & o.name & ">"

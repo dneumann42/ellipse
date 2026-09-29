@@ -38,12 +38,37 @@ proc funBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.
 proc commandBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
   defineInEnv(env, args, body, false)
 
+func allForms(args, body: seq[Object]): seq[Object] =
+  result = @[]
+  for f in args:
+    result.add f
+  for f in body:
+    result.add f
+
+proc recordBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  var fields: seq[Object] = @[]
+  for form in allForms(args, body):
+    if not isPair(form):
+      err("{} needs (name = value) forms")
+    if not isSymbol(car(form)):
+      err("{} needs a symbol before '='")
+    fields.add pair(car(form), eval(cdr(form), env))
+  record(fields)
+
+proc listBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  var xs: seq[Object] = @[]
+  for form in allForms(args, body):
+    xs.add eval(form, env)
+  list(xs)
+
 proc installBase*(env: ref Environment) =
   define(env, symbol("quote"), newBuiltin("quote", quoteBuiltin, false))
   define(env, symbol("eval"), newBuiltin("eval", evalBuiltin, false))
   define(env, symbol("if"), newBuiltin("if", ifBuiltin, false))
   define(env, symbol("fun"), newBuiltin("fun", funBuiltin, true))
   define(env, symbol("command"), newBuiltin("command", commandBuiltin, false))
+  define(env, symbol("{}"), newBuiltin("{}", recordBuiltin, true))
+  define(env, symbol("[]"), newBuiltin("[]", listBuiltin, true))
 
 proc baseModule*(): Module =
   result = newModule("base")

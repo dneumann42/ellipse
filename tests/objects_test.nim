@@ -1,12 +1,6 @@
 import std/[syncio, options]
 import owl/objects
-
-var failures = 0
-
-proc expect(cond: bool, msg: string) =
-  if not cond:
-    failures += 1
-    echo "FAILED: ", msg
+import ./testutils
 
 expect toNumber(number(2.5)) == 2.5 and toSymbol(number(2.5)) == "", "total conversions"
 expect not toBool(nothing()), "nothing is falsy"
@@ -51,12 +45,32 @@ expect stringify(symbol("foo")) == "foo", "stringify symbol"
 expect stringify(boolean(true)) == "true", "stringify true"
 expect stringify(boolean(false)) == "false", "stringify false"
 expect stringify(nothing()) == "()", "stringify nothing"
-expect stringify(list(@[])) == "()", "stringify empty list"
+expect stringify(list(@[])) == "[]", "stringify empty list"
 expect stringify(list(@[number(1), symbol("x"), list(@[number(2), number(3)])])) ==
-  "(1 x (2 3))", "stringify nested list"
+  "[] 1 x ([] 2 3)", "stringify nested list"
 expect stringify(pair(symbol("k"), number(7))) == "(k = 7)", "stringify pair"
-expect stringify(pair(symbol("k"), list(@[number(1), number(2)]))) == "(k = (1 2))", "pair with list value"
+expect stringify(pair(symbol("k"), list(@[number(1), number(2)]))) == "(k = [] 1 2)", "pair with list value"
 expect stringify(pair(symbol("k"), pair(symbol("j"), number(1)))) == "(k = (j = 1))", "nested pair"
+
+let rec = record(@[pair(symbol("x"), number(100)), pair(symbol("y"), number(200))])
+expect isRecord(rec), "record predicate"
+expect not isRecord(xs), "lists are not records"
+expect recordFields(rec).len == 2, "record fields"
+expect fieldNames(rec) == @["x", "y"], "field names in order"
+expect toNumber(field(rec, "y")) == 200.0, "field value"
+expect field(rec, "z") == nothing(), "missing field is nothing"
+expect hasField(rec, "x"), "hasField finds a field"
+expect not hasField(rec, "z"), "hasField misses"
+expect rec == record(@[pair(symbol("x"), number(100)), pair(symbol("y"), number(200))]),
+  "records compare by structure"
+expect rec != record(@[pair(symbol("x"), number(100))]), "records differ by field count"
+expect hash(rec) == hash(record(@[pair(symbol("x"), number(100)), pair(symbol("y"), number(200))])),
+  "equal records hash equal"
+expect $record(@[]) == "(kind: Record, fields: @[])", "$ of empty record"
+expect stringify(rec) == "{} (x = 100) (y = 200)", "stringify record as code"
+expect stringify(record(@[])) == "{}", "stringify empty record"
+expect stringify(record(@[pair(symbol("p"), record(@[pair(symbol("q"), number(7))]))])) ==
+  "{} (p = {} (q = 7))", "stringify nested record"
 
 let global = newEnvironment()
 let x = symbol("x")
@@ -85,7 +99,4 @@ expect toNumber(lookup(deep, x).get()) == 1.0, "deep chain finds innermost"
 expect toNumber(lookup(deep, y).get()) == 3.0, "deep chain finds inherited"
 expect lookup(deep, symbol("gone")).isNone, "deep miss"
 
-if failures == 0:
-  echo "objects tests OK"
-else:
-  quit "objects tests failed: " & $failures
+finish "objects"

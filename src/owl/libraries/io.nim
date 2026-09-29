@@ -1,11 +1,16 @@
 import std/[syncio, strutils]
 import owl/[objects, evaluator, modules]
 
+proc defaultOutput*(s: string) =
+  writeLine(stdout, s)
+
+var outputWriter*: proc(s: string) = defaultOutput
+
 proc printBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
   var parts: seq[string] = @[]
   for a in args:
     parts.add stringify(eval(a, env))
-  echo parts.join(" ")
+  outputWriter(parts.join(" "))
   nothing()
 
 proc installIo*(env: ref Environment) =

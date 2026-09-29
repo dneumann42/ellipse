@@ -1,8 +1,13 @@
 import std/[options, syncio]
 import owl/objects
 
-proc err*(msg: string) {.raises.} =
+proc defaultErrorReport*(msg: string) =
   writeLine(stderr, "owl error: " & msg)
+
+var errorReport*: proc(msg: string) = defaultErrorReport
+
+proc err*(msg: string) {.raises.} =
+  errorReport(msg)
   raise ValueError
 
 proc argsOf(o: Object): seq[Object] =
@@ -85,7 +90,7 @@ proc evalForms*(env: ref Environment, forms: seq[Object]): Object {.raises.} =
     result = eval(f, env)
 
 proc eval*(obj: Object, env: ref Environment): Object {.raises.} =
-  if isNumber(obj) or isBoolean(obj) or isNothing(obj):
+  if isNumber(obj) or isBoolean(obj) or isNothing(obj) or isRecord(obj):
     return obj
   if isSymbol(obj):
     let found = lookup(env, obj)

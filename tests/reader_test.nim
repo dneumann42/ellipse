@@ -1,12 +1,6 @@
 import std/[syncio, result, strutils]
 import owl/[lexer, objects, reader]
-
-var failures = 0
-
-proc expect(cond: bool, msg: string) =
-  if not cond:
-    failures += 1
-    echo "FAILED: ", msg
+import ./testutils
 
 proc forms(src: string): seq[Object] =
   let r = parseOwl(src)
@@ -193,11 +187,13 @@ roundTrips("a b c")
 roundTrips("x = 5")
 roundTrips("res = factorial (n = 5)")
 roundTrips("a (b c)")
-roundTrips("42 2.5 -3")
+roundTrips("[] 42 2.5 -3")
 roundTrips("a b:\n  c")
+roundTrips("[] 1 2 3")
+roundTrips("{} (x = 100) (y = 200)")
+roundTrips("[] 1 ([] 2 3)")
+roundTrips("v2 = {}:\n  x = 100\n  y = 200")
+roundTrips("xs = []:\n  1\n  2\n  3")
 roundTrips(program)
 
-if failures == 0:
-  echo "reader tests OK"
-else:
-  quit "reader tests failed: " & $failures
+finish "reader"

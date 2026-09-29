@@ -2,21 +2,13 @@
 
 #+begin_src owl
 
-fun factorial n (m = 2):
-  if (< n m):
+v2 = {}:
+    x = 100
+    y = 200
+
+xs = []:
     1
-    * n (factorial (- n 1))
-
-res = factorial (n = 5) ; could also just be factorial 5
-echo res
-
-command invert cond:
-  quote (not (eval cond))
-
-command unless cond then else:
-  newCond = invert cond
-  if (eval newCond):
-    eval(then)
-    eval(else)
+    2
+    3
 
 #+end_src

@@ -1,13 +1,13 @@
-import std/[syncio, options, result, tables]
+import std/[syncio, options, result, tables, strutils]
 import owl/[objects, reader, evaluator, modules]
 import owl/libraries/[base, math]
+import ./testutils
 
-var failures = 0
+captureStdio()
 
-proc expect(cond: bool, msg: string) =
-  if not cond:
-    failures += 1
-    echo "FAILED: ", msg
+proc expectError(needle: string) =
+  expect find(lastError(), needle) >= 0,
+    "reported error mentions '" & needle & "', got: " & lastError()
 
 proc parseForms(src: string): seq[Object] =
   let r = parseOwl(src)
@@ -18,12 +18,6 @@ proc value(env: ref Environment, name: string): Object =
   let found = lookup(env, symbol(name))
   expect found.isSome, "binding " & name & " exists"
   result = if found.isSome: found.get() else: nothing()
-
-proc check(label: string, body: proc () {.raises.}) =
-  try:
-    body()
-  except:
-    expect false, label & " raised unexpectedly"
 
 proc baseWorks() {.raises.} =
   let lib = newLibrary("t1")
@@ -185,6 +179,7 @@ check("manual", manualWorks)
 check("mixed", mixedWorks)
 
 var leaked = false
+clearCaptured()
 try:
   let lib = newLibrary("t7")
   add(lib, baseModule())
@@ -209,8 +204,10 @@ v = secret 1
 except:
   leaked = true
 expect leaked, "non-exported forms are not visible to the user"
+expectError "unbound symbol: secret"
 
 var missing = false
+clearCaptured()
 try:
   let lib = newLibrary("t8")
   add(lib, newModule("x").addSource("use nope"))
@@ -218,15 +215,15 @@ try:
 except:
   missing = true
 expect missing, "unknown module dependency fails the prepass"
+expectError "uses unknown module nope"
 
 var bad = false
+clearCaptured()
 try:
   discard newModule("bad").addSource("()")
 except:
   bad = true
 expect bad, "module with a parse error raises"
+expectError "empty expression"
 
-if failures == 0:
-  echo "modules tests OK"
-else:
-  quit "modules tests failed: " & $failures
+finish "modules"

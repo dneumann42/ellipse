@@ -1,8 +1,9 @@
-import std/[syncio, options, result]
+import std/[syncio, options, result, strutils]
 import owl/[objects, reader, evaluator]
 import owl/libraries/[base, math, list, io]
+import ./testutils
 
-var failures = 0
+captureStdio()
 
 proc newTestEnv(): ref Environment =
   result = newEnvironment()
@@ -10,11 +11,6 @@ proc newTestEnv(): ref Environment =
   installMath(result)
   installList(result)
   installIo(result)
-
-proc expect(cond: bool, msg: string) =
-  if not cond:
-    failures += 1
-    echo "FAILED: ", msg
 
 var failCalled = false
 
@@ -31,10 +27,11 @@ proc runSrc(src, extra: string): ref Environment {.raises.} =
   runProgram(result, r.get(@[]))
 
 proc runOk(src, extra: string): ref Environment =
+  clearCaptured()
   try:
     result = runSrc(src, extra)
   except:
-    expect false, "program should run without errors"
+    expect false, "program should run without errors: " & lastError()
     result = newTestEnv()
 
 proc value(env: ref Environment, name: string): Object =
@@ -54,6 +51,7 @@ echo res
 
 let e1 = runOk(docExample, "")
 expect toNumber(value(e1, "res")) == 120.0, "factorial 5 = 120"
+expect outputLines == @["120"], "echo res prints 120, got: " & outputLines.join(" | ")
 
 let e2 = runOk("""
 res = factorial 5
@@ -68,7 +66,7 @@ let e3 = runOk("""
 q = quote (a b c)
 v = eval (quote (+ 2 3))
 """, "")
-expect stringify(value(e3, "q")) == "(a b c)", "quote returns its argument unevaluated"
+expect stringify(value(e3, "q")) == "a b c", "quote returns its argument unevaluated"
 expect toNumber(value(e3, "v")) == 5.0, "eval runs quoted code"
 
 let e4 = runOk("""
@@ -145,7 +143,7 @@ expect toNumber(value(e9, "n4")) == 10.0, "division"
 expect toBool(value(e9, "n5")), "less than"
 expect toBool(value(e9, "n6")), "greater than"
 expect not toBool(value(e9, "n7")), "not"
-expect stringify(value(e9, "n8")) == "(1 2 3)", "list"
+expect stringify(value(e9, "n8")) == "[] 1 2 3", "list"
 
 let e10 = runOk("""
 fun greet who:
@@ -153,7 +151,7 @@ fun greet who:
 
 greet (who = quote owl)
 """, "")
-discard e10
+expect outputLines == @["owl"], "print writes its argument to stdout, got: " & outputLines.join(" | ")
 
 let e11 = runOk("""
 fun add3 a b (c = 1):
@@ -167,7 +165,31 @@ expect toNumber(value(e11, "p")) == 4.0, "default parameter"
 expect toNumber(value(e11, "q")) == 6.0, "all parameters given"
 expect toNumber(value(e11, "r")) == 7.0, "keyword arguments in any order"
 
-if failures == 0:
-  echo "evaluator tests OK"
-else:
-  quit "evaluator tests failed: " & $failures
+let e12 = runOk("""
+v2 = {}:
+  x = 100
+  y = 200
+
+xs = []:
+  1
+  2
+  3
+""", "")
+expect isRecord(value(e12, "v2")), "{} returns a record"
+expect stringify(value(e12, "v2")) == "{} (x = 100) (y = 200)", "record from block body"
+expect toNumber(field(value(e12, "v2"), "y")) == 200.0, "record field lookup"
+expect not has(e12, symbol("x")), "record body does not leak bindings"
+expect stringify(value(e12, "xs")) == "[] 1 2 3", "[] returns a list"
+
+let e13 = runOk("""
+r = {} (a = 1) (b = quote (1 2))
+l = [] 1 (+ 1 1)
+nested = {}:
+  p = {}:
+    q = 7
+""", "")
+expect stringify(value(e13, "r")) == "{} (a = 1) (b = [] 1 2)", "record from pair arguments"
+expect stringify(value(e13, "l")) == "[] 1 2", "list from arguments"
+expect stringify(value(e13, "nested")) == "{} (p = {} (q = 7))", "nested records"
+
+finish "evaluator"

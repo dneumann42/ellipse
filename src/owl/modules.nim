@@ -16,8 +16,7 @@ type
     modules*: Table[string, Module]
 
 proc fail(msg: string) {.raises.} =
-  writeLine(stderr, "owl error: " & msg)
-  raise ValueError
+  err(msg)
 
 proc newModule*(name: string): Module =
   result = Module(name: name, forms: @[], env: newEnvironment(),
