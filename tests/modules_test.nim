@@ -265,4 +265,49 @@ except:
 expect bad, "module with a parse error raises"
 expectError "empty expression"
 
+proc iteratorsWork() {.raises.} =
+  let lib = newLibrary("t14")
+  add(lib, baseModule())
+  add(lib, mathModule())
+  add(lib, newModule("iterators").addFile("src/owl/libraries/iterators.owl"))
+  let env = runProgram(lib, parseForms("""
+use base
+use math
+use iterators
+
+it = range 3
+i0 = (it)
+i1 = (it)
+i2 = (it)
+i3 = (it)
+
+got = ([])
+for x (range 5):
+  append got x
+
+xs = [] 10 20 30
+seen = ([])
+for y (items xs):
+  append seen y
+
+from2 = ([])
+for z (range 2 4):
+  append from2 z
+
+pairs = ([])
+for a (range 2):
+  for b (range 2):
+    append pairs (+ a b)
+"""))
+  expect toNumber(value(env, "i0")) == 0.0, "a range iterator yields its first value"
+  expect toNumber(value(env, "i2")) == 2.0, "the iterator keeps its position between calls"
+  expect isNothing(value(env, "i3")), "an exhausted iterator returns nothing"
+  expect stringify(value(env, "got")) == "[] 0 1 2 3 4", "for drives a range iterator to the end"
+  expect stringify(value(env, "seen")) == "[] 10 20 30", "for over items visits every element"
+  expect stringify(value(env, "xs")) == "[] 10 20 30", "items does not consume the source list"
+  expect stringify(value(env, "from2")) == "[] 2 3", "range counts from a start to a stop"
+  expect stringify(value(env, "pairs")) == "[] 0 1 1 2", "for loops nest and see outer bindings"
+
+check("iterators library", iteratorsWork)
+
 finish "modules"

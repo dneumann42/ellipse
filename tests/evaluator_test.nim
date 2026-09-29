@@ -437,4 +437,50 @@ expect appendNoList, "append needs a list variable"
 expect find(lastError(), "append needs a list variable") >= 0,
   "append says it needs a list, got: " & lastError()
 
+let e19 = runOk("""
+n = nothing
+e = do 1 2 3
+blk = do:
+  a1 = 1
+  + a1 1
+empty = (do)
+""", "")
+expect isNothing(value(e19, "n")), "nothing evaluates to the nil value"
+expect toNumber(value(e19, "e")) == 3.0, "do returns the last value"
+expect toNumber(value(e19, "blk")) == 2.0, "do returns the last form of a block"
+expect toNumber(value(e19, "a1")) == 1.0, "do evaluates every form in order"
+expect isNothing(value(e19, "empty")), "an empty do is nothing"
+
+let e20 = runOk("""
+count = 0
+while (< count 3):
+  count = + count 1
+
+p = pair (quote x) 5
+eval p
+""", "")
+expect toNumber(value(e20, "count")) == 3.0, "while loops until the condition fails"
+expect toNumber(value(e20, "x")) == 5.0, "pair builds syntax that eval binds"
+
+let e21 = runOk("""
+command count-forms body+:
+  length body
+
+n = count-forms:
+  1
+  2
+  3
+empty = count-forms
+""", "")
+expect toNumber(value(e21, "n")) == 3.0, "a + parameter collects the caller's block"
+expect toNumber(value(e21, "empty")) == 0.0, "no block means an empty body list"
+
+var tooMany = false
+clearCaptured()
+try:
+  discard runSrc("command two a b:\n  1\ntwo 1 2 3", "")
+except:
+  tooMany = true
+expect tooMany, "commands without a + parameter still reject extras"
+
 finish "evaluator"

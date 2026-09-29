@@ -22,6 +22,30 @@ proc ifBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object 
   else:
     evalForms(env, args[bodyStart + 1 ..< args.len])
 
+proc doBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  result = nothing()
+  for form in args:
+    result = eval(form, env)
+
+proc whileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len == 0:
+    err("while needs a condition")
+  if bodyStart >= args.len:
+    err("while needs at least one body form")
+  while toBool(eval(args[0], env)):
+    discard evalForms(env, args[bodyStart ..< args.len])
+  nothing()
+
+proc pairBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len != 2:
+    err("pair needs a name and a value")
+  var key = args[0]
+  if not isSymbol(key):
+    key = eval(key, env)
+  if not isSymbol(key):
+    err("pair needs a symbol name, got " & stringify(key))
+  pair(key, eval(args[1], env))
+
 proc nums(env: ref Environment, args: seq[Object]): seq[float64] {.raises.} =
   numbersIn(env, args, "comparison")
 
@@ -271,6 +295,10 @@ proc argvValue(): Object =
 
 proc installBase*(env: ref Environment) =
   define(env, symbol("argv"), argvValue())
+  define(env, symbol("nothing"), nothing())
+  define(env, symbol("do"), newBuiltin("do", doBuiltin, false))
+  define(env, symbol("while"), newBuiltin("while", whileBuiltin, false))
+  define(env, symbol("pair"), newBuiltin("pair", pairBuiltin, false))
   define(env, symbol("quote"), newBuiltin("quote", quoteBuiltin, false))
   define(env, symbol("eval"), newBuiltin("eval", evalBuiltin, false))
   define(env, symbol("if"), newBuiltin("if", ifBuiltin, false))

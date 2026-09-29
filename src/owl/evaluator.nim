@@ -1,4 +1,4 @@
-import std/[options, syncio]
+import std/[options, syncio, strutils]
 import owl/objects
 
 proc defaultErrorReport*(msg: string) =
@@ -43,26 +43,53 @@ proc paramName(p: Object): Object {.raises.} =
   if not isSymbol(result):
     err("a parameter must be a symbol or a (name = default) pair")
 
+proc restName(p: Object): Object =
+  # A command's last parameter ending in '+' collects the caller's block.
+  result = nothing()
+  var name = p
+  if isPair(p):
+    name = car(p)
+  if isSymbol(name):
+    let text = toSymbol(name)
+    if text.len > 1 and text.endsWith("+"):
+      result = symbol(text[0 ..< text.len - 1])
+
 proc bindParams(cmd: Object, argObjs: seq[Object], callerEnv: ref Environment,
     child: ref Environment) {.raises.} =
   let params = cmdParams(cmd)
+  var fixed = params.len
+  var rest = nothing()
+  if not isFun(cmd) and params.len > 0:
+    rest = restName(params[^1])
+    if not rest.isNothing:
+      fixed = params.len - 1
   var pos = 0
+  var extras: seq[Object] = @[]
   for a in argObjs:
     var name = a
     var value = a
+    if not rest.isNothing and pos >= fixed:
+      extras.add a
+      continue
     if isPair(a) and isSymbol(car(a)):
       name = car(a)
       value = cdr(a)
       if isFun(cmd):
         value = eval(value, callerEnv)
     else:
-      if pos >= params.len:
+      if pos < fixed:
+        name = paramName(params[pos])
+        inc pos
+        if isFun(cmd):
+          value = eval(value, callerEnv)
+      elif rest.isNothing:
         err("too many arguments for " & cmdName(cmd))
-      name = paramName(params[pos])
-      inc pos
-      if isFun(cmd):
-        value = eval(value, callerEnv)
+      else:
+        extras.add a
+        continue
     define(child, name, value)
+  if not rest.isNothing:
+    define(child, rest, list(extras))
   for p in params:
     if isPair(p):
       let name = car(p)
