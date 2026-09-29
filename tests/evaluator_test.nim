@@ -399,4 +399,42 @@ expect noField, "field needs a record"
 expect find(lastError(), "field needs a record") >= 0,
   "field says it needs a record, got: " & lastError()
 
+let e18 = runOk("""
+xs = [] 1 2 3
+a = append xs 4 5
+afterAppend = length xs
+p = pop xs
+pf = pop-front xs
+i = insert xs 1 99
+pre = prepend xs 0 7
+final = length xs
+""", "")
+expect stringify(value(e18, "a")) == "[] 1 2 3 4 5", "append returns the grown list"
+expect toNumber(value(e18, "afterAppend")) == 5.0, "append mutates the variable in place"
+expect toNumber(value(e18, "p")) == 5.0, "pop returns the last element"
+expect toNumber(value(e18, "pf")) == 1.0, "pop-front returns the first element"
+expect stringify(value(e18, "i")) == "[] 2 99 3 4", "insert places a value at a position"
+expect stringify(value(e18, "pre")) == "[] 0 7 2 99 3 4", "prepend adds values at the front"
+expect toNumber(value(e18, "final")) == 6.0, "the commands keep mutating the same list"
+
+var popEmpty = false
+clearCaptured()
+try:
+  discard runSrc("xs = ([])\npop xs", "")
+except:
+  popEmpty = true
+expect popEmpty, "pop from an empty list fails"
+expect find(lastError(), "pop from an empty list") >= 0,
+  "pop reports the empty list, got: " & lastError()
+
+var appendNoList = false
+clearCaptured()
+try:
+  discard runSrc("n = 4\nappend n 1", "")
+except:
+  appendNoList = true
+expect appendNoList, "append needs a list variable"
+expect find(lastError(), "append needs a list variable") >= 0,
+  "append says it needs a list, got: " & lastError()
+
 finish "evaluator"

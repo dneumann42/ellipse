@@ -1,4 +1,4 @@
-import std/[syncio, cmdline]
+import std/[syncio, cmdline, options]
 import owl/[objects, evaluator, modules]
 
 proc quoteBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
@@ -186,6 +186,83 @@ proc fieldBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
     err("field needs a name, got " & stringify(key))
   field(o, nameOf(key))
 
+proc listVar(env: ref Environment, form: Object, what: string): Object {.raises.} =
+  if not isSymbol(form):
+    err(what & " needs a variable name")
+  let found = lookup(env, form)
+  if found.isNone:
+    err(what & " needs a defined variable: " & toSymbol(form))
+  result = found.get()
+  if not isList(result):
+    err(what & " needs a list variable, got " & stringify(result))
+
+proc storeList(env: ref Environment, name: Object, items: seq[Object]) =
+  discard assign(env, name, list(items))
+
+proc appendBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len < 1:
+    err("append needs a variable")
+  var items = toSeq(listVar(env, args[0], "append"))
+  for i in 1 ..< args.len:
+    items.add eval(args[i], env)
+  storeList(env, args[0], items)
+  list(items)
+
+proc prependBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len < 1:
+    err("prepend needs a variable")
+  var items: seq[Object] = @[]
+  for i in 1 ..< args.len:
+    items.add eval(args[i], env)
+  for x in toSeq(listVar(env, args[0], "prepend")):
+    items.add x
+  storeList(env, args[0], items)
+  list(items)
+
+proc insertBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len < 2:
+    err("insert needs a variable and a position")
+  let items = toSeq(listVar(env, args[0], "insert"))
+  let key = eval(args[1], env)
+  let at = positionOf(key)
+  if at < 0:
+    err("insert needs a whole number position, got " & stringify(key))
+  if at > items.len:
+    err("insert position out of range: " & stringify(key))
+  var grown: seq[Object] = @[]
+  for i in 0 ..< at:
+    grown.add items[i]
+  for i in 2 ..< args.len:
+    grown.add eval(args[i], env)
+  for i in at ..< items.len:
+    grown.add items[i]
+  storeList(env, args[0], grown)
+  list(grown)
+
+proc popBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len != 1:
+    err("pop needs one variable")
+  let items = toSeq(listVar(env, args[0], "pop"))
+  if items.len == 0:
+    err("pop from an empty list")
+  result = items[^1]
+  var rest: seq[Object] = @[]
+  for i in 0 ..< items.len - 1:
+    rest.add items[i]
+  storeList(env, args[0], rest)
+
+proc popFrontBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len != 1:
+    err("pop-front needs one variable")
+  let items = toSeq(listVar(env, args[0], "pop-front"))
+  if items.len == 0:
+    err("pop-front from an empty list")
+  result = items[0]
+  var rest: seq[Object] = @[]
+  for i in 1 ..< items.len:
+    rest.add items[i]
+  storeList(env, args[0], rest)
+
 proc argvValue(): Object =
   var xs: seq[Object] = @[]
   for i in 1 .. paramCount():
@@ -211,6 +288,11 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("length"), newBuiltin("length", lengthBuiltin, true))
   define(env, symbol("index"), newBuiltin("index", indexBuiltin, true))
   define(env, symbol("field"), newBuiltin("field", fieldBuiltin, true))
+  define(env, symbol("append"), newBuiltin("append", appendBuiltin, false))
+  define(env, symbol("prepend"), newBuiltin("prepend", prependBuiltin, false))
+  define(env, symbol("insert"), newBuiltin("insert", insertBuiltin, false))
+  define(env, symbol("pop"), newBuiltin("pop", popBuiltin, false))
+  define(env, symbol("pop-front"), newBuiltin("pop-front", popFrontBuiltin, false))
 
 proc baseModule*(): Module =
   result = newModule("base")

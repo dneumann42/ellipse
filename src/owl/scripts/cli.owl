@@ -2,13 +2,17 @@ use io
 use base
 use math
 
-add = λ a:
-    λ b:
-        echo:
-            "A: " 
-            a 
-            " B: " 
-            b
-        + a b
+fun cli-parser:
+    args = argv
+    lambda:
+        if (= (length args) 0):
+            nothing
+            do:
+                echo "GRABBING NEXT"
+                pop-front args
 
-(add 2) 3
+it = (cli-parser)
+
+(it)
+(it)
+(it)

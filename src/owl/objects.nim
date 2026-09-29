@@ -433,3 +433,12 @@ proc lookup*(env: nil ref Environment, name: Object): Option[Object] =
       return some(cur.bindings.getOrDefault(name, nothing()))
     cur = cur.up
   return none[Object]()
+
+proc assign*(env: ref Environment, name, value: Object): bool =
+  var cur: nil ref Environment = env
+  while cur != nil:
+    if cur.bindings.hasKey(name):
+      cur.bindings[name] = value
+      return true
+    cur = cur.up
+  return false
