@@ -2,12 +2,12 @@ import std/result
 import owl/[lexer, objects]
 
 type
-  ItemKind = enum Object, Eq, Colon
+  ItemKind = enum Object, Eq, Colon, Dot
 
   Item = object
     case kind: ItemKind
     of Object: value: objects.Object
-    of Eq, Colon: discard
+    of Eq, Colon, Dot: discard
 
   Parser = object
     lines: seq[Line]
@@ -18,6 +18,9 @@ type
 proc fail(p: var Parser, msg: string) =
   if p.err.len == 0:
     p.err = "line " & $p.num & ": " & msg
+
+func indexCall(target, key: objects.Object): objects.Object =
+  list(@[symbol("index"), target, key])
 
 func tryNumber*(text: string): (bool, float64) =
   var i = 0
@@ -68,6 +71,9 @@ proc assemble(p: var Parser, items: seq[Item], bodyAt: int = -1): objects.Object
     of Colon:
       p.fail("':' must end the line")
       return
+    of Dot:
+      p.fail("'.' needs a value before it")
+      return
 
   var before, after: seq[objects.Object]
   for i in 0 ..< items.len:
@@ -100,6 +106,26 @@ proc assemble(p: var Parser, items: seq[Item], bodyAt: int = -1): objects.Object
     if bodyAt >= 0:
       result.setBodyStart(bodyAt)
 
+proc foldDots(p: var Parser, items: seq[Item]): seq[Item] =
+  result = @[]
+  var i = 0
+  while i < items.len:
+    if items[i].kind == Dot:
+      if result.len == 0 or result[^1].kind != Object:
+        p.fail("'.' needs a value before it")
+        return
+      if i + 1 >= items.len or items[i + 1].kind != Object:
+        p.fail("'.' needs a key after it")
+        return
+      let target = result[^1].value
+      let key = items[i + 1].value
+      result.setLen(result.len - 1)
+      result.add Item(kind: Object, value: indexCall(target, key))
+      i += 2
+    else:
+      result.add items[i]
+      inc i
+
 proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
   result = @[]
   while i < toks.len:
@@ -116,6 +142,9 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
     of Colon:
       result.add Item(kind: Colon)
       inc i
+    of Dot:
+      result.add Item(kind: Dot)
+      inc i
     of Open:
       inc i
       let inner = p.parseItems(toks, i)
@@ -128,6 +157,7 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
       result.add Item(kind: Object, value: p.assemble(inner))
     of Close:
       break
+  result = p.foldDots(result)
 
 proc parseExprs(p: var Parser, base: int): seq[objects.Object] =
   result = @[]

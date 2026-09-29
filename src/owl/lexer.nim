@@ -1,7 +1,7 @@
 import std/strutils
 
 type
-  TokenKind* = enum Word, Str, Open, Close, Eq, Colon
+  TokenKind* = enum Word, Str, Open, Close, Eq, Colon, Dot
 
   Token* = object
     kind*: TokenKind
@@ -18,11 +18,19 @@ type
 
 const
   Delimiters = {' ', '\t', '(', ')', ';', ':', '=', '"'}
+  Digits = {'0' .. '9'}
 
 func indentOf*(text: string): int =
   result = 0
   while result < text.len and text[result] in {' ', '\t'}:
     inc result
+
+func numberDot(text: string, at: int): bool =
+  if text[at - 1] notin Digits:
+    return false
+  if at + 1 >= text.len:
+    return true
+  return text[at + 1] in Digits or text[at + 1] in Delimiters
 
 proc fail(t: var Tokenizer, msg: string) {.raises.} =
   if t.err.len == 0:
@@ -62,9 +70,17 @@ proc tokenize*(t: var Tokenizer, text: string): seq[Token] {.raises.} =
         t.fail("unterminated string")
       result.add Token(kind: Str, text: text[i + 1 ..< j])
       i = j + 1
+    of '.':
+      result.add Token(kind: Dot)
+      inc i
     else:
       var j = i + 1
+      var dotted = false
       while j < text.len and text[j] notin Delimiters:
+        if text[j] == '.':
+          if dotted or not numberDot(text, j):
+            break
+          dotted = true
         inc j
       result.add Token(kind: Word, text: text[i ..< j])
       i = j

@@ -30,6 +30,23 @@ res = + 1 2
 """))
   expect toNumber(value(env, "res")) == 3.0, "use base and math provide the internal commands"
 
+proc indexedWorks() {.raises.} =
+  let lib = newLibrary("t12")
+  add(lib, baseModule())
+  let env = runProgram(lib, parseForms("""
+use base
+
+r = {}:
+  a = [] 4 5
+
+v = r.a.1
+n = length r.a
+f = field r "a"
+"""))
+  expect toNumber(value(env, "v")) == 5.0, "use base provides index for the dot syntax"
+  expect toNumber(value(env, "n")) == 2.0, "use base provides length"
+  expect stringify(value(env, "f")) == "[] 4 5", "use base provides field"
+
 proc exportUseWorks() {.raises.} =
   let lib = newLibrary("t2")
   add(lib, baseModule())
@@ -171,6 +188,7 @@ b = nim-double 5
   expect toNumber(value(env, "b")) == 10.0, "internal builtin in the same mixed module"
 
 check("base", baseWorks)
+check("index/length/field", indexedWorks)
 check("export/use", exportUseWorks)
 check("recursive", recursiveWorks)
 check("self use", selfUseWorks)

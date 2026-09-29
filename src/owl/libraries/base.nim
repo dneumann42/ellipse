@@ -1,4 +1,4 @@
-import std/syncio
+import std/[syncio, cmdline]
 import owl/[objects, evaluator, modules]
 
 proc quoteBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
@@ -61,7 +61,97 @@ proc listBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises
     xs.add eval(form, env)
   list(xs)
 
+proc hasLength(o: Object): bool =
+  isList(o) or isRecord(o) or isString(o) or isPair(o)
+
+proc lengthOf(o: Object): int =
+  result = 0
+  if isList(o):
+    result = toSeq(o).len
+  elif isRecord(o):
+    result = recordFields(o).len
+  elif isString(o):
+    result = toStr(o).len
+  elif isPair(o):
+    result = 2
+
+proc lengthBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  if args.len != 1:
+    err("length needs one argument")
+  let o = eval(args[0], env)
+  if not hasLength(o):
+    err("length needs something with a length, got " & stringify(o))
+  number(float64(lengthOf(o)))
+
+proc nameOf(key: Object): string =
+  result = ""
+  if isSymbol(key):
+    result = toSymbol(key)
+  elif isString(key):
+    result = toStr(key)
+
+proc positionOf(key: Object): int =
+  result = -1
+  if isNumber(key):
+    let n = toNumber(key)
+    if n >= 0.0 and n == float64(int64(n)):
+      result = int(n)
+
+proc keyOf(env: ref Environment, form: Object): Object {.raises.} =
+  result = form
+  if not isSymbol(form):
+    result = eval(form, env)
+
+proc indexAt(o: Object, key: Object): Object {.raises.} =
+  let name = nameOf(key)
+  if name.len > 0:
+    if isRecord(o):
+      return field(o, name)
+    err("index needs a record for a name, got " & stringify(o))
+  let at = positionOf(key)
+  if at < 0:
+    if isNumber(key):
+      err("index needs a whole number position, got " & stringify(key))
+    err("index needs a number or a name key, got " & stringify(key))
+  if not hasLength(o):
+    err("index needs something with a length, got " & stringify(o))
+  if at >= lengthOf(o):
+    err("index out of range: " & stringify(key) & " for " & stringify(o))
+  if isPair(o):
+    result = if at == 0: car(o) else: cdr(o)
+  elif isString(o):
+    result = str(toStr(o)[at .. at])
+  elif isRecord(o):
+    result = recordFields(o)[at]
+  else:
+    result = toSeq(o)[at]
+
+proc indexBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  if args.len < 2:
+    err("index needs a value and a key")
+  result = eval(args[0], env)
+  for i in 1 ..< args.len:
+    result = indexAt(result, keyOf(env, args[i]))
+
+proc fieldBuiltin(env: ref Environment, args, body: seq[Object]): Object {.raises.} =
+  if args.len != 2:
+    err("field needs a record and a name")
+  let o = eval(args[0], env)
+  let key = keyOf(env, args[1])
+  if not isRecord(o):
+    err("field needs a record, got " & stringify(o))
+  if nameOf(key).len == 0:
+    err("field needs a name, got " & stringify(key))
+  field(o, nameOf(key))
+
+proc argvValue(): Object =
+  var xs: seq[Object] = @[]
+  for i in 1 .. paramCount():
+    xs.add str(paramStr(i))
+  list(xs)
+
 proc installBase*(env: ref Environment) =
+  define(env, symbol("argv"), argvValue())
   define(env, symbol("quote"), newBuiltin("quote", quoteBuiltin, false))
   define(env, symbol("eval"), newBuiltin("eval", evalBuiltin, false))
   define(env, symbol("if"), newBuiltin("if", ifBuiltin, false))
@@ -69,6 +159,9 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("command"), newBuiltin("command", commandBuiltin, false))
   define(env, symbol("{}"), newBuiltin("{}", recordBuiltin, true))
   define(env, symbol("[]"), newBuiltin("[]", listBuiltin, true))
+  define(env, symbol("length"), newBuiltin("length", lengthBuiltin, true))
+  define(env, symbol("index"), newBuiltin("index", indexBuiltin, true))
+  define(env, symbol("field"), newBuiltin("field", fieldBuiltin, true))
 
 proc baseModule*(): Module =
   result = newModule("base")

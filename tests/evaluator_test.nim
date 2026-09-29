@@ -200,4 +200,127 @@ expect stringify(value(e13, "r")) == "{} (a = 1) (b = [] 1 2)", "record from pai
 expect stringify(value(e13, "l")) == "[] 1 2", "list from arguments"
 expect stringify(value(e13, "nested")) == "{} (p = {} (q = 7))", "nested records"
 
+let e14 = runOk("""
+xs = [] 10 20 30
+s = "hello"
+r = {}:
+  a = "one"
+  b = xs
+n = {}:
+  p = {}:
+    q = 7
+
+recs = []:
+  {}:
+    k = "one"
+  {}:
+    k = "two"
+
+pair = quote (a = 2)
+
+first = xs.0
+last = xs.2
+mid = s.1
+fieldName = r.a
+deep = r.b.1
+chain = n.p.q
+byGroup = xs.(+ 0 1)
+afterGroup = recs.(+ 0 1).k
+letter = s.(+ 0 2).0
+byName = index r b 1
+literal = r.0
+
+lxs = length xs
+ls = length s
+lr = length r
+ln = length n
+lp = length pair
+
+p0 = pair.0
+p1 = pair.1
+""", "")
+expect toNumber(value(e14, "first")) == 10.0, "a dot with a position reads a list"
+expect toNumber(value(e14, "last")) == 30.0, "the last position"
+expect stringify(value(e14, "mid")) == "e", "a dot reads a string"
+expect stringify(value(e14, "fieldName")) == "one", "a dot reads a record field"
+expect toNumber(value(e14, "deep")) == 20.0, "a dot chains into a field value"
+expect toNumber(value(e14, "chain")) == 7.0, "dot chains through records"
+expect toNumber(value(e14, "byGroup")) == 20.0, "a group is a computed key"
+expect stringify(value(e14, "afterGroup")) == "two", "a group key chains into a name"
+expect stringify(value(e14, "letter")) == "l", "a group key chains into a position"
+expect toNumber(value(e14, "byName")) == 20.0, "index chains over several keys"
+expect stringify(value(e14, "literal")) == "(a = one)", "a record position is its field"
+expect toNumber(value(e14, "lxs")) == 3.0, "length of a list"
+expect toNumber(value(e14, "ls")) == 5.0, "length of a string"
+expect toNumber(value(e14, "lr")) == 2.0, "length of a record"
+expect toNumber(value(e14, "ln")) == 1.0, "length of a one field record"
+expect toNumber(value(e14, "lp")) == 2.0, "length of a pair"
+expect toSymbol(value(e14, "p0")) == "a", "car of a pair by position"
+expect toNumber(value(e14, "p1")) == 2.0, "cdr of a pair by position"
+
+let e15 = runOk("""
+fun double x:
+  * x 2
+
+ops = {}:
+  f = double
+
+v = ops.f 21
+w = ops.f (ops.f 3)
+named = field ops "f"
+""", "")
+expect toNumber(value(e15, "v")) == 42.0, "a field is just a command, callable through the dot"
+expect toNumber(value(e15, "w")) == 12.0, "a dotted call nests"
+expect isCommand(value(e15, "named")), "field reads the record by name"
+
+var noLen = false
+clearCaptured()
+try:
+  discard runSrc("x = length 42", "")
+except:
+  noLen = true
+expect noLen, "length refuses what has no length"
+expect find(lastError(), "length needs something with a length") >= 0,
+  "length says what it needs, got: " & lastError()
+
+var badRange = false
+clearCaptured()
+try:
+  discard runSrc("xs = [] 1 2\nx = xs.2", "")
+except:
+  badRange = true
+expect badRange, "a position past the end fails"
+expect find(lastError(), "index out of range") >= 0,
+  "index reports the range, got: " & lastError()
+
+var badPos = false
+clearCaptured()
+try:
+  discard runSrc("xs = [] 1 2\nx = xs.1.5", "")
+except:
+  badPos = true
+expect badPos, "a fractional position fails"
+expect find(lastError(), "index needs a whole number position") >= 0,
+  "index reports the position, got: " & lastError()
+
+var nameOnList = false
+clearCaptured()
+try:
+  discard runSrc("xs = [] 1 2\nx = xs.a", "")
+except:
+  nameOnList = true
+expect nameOnList, "a name key needs a record"
+expect find(lastError(), "index needs a record for a name") >= 0,
+  "index says a name needs a record, got: " & lastError()
+
+var noField = false
+clearCaptured()
+try:
+  discard runSrc("x = field 42 \"a\"", "")
+except:
+  noField = true
+expect noField, "field needs a record"
+expect find(lastError(), "field needs a record") >= 0,
+  "field says it needs a record, got: " & lastError()
+
 finish "evaluator"

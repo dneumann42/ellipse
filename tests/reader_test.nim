@@ -58,6 +58,15 @@ expect kinds("a\tb") == @[Word, Word], "tab splits words"
 expect kinds("a(b)c") == @[Word, Open, Word, Close, Word], "punctuation splits without spaces"
 expect kinds("= :") == @[Eq, Colon], "punctuation tokens"
 expect kinds("2.5") == @[Word], "dot is part of a word"
+expect kinds("5.") == @[Word], "dot ending a word is part of the number"
+expect kinds(".5") == @[Dot, Word], "a number needs its digits before the dot"
+expect kinds("a.b") == @[Word, Dot, Word], "dot between words splits them"
+expect kinds("a.5") == @[Word, Dot, Word], "dot indexes with a number"
+expect kinds("2.b") == @[Word, Dot, Word], "a name after the dot is a key"
+expect kinds("r.2.b") == @[Word, Dot, Word, Dot, Word], "a number between dots still chains"
+expect kinds("1.2.3") == @[Word, Dot, Word], "only one dot per number"
+expect kinds("(f 1).2") == @[Open, Word, Word, Close, Dot, Word], "dot after a group"
+expect kinds("\"ab\".1") == @[Str, Dot, Word], "dot after a string"
 expect kinds("a ; comment") == @[Word], "comment cuts the line"
 expect kinds(";x").len == 0, "comment-only text"
 expect kinds("a")[0] == Word and toks("a")[0].text == "a", "word keeps its text"
@@ -118,6 +127,29 @@ fs = forms("a (b c)")
 expect toSeq(fs[0]).len == 2, "group is one argument"
 expect toSeq(toSeq(fs[0])[1]).len == 2, "the group is a list"
 expect forms("a (b (c))") == forms("a (b c)"), "nested groups flatten"
+
+fs = forms("a.b")
+expect fs[0] == forms("index a b")[0], "dot is syntax for the index command"
+expect toSeq(fs[0]).len == 3, "a.b is one index call"
+expect toSymbol(toSeq(fs[0])[0]) == "index", "the head is index"
+expect toSymbol(toSeq(fs[0])[2]) == "b", "the key is the name after the dot"
+expect forms("a.b.c") == forms("index (index a b) c"), "indexing chains to the left"
+expect forms("a.b.c.d") == forms("index (index (index a b) c) d"), "chains keep folding"
+expect forms("a.2") == forms("index a 2"), "a dot can carry a position"
+expect forms("a.2.b") == forms("index (index a 2) b"), "positions chain with names"
+expect forms("a.(+ x 1)") == forms("index a (+ x 1)"), "a group is one key"
+expect forms("a.(+ x 1).b") == forms("index (index a (+ x 1)) b"), "a group key chains"
+expect forms("a.(+ x 1).(quote b)") == forms("index (index a (+ x 1)) (quote b)"), "a chain ends in a group key"
+expect forms("a.\"k\"") == forms("index a \"k\""), "a string is one key"
+expect forms("echo a.b") == forms("echo (index a b)"), "a dotted value is one argument"
+expect forms("a.b c") == forms("(index a b) c"), "a dotted value heads a call"
+expect forms("v = a.b")[0] == pair(symbol("v"), forms("index a b")[0]), "dot in a binding"
+expect forms("x = \"a.b\"")[0] == pair(symbol("x"), str("a.b")), "dots inside strings stay"
+expect forms("(f a).b") == forms("index (f a) b"), "dot after a group indexes it"
+expect forms("a.b:\n  c") == forms("(index a b) c"), "a dotted head takes a block"
+
+fs = forms("xs.0")
+expect toNumber(toSeq(fs[0])[2]) == 0.0, "a dotted position is a number"
 
 expect forms("a b:\n  c") == forms("a b c"), "block flattens into the call"
 expect forms("a b:\n\tc") == forms("a b c"), "tab indent works too"
@@ -190,6 +222,14 @@ errIs("echo \"unclosed", "unterminated string")
 errIs("\"", "unterminated string")
 errIs("a\nb \"oops", "line 2: unterminated string")
 errIs("()", "empty expression")
+errIs(".a", "needs a value before")
+errIs("a.", "needs a key after")
+errIs("x = .a", "needs a value before")
+errIs("a.b.", "needs a key after")
+errIs("(a.)", "needs a key after")
+errIs("a.=b", "needs a key after")
+errIs("a..b", "needs a key after")
+errIs("a\nb.c.", "needs a key after")
 errIs("a = ", "missing value")
 errIs("a : b", "must end the line")
 errIs("(a :)", "must end the line")
@@ -208,6 +248,9 @@ proc roundTrips(src: string) =
   expect forms(strip(outp)) == fs, "round trip [" & src & "]"
 
 roundTrips("a b c")
+roundTrips("a.b")
+roundTrips("a.b.c")
+roundTrips("a.2.b")
 roundTrips("x = 5")
 roundTrips("res = factorial (n = 5)")
 roundTrips("a (b c)")

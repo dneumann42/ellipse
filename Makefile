@@ -12,8 +12,15 @@ build: bin/ellipse
 run: build 
 	./bin/ellipse
 
+ifeq ($(firstword $(MAKECMDGOALS)),run_owl)
+OWL_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+%::
+	@:
+endif
+
 run_owl: setup
-	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./src/owl/owl.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/owl/owl.nim
+	./bin/owl $(ARGS) $(OWL_ARGS)
 
 test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/objects_test.nim
@@ -27,4 +34,3 @@ setup: build/nimony/bin/nimony
 clean:
 	rm -rf build/*
 	rm -rf bin/*
-

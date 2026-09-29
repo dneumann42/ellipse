@@ -1,4 +1,12 @@
 use io
+use base
+use math
 
+x = -1
 
+y = {}:
+  a = argv
 
+if (> (length argv) 0):
+  echo y.a.(+ x 1)
+  echo "NO ARGS"
