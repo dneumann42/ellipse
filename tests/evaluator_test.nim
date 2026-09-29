@@ -483,4 +483,124 @@ except:
   tooMany = true
 expect tooMany, "commands without a + parameter still reject extras"
 
+let e22 = runOk("""
+count = 0
+bump = lambda:
+  set count (+ count 1)
+
+(bump)
+(bump)
+twice = set count 10
+""", "")
+expect toNumber(value(e22, "count")) == 10.0, "set updates the binding where it was found"
+expect toNumber(value(e22, "twice")) == 10.0, "set returns the new value"
+
+var setUnbound = false
+clearCaptured()
+try:
+  discard runSrc("set missing 1", "")
+except:
+  setUnbound = true
+expect setUnbound, "set on an unbound symbol is a runtime error"
+expect find(lastError(), "set on an unbound symbol: missing") >= 0,
+  "set reports the missing name, got: " & lastError()
+
+let e23 = runOk("""
+s = concat "ab" "cd" "e"
+a = [] 1 2
+b = [] 3 4
+l = concat a b
+r1 = {} (x = 1)
+r2 = {} (y = 2)
+r = concat r1 r2
+t = true
+f = not false
+""", "")
+expect stringify(value(e23, "s")) == "abcde", "concat joins strings"
+expect stringify(value(e23, "l")) == "[] 1 2 3 4", "concat joins lists"
+expect stringify(value(e23, "r")) == "{} (x = 1) (y = 2)", "concat merges records"
+expect toBool(value(e23, "t")), "true is a boolean literal"
+expect toBool(value(e23, "f")), "false is a boolean literal"
+
+var concatMix = false
+clearCaptured()
+try:
+  discard runSrc("x = concat \"a\" ([])", "")
+except:
+  concatMix = true
+expect concatMix, "concat refuses to mix a string with a list"
+expect find(lastError(), "concat mixes a string with") >= 0,
+  "concat names the kind it mixed, got: " & lastError()
+
+var concatBad = false
+clearCaptured()
+try:
+  discard runSrc("x = concat 1 2", "")
+except:
+  concatBad = true
+expect concatBad, "concat rejects operands that are not string/list/record"
+expect find(lastError(), "concat needs strings, lists or records") >= 0,
+  "concat says what it accepts, got: " & lastError()
+
+var raised = false
+clearCaptured()
+try:
+  discard runSrc("error \"boom\" \"here\"", "")
+except:
+  raised = true
+expect raised, "error raises a runtime error"
+expect find(lastError(), "boom here") >= 0,
+  "error joins its message parts, got: " & lastError()
+
+let e24 = runOk("""
+o1 = or 5 6
+o2 = or nothing 6
+o3 = or false 7
+a1 = and 5 6
+a2 = and nothing 6
+w = 0
+when true:
+  set w 1
+u = 0
+unless false:
+  set u 2
+ie = is-empty ([])
+ia = is-any ([] 1)
+f = first ([] 8 9)
+mn = min 3 5
+mx = max 3 5
+in1 = is-nothing nothing
+in2 = is-nothing 5
+""", "")
+expect toNumber(value(e24, "o1")) == 5.0, "or returns the first truthy operand"
+expect toNumber(value(e24, "o2")) == 6.0, "or skips nothing"
+expect toNumber(value(e24, "o3")) == 7.0, "or skips false"
+expect toNumber(value(e24, "a1")) == 6.0, "and returns the second when the first is truthy"
+expect isNothing(value(e24, "a2")), "and short-circuits on a falsy first operand"
+expect toNumber(value(e24, "w")) == 1.0, "when runs its block when the condition holds"
+expect toNumber(value(e24, "u")) == 2.0, "unless runs its block when the condition fails"
+expect toBool(value(e24, "ie")), "is-empty on an empty list"
+expect toBool(value(e24, "ia")), "is-any on a non-empty list"
+expect toNumber(value(e24, "f")) == 8.0, "first returns the head"
+expect toNumber(value(e24, "mn")) == 3.0, "min picks the smaller"
+expect toNumber(value(e24, "mx")) == 5.0, "max picks the larger"
+expect toBool(value(e24, "in1")), "is-nothing on nothing"
+expect not toBool(value(e24, "in2")), "is-nothing on a value"
+
+var orShort = false
+clearCaptured()
+try:
+  discard runSrc("x = or 5 (error \"boom\")", "")
+except:
+  orShort = true
+expect not orShort, "or does not evaluate its second operand when the first is truthy"
+
+var andShort = false
+clearCaptured()
+try:
+  discard runSrc("x = and nothing (error \"boom\")", "")
+except:
+  andShort = true
+expect not andShort, "and does not evaluate its second operand when the first is falsy"
+
 finish "evaluator"

@@ -1,5 +1,5 @@
-import std/[syncio, cmdline, options]
-import owl/[objects, evaluator, modules]
+import std/[syncio, cmdline, options, strutils]
+import owl/[objects, evaluator, reader, modules]
 
 proc quoteBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len == 0:
@@ -35,6 +35,59 @@ proc whileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
   while toBool(eval(args[0], env)):
     discard evalForms(env, args[bodyStart ..< args.len])
   nothing()
+
+proc concatBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len == 0:
+    err("concat needs at least one argument")
+  let first = eval(args[0], env)
+  if isString(first):
+    var joined = toStr(first)
+    for i in 1 ..< args.len:
+      let v = eval(args[i], env)
+      if not isString(v):
+        err("concat mixes a string with " & stringify(v))
+      joined.add toStr(v)
+    result = str(joined)
+  elif isList(first):
+    var joined = toSeq(first)
+    for i in 1 ..< args.len:
+      let v = eval(args[i], env)
+      if not isList(v):
+        err("concat mixes a list with " & stringify(v))
+      for x in toSeq(v):
+        joined.add x
+    result = list(joined)
+  elif isRecord(first):
+    var joined = recordFields(first)
+    for i in 1 ..< args.len:
+      let v = eval(args[i], env)
+      if not isRecord(v):
+        err("concat mixes a record with " & stringify(v))
+      for x in recordFields(v):
+        joined.add x
+    result = record(joined)
+  else:
+    err("concat needs strings, lists or records, got " & stringify(first))
+    result = nothing()
+
+proc errorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  var parts: seq[string] = @[]
+  for a in args:
+    parts.add stringify(eval(a, env))
+  err(parts.join(" "))
+
+proc setBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len != 2:
+    err("set needs a name and a value")
+  var key = args[0]
+  if not isSymbol(key):
+    key = eval(key, env)
+  if not isSymbol(key):
+    err("set needs a symbol name, got " & stringify(key))
+  let value = eval(args[1], env)
+  if not assign(env, key, value):
+    err("set on an unbound symbol: " & toSymbol(key))
+  value
 
 proc pairBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len != 2:
@@ -293,12 +346,19 @@ proc argvValue(): Object =
     xs.add str(paramStr(i))
   list(xs)
 
+proc installBaseOwl*(env: ref Environment)
+
 proc installBase*(env: ref Environment) =
   define(env, symbol("argv"), argvValue())
   define(env, symbol("nothing"), nothing())
+  define(env, symbol("true"), boolean(true))
+  define(env, symbol("false"), boolean(false))
+  define(env, symbol("concat"), newBuiltin("concat", concatBuiltin, true))
+  define(env, symbol("error"), newBuiltin("error", errorBuiltin, false))
   define(env, symbol("do"), newBuiltin("do", doBuiltin, false))
   define(env, symbol("while"), newBuiltin("while", whileBuiltin, false))
   define(env, symbol("pair"), newBuiltin("pair", pairBuiltin, false))
+  define(env, symbol("set"), newBuiltin("set", setBuiltin, false))
   define(env, symbol("quote"), newBuiltin("quote", quoteBuiltin, false))
   define(env, symbol("eval"), newBuiltin("eval", evalBuiltin, false))
   define(env, symbol("if"), newBuiltin("if", ifBuiltin, false))
@@ -321,6 +381,25 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("insert"), newBuiltin("insert", insertBuiltin, false))
   define(env, symbol("pop"), newBuiltin("pop", popBuiltin, false))
   define(env, symbol("pop-front"), newBuiltin("pop-front", popFrontBuiltin, false))
+  installBaseOwl(env)
+
+proc installBaseOwl*(env: ref Environment) =
+  # Merge the owl half of base into the same env as the Nim builtins, so that
+  # `use base` exports both. base.owl uses only base primitives and never a
+  # number from another module; base is the bottom of the stack.
+  # NOTE: Nimony has no staticRead/includeStr, so this is a runtime read.
+  var source = ""
+  try:
+    source = readFile("src/owl/libraries/base.owl")
+  except:
+    source = ""
+  let parsed = parseOwl(source)
+  if parsed.isOk:
+    for f in parsed.get(@[]):
+      if isDefinition(f, "command"):
+        makeDefinition(env, f, false)
+      elif isDefinition(f, "fun"):
+        makeDefinition(env, f, true)
 
 proc baseModule*(): Module =
   result = newModule("base")

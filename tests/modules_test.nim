@@ -310,4 +310,95 @@ for a (range 2):
 
 check("iterators library", iteratorsWork)
 
+proc stringsWorks() {.raises.} =
+  let lib = newLibrary("t17")
+  add(lib, baseModule())
+  add(lib, mathModule())
+  add(lib, newModule("strings").addFile("src/owl/libraries/strings.owl"))
+  let env = runProgram(lib, parseForms("""
+use base
+use math
+use strings
+
+yes = starts-with "hello" "he"
+no = starts-with "hello" "lo"
+short = starts-with "he" "hello"
+at = find-char "hello" "l"
+none = find-char "hello" "z"
+t = take "hello" 2
+d = drop "hello" 3
+"""))
+  expect toBool(value(env, "yes")), "starts-with matches a prefix"
+  expect not toBool(value(env, "no")), "starts-with rejects a non-prefix"
+  expect not toBool(value(env, "short")), "starts-with is false when the string is shorter"
+  expect toNumber(value(env, "at")) == 2.0, "find-char returns the first index"
+  expect isNothing(value(env, "none")), "find-char returns nothing when absent"
+  expect stringify(value(env, "t")) == "he", "take keeps the first characters"
+  expect stringify(value(env, "d")) == "lo", "drop removes the first characters"
+
+check("strings library", stringsWorks)
+
+proc newCmdlineLib(name: string): Library {.raises.} =
+  result = newLibrary(name)
+  add(result, baseModule())
+  add(result, mathModule())
+  add(result, newModule("strings").addFile("src/owl/libraries/strings.owl"))
+  add(result, newModule("cmdline").addFile("src/owl/libraries/cmdline.owl"))
+
+proc cmdlineWorks() {.raises.} =
+  let env = runProgram(newCmdlineLib("t15"), parseForms("""
+use base
+use math
+use cmdline
+
+cmd = parse-arg "myprog"
+short = parse-arg "-f"
+long = parse-arg "--flag"
+val = parse-arg "--flag=123"
+eqempty = parse-arg "--flag="
+it = cli-parser
+"""))
+  expect stringify(value(env, "cmd")) == "{} (type = cmd) (name = myprog)", "a bare word parses as a cmd"
+  expect stringify(value(env, "short")) == "{} (type = short-flag) (flag = f)", "a dash word parses as a short-flag"
+  expect stringify(value(env, "long")) == "{} (type = long-flag) (flag = flag)", "a double-dash word parses as a long-flag"
+  expect stringify(value(env, "val")) == "{} (type = flag-value) (flag = flag) (value = 123)", "equals splits the flag from its value"
+  expect stringify(value(env, "eqempty")) == "{} (type = flag-value) (flag = flag) (value = )", "an empty value is preserved"
+  expect isCommand(value(env, "it")), "cli-parser is exported as an iterator command"
+
+proc cmdlineErrors() {.raises.} =
+  let lib = newCmdlineLib("t16")
+  var raised = false
+  clearCaptured()
+  try:
+    discard runProgram(lib, parseForms("""
+use cmdline
+x = parse-arg "-"
+"""))
+  except:
+    raised = true
+  expect raised, "a bare dash is a runtime error"
+  expect find(lastError(), "a flag needs a name") >= 0,
+    "the parser names the problem, got: " & lastError()
+
+check("cmdline library", cmdlineWorks)
+check("cmdline errors", cmdlineErrors)
+
+proc baseOwlWorks() {.raises.} =
+  let lib = newLibrary("t18")
+  add(lib, baseModule())
+  let env = runProgram(lib, parseForms("""
+use base
+
+m = max 2 9
+o = or false 4
+has = is-any ([] 1)
+f = first ([] 7 8)
+"""))
+  expect toNumber(value(env, "m")) == 9.0, "base.owl defs merge into the base module"
+  expect toNumber(value(env, "o")) == 4.0, "owl-defined or is exported through use base"
+  expect toBool(value(env, "has")), "owl-defined is-any is exported through use base"
+  expect toNumber(value(env, "f")) == 7.0, "owl-defined first is exported through use base"
+
+check("base owl merge", baseOwlWorks)
+
 finish "modules"

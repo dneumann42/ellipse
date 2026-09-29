@@ -8,6 +8,8 @@ proc start() {.raises.} =
   lib.add mathModule()
   lib.add ioModule()
   lib.add newModule("iterators").addFile("src/owl/libraries/iterators.owl")
+  lib.add newModule("strings").addFile("src/owl/libraries/strings.owl")
+  lib.add newModule("cmdline").addFile("src/owl/libraries/cmdline.owl")
   lib.add newModule("cli").addFile("src/owl/scripts/cli.owl")
   evaluate(lib)
 

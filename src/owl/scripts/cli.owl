@@ -1,18 +1,7 @@
 use io
 use base
-use math
+use iterators
+use cmdline
 
-fun cli-parser:
-    args = argv
-    lambda:
-        if (= (length args) 0):
-            nothing
-            do:
-                echo "GRABBING NEXT"
-                pop-front args
-
-it = (cli-parser)
-
-(it)
-(it)
-(it)
+for tok (cli-parser):
+    print tok.type tok.name tok.flag tok.value
