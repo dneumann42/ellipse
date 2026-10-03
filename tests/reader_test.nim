@@ -173,6 +173,13 @@ expect toSymbol(items[0]) == "factorial", "call head"
 expect toSymbol(car(items[1])) == "n" and toNumber(cdr(items[1])) == 5.0, "named argument is a pair"
 expect forms("x = f:\n  a b")[0] ==
   pair(symbol("x"), list(@[symbol("f"), list(@[symbol("a"), symbol("b")])])), "binding with a block"
+expect forms("(= it 1) = echo \"hi\"")[0] ==
+  pair(list(@[symbol("="), symbol("it"), number(1.0)]), list(@[symbol("echo"), str("hi")])),
+  "a grouped call may head a binding"
+expect forms("(a) = b")[0] == pair(list(@[symbol("a")]), symbol("b")), "a grouped name heads a binding as a call"
+expect forms("(<> it 1) = e:\n  f")[0] ==
+  pair(list(@[symbol("<>"), symbol("it"), number(1.0)]), list(@[symbol("e"), symbol("f")])),
+  "a grouped call binding keeps its block"
 
 fs = forms("= 1 1")
 expect fs[0] == list(@[symbol("="), number(1.0), number(1.0)]), "a leading '=' is the equality command"
@@ -230,8 +237,8 @@ errIs("a b\n  c", "indentation")
 errIs("  indented", "indentation")
 errIs("a:\n  b\n    c", "indentation")
 errIs("x = a = b", "repeated")
-errIs("a b = c", "single name")
-errIs("= a = b", "single name")
+errIs("a b = c", "name or a grouped call")
+errIs("= a = b", "name or a grouped call")
 errIs("(a b", "expected ')'")
 errIs("a b)", "unexpected ')'")
 errIs("echo \"unclosed", "unterminated string")

@@ -16,14 +16,6 @@ command or a b:
         va
         eval b
 
-command when cond body+:
-    if (eval cond):
-        do:
-            forms = body
-            while (not (= (length forms) 0)):
-                eval (pop-front forms)
-        nothing
-
 command unless cond body+:
     if (eval cond):
         nothing

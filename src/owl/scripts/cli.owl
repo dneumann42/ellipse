@@ -3,5 +3,14 @@ use base
 use iterators
 use cmdline
 
-for tok (cli-parser):
-    print tok.type tok.name tok.flag tok.value
+cli = (cli-parser)
+it = (cli)
+
+when (<> it.type "cmd"):
+    error "YOU SUCK ASSHOLE"
+
+cond:
+    (= it.type "cmd") = echo "CMD"
+    (= it.type "flag") = echo "FLAG"
+    (= it.type "floob") = echo "FLOOB"
+    true = echo "ELSE"

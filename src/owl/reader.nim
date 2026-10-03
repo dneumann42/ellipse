@@ -102,8 +102,10 @@ proc assemble(p: var Parser, items: seq[Item], bodyAt: int = -1): objects.Object
         before.add value
 
   if eqAt >= 0:
-    if before.len != 1 or toSymbol(before[0]) == "":
-      p.fail("a binding needs a single name on the left of '='")
+    # The left of '=' is a raw symbol (a name to bind) or a grouped call, which
+    # stays unevaluated in the pair: commands like 'cond' test the call themselves.
+    if before.len != 1 or (toSymbol(before[0]) == "" and not isList(before[0])):
+      p.fail("a binding needs a name or a grouped call on the left of '='")
       return
     if after.len == 0:
       p.fail("missing value after '='")

@@ -27,6 +27,7 @@ test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/reader_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/evaluator_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/modules_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/kiwiberry_test.nim
 
 setup: build/nimony/bin/nimony
 	@echo "Nimony is ready"

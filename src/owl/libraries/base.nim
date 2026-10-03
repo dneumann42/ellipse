@@ -1,5 +1,8 @@
-import std/[syncio, cmdline, options, strutils]
+import std/[cmdline, options, strutils]
 import owl/[objects, evaluator, reader, modules]
+
+# Compile-time file embedding via a Nimony template plugin (see deps/embedFile.nim).
+template embedFile(path: string): string {.plugin: "deps/embedFile".}
 
 proc quoteBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len == 0:
@@ -35,6 +38,27 @@ proc whileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
   while toBool(eval(args[0], env)):
     discard evalForms(env, args[bodyStart ..< args.len])
   nothing()
+
+proc whenBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len == 0:
+    err("when needs a condition")
+  if bodyStart >= args.len:
+    err("when needs at least one body form")
+  if toBool(eval(args[0], env)):
+    evalForms(env, args[bodyStart ..< args.len])
+  else:
+    nothing()
+
+proc condBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # Each argument is an unevaluated pair (test = body). The test is either a raw
+  # symbol (evaluated as a value, e.g. 'true' for the else branch) or a grouped
+  # call kept syntactically by the reader. The first truthy test runs its body.
+  result = nothing()
+  for form in args:
+    if not isPair(form):
+      err("cond needs (test = body) pairs")
+    if toBool(eval(car(form), env)):
+      return eval(cdr(form), env)
 
 proc concatBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len == 0:
@@ -357,6 +381,8 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("error"), newBuiltin("error", errorBuiltin, false))
   define(env, symbol("do"), newBuiltin("do", doBuiltin, false))
   define(env, symbol("while"), newBuiltin("while", whileBuiltin, false))
+  define(env, symbol("when"), newBuiltin("when", whenBuiltin, false))
+  define(env, symbol("cond"), newBuiltin("cond", condBuiltin, false))
   define(env, symbol("pair"), newBuiltin("pair", pairBuiltin, false))
   define(env, symbol("set"), newBuiltin("set", setBuiltin, false))
   define(env, symbol("quote"), newBuiltin("quote", quoteBuiltin, false))
@@ -387,12 +413,10 @@ proc installBaseOwl*(env: ref Environment) =
   # Merge the owl half of base into the same env as the Nim builtins, so that
   # `use base` exports both. base.owl uses only base primitives and never a
   # number from another module; base is the bottom of the stack.
-  # NOTE: Nimony has no staticRead/includeStr, so this is a runtime read.
-  var source = ""
-  try:
-    source = readFile("src/owl/libraries/base.owl")
-  except:
-    source = ""
+  # embedFile is a compile-time template plugin: the source is read at build
+  # time and baked in as a literal (Nimony has no staticRead). The path is
+  # resolved relative to this file, so the build is independent of the cwd.
+  const source: string = embedFile("base.owl")
   let parsed = parseOwl(source)
   if parsed.isOk:
     for f in parsed.get(@[]):

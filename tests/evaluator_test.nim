@@ -587,6 +587,47 @@ expect toNumber(value(e24, "mx")) == 5.0, "max picks the larger"
 expect toBool(value(e24, "in1")), "is-nothing on nothing"
 expect not toBool(value(e24, "in2")), "is-nothing on a value"
 
+let e25 = runOk("""
+n = 2
+w1 = 0
+when (= n 2):
+  set w1 1
+w2 = 0
+when (< n 2):
+  set w2 1
+c1 = 0
+cond:
+  (= n 1) = set c1 10
+  (= n 2) = set c1 20
+  true = set c1 30
+c2 = 0
+cond:
+  (= n 5) = set c2 10
+  false = set c2 20
+""", "")
+expect toNumber(value(e25, "w1")) == 1.0, "when runs its block on a grouped true condition"
+expect toNumber(value(e25, "w2")) == 0.0, "when skips its block on a grouped false condition"
+expect toNumber(value(e25, "c1")) == 20.0, "cond runs the first matching pair only"
+expect toNumber(value(e25, "c2")) == 0.0, "cond does nothing when no pair matches"
+
+var condShort = false
+clearCaptured()
+try:
+  discard runSrc("cond:\n  true = 1\n  true = error \"boom\"", "")
+except:
+  condShort = true
+expect not condShort, "cond stops after the first matching pair"
+
+var condBad = false
+clearCaptured()
+try:
+  discard runSrc("cond 5", "")
+except:
+  condBad = true
+expect condBad, "cond rejects arguments that are not pairs"
+expect find(lastError(), "cond needs (test = body) pairs") >= 0,
+  "cond says what it needs, got: " & lastError()
+
 var orShort = false
 clearCaptured()
 try:
