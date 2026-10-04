@@ -311,6 +311,79 @@ proc testFloating() =
     "floating: attach-point mapping -> (52,25), got (" & $tipBox.x & "," &
     $tipBox.y & ")")
 
+proc testFloatingViewportFit() =
+  # (a) A panel under a top anchor that fits: position untouched by the fit.
+  block:
+    let ctx = fresh(400, 400)
+    let anchorId = elementId("anchor")
+    let popId = elementId("pop")
+    beginLayout(ctx)
+    openElement(ctx, row(width = fixedPx(400), height = fixedPx(400)))
+    openElement(ctx, anchorId, col(width = fixedPx(50), height = fixedPx(20)))
+    closeElement(ctx)
+    openElement(ctx, popId)
+    configureOpenElement(ctx,
+      col(width = fixedPx(60), height = fixedPx(40))
+        .floating(attachElementId, offset = vec2(0, 6),
+          points = AttachPoints(element: pointLeftTop, parent: pointLeftBottom),
+          parentId = anchorId.id, fitViewport = true))
+    closeElement(ctx)
+    closeElement(ctx)
+    endLayout(ctx)
+    let b = ctx.elementMap.getOrDefault(popId.id, MapItem(elementIndex: -1)).box
+    expect(nearly(b.x, 0) and nearly(b.y, 26),
+      "fit: panel that fits is not moved, got (" & $b.x & "," & $b.y & ")")
+
+  # (b) Bottom-edge anchor: the panel would hang off-screen, so it flips up,
+  # keeping the 6px gap above the anchor instead of below.
+  block:
+    let ctx = fresh(400, 400)
+    let anchorId = elementId("anchor")
+    let popId = elementId("pop")
+    beginLayout(ctx)
+    openElement(ctx, col(width = fixedPx(400), height = fixedPx(400),
+                         alignY = bottom))
+    openElement(ctx, anchorId, row(width = fixedPx(50), height = fixedPx(20)))
+    closeElement(ctx)
+    openElement(ctx, popId)
+    configureOpenElement(ctx,
+      col(width = fixedPx(60), height = fixedPx(40))
+        .floating(attachElementId, offset = vec2(0, 6),
+          points = AttachPoints(element: pointLeftTop, parent: pointLeftBottom),
+          parentId = anchorId.id, fitViewport = true))
+    closeElement(ctx)
+    closeElement(ctx)
+    endLayout(ctx)
+    let b = ctx.elementMap.getOrDefault(popId.id, MapItem(elementIndex: -1)).box
+    # anchor is (0,380,50,20); flipped: panel bottom = anchor top - 6 gap,
+    # so y = 380 - 6 - 40 = 334.
+    expect(nearly(b.y, 334) and nearly(b.x, 0),
+      "fit: panel flips above the anchor, got (" & $b.x & "," & $b.y & ")")
+
+  # (c) Right-edge anchor: attach is left-to-left so a horizontal flip is a
+  # no-op; the shift clamps the panel inside with the fit margin.
+  block:
+    let ctx = fresh(400, 400)
+    let anchorId = elementId("anchor")
+    let popId = elementId("pop")
+    beginLayout(ctx)
+    openElement(ctx, row(width = fixedPx(400), height = fixedPx(400),
+                         alignX = right))
+    openElement(ctx, anchorId, col(width = fixedPx(50), height = fixedPx(20)))
+    closeElement(ctx)
+    openElement(ctx, popId)
+    configureOpenElement(ctx,
+      col(width = fixedPx(60), height = fixedPx(40))
+        .floating(attachElementId, offset = vec2(0, 6),
+          points = AttachPoints(element: pointLeftTop, parent: pointLeftBottom),
+          parentId = anchorId.id, fitViewport = true))
+    closeElement(ctx)
+    closeElement(ctx)
+    endLayout(ctx)
+    let b = ctx.elementMap.getOrDefault(popId.id, MapItem(elementIndex: -1)).box
+    expect(nearly(b.x, 332) and nearly(b.y, 26),
+      "fit: panel shifts inside the right edge, got (" & $b.x & "," & $b.y & ")")
+
 proc testZIndexOrdering() =
   let ctx = fresh(400, 400)
   beginLayout(ctx)
@@ -403,6 +476,7 @@ proc main() {.raises.} =
   testBorder()
   testClipAndScroll()
   testFloating()
+  testFloatingViewportFit()
   testZIndexOrdering()
   testPointerStates()
   testErrors()

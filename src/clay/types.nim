@@ -209,6 +209,10 @@ type
     capture*: PointerCapture = capturePointer
     attachTo*: AttachTo = attachNone
     clipTo*: ClipTo = clipToNone
+    fitViewport*: bool = false  ## flip + shift to keep the element inside the
+                                ## layout rectangle (popovers, dropdowns)
+    fitMargin*: float32 = 8     ## inset from the layout rectangle used by
+                                ## `fitViewport`
 
   ClipConfig* = object
     ## Clipping on each axis plus a child offset; together they form a
@@ -488,11 +492,14 @@ proc floating*(
   parentId: uint32 = 0,
   capture: PointerCapture = capturePointer,
   clipTo: ClipTo = clipToNone,
+  fitViewport: bool = false,
+  fitMargin: float32 = 8,
 ): ElementDeclaration =
   result = d
   result.floating = FloatingConfig(
     offset: offset, parentId: parentId, zIndex: zIndex,
     attachPoints: points, capture: capture, attachTo: attachTo, clipTo: clipTo,
+    fitViewport: fitViewport, fitMargin: fitMargin,
   )
 
 ## Animation helpers ---------------------------------------------------------------

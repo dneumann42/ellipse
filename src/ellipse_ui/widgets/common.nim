@@ -661,7 +661,8 @@ proc dropdownPanelDecl*(anchor: ElementId, maxHeight: float32):
       offset = vec2(0.0, t.metrics.popoverOffset), zIndex = 200,
       points = AttachPoints(element: pointLeftTop,
                             parent: pointLeftBottom),
-      parentId = anchor.id)
+      parentId = anchor.id,
+      fitViewport = true)
     .clip(horizontal = false, vertical = true,
           childOffset = currentScrollOffset())
 

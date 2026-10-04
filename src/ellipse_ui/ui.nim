@@ -239,7 +239,8 @@ proc menu*(label: string, blk: MenuBody) =
                   offset = vec2(0.0, t.metrics.popoverOffset), zIndex = 100,
                   points = AttachPoints(element: pointLeftTop,
                                         parent: pointLeftBottom),
-                  parentId = btnId.id))
+                  parentId = btnId.id,
+                  fitViewport = true))
     menuSelected = false
     if elementData(popId).found:
       # The shadow attaches to the popover's last-frame box; on the popover's

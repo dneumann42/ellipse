@@ -612,6 +612,58 @@ proc propagateHeights(ctx: Context) =
                                     layout.sizing.height.max)
           ctx.elements[myIdx] = cur
 
+func viewportSpill(v, size, span, m: float32): float32 =
+  ## How far `[v, v + size]` pokes outside the inset `[m, span - m]`.
+  max(m - v, 0) + max(v + size - (span - m), 0)
+
+proc fitToViewport(ctx: Context; el: LayoutElement; pb: Rect; pos: Vec2): Vec2 =
+  ## Keep a floating element inside the layout rectangle, like Floating UI's
+  ## flip + shift middleware. On each axis where the attach points face each
+  ## other (element top on parent bottom, element left on parent right, ...),
+  ## mirroring the two points across the anchor is a true flip of the open
+  ## direction; take it when it overflows the viewport less, negating the
+  ## offset so the gap follows the element. Finally shift whatever overflow
+  ## remains back inside, inset by `fitViewport`'s margin. The flip is applied
+  ## as a delta so scroll offsets folded into `pos` survive it.
+  let
+    f = el.decl.floating
+    m = f.fitMargin
+    w = el.dims.width
+    h = el.dims.height
+    pf = [float32(0), pb.width / 2, pb.width]
+    pr = [float32(0), pb.height / 2, pb.height]
+    ef = [float32(0), w / 2, w]
+    er = [float32(0), h / 2, h]
+    colP = attachCol(f.attachPoints.parent)
+    rowP = attachRow(f.attachPoints.parent)
+    colE = attachCol(f.attachPoints.element)
+    rowE = attachRow(f.attachPoints.element)
+
+  result = pos
+  # Flip: only meaningful when element and parent points are on opposite
+  # sides; swapping their roles mirrors the open direction across the anchor.
+  if rowE != rowP:
+    let
+      base = pr[rowP] - er[rowE] + f.offset.y
+      flipped = pr[rowE] - er[rowP] - f.offset.y
+    if viewportSpill(pos.y + flipped - base, h, ctx.dims.height, m) <
+        viewportSpill(pos.y, h, ctx.dims.height, m):
+      result.y = pos.y + flipped - base
+  if colE != colP:
+    let
+      base = pf[colP] - ef[colE] + f.offset.x
+      flipped = pf[colE] - ef[colP] - f.offset.x
+    if viewportSpill(pos.x + flipped - base, w, ctx.dims.width, m) <
+        viewportSpill(pos.x, w, ctx.dims.width, m):
+      result.x = pos.x + flipped - base
+  # Shift: nudge the element back inside, but only if it actually crosses a
+  # window edge -- one that fits untouched keeps its exact attach position.
+  # When it must move, land it on the margin, not on the raw edge.
+  if result.y < 0 or result.y + h > ctx.dims.height:
+    result.y = clamp(result.y, m, max(m, ctx.dims.height - h - m))
+  if result.x < 0 or result.x + w > ctx.dims.width:
+    result.x = clamp(result.x, m, max(m, ctx.dims.width - w - m))
+
 proc sortRootsStable(ctx: Context) =
   ## Ascending zIndex, insertion sort: stable, so equal zIndex keeps the
   ## declaration order (Clay uses a bubble sort for the same reason).
@@ -667,6 +719,11 @@ proc positionAndEmit(ctx: Context) =
           kind: renderClipStart, box: clipItem.box, zIndex: root.zIndex,
           id: hashNumber(rootEl.id, uint32(rootEl.children.len + 10)),
           clipHorizontal: true, clipVertical: true)
+
+    # ---- viewport fit for constrained floaters (flip + shift)
+    if isFloatingEl(rootEl) and rootEl.decl.floating.fitViewport and
+        parentItem.elementIndex >= 0:
+      rootPos = fitToViewport(ctx, rootEl, parentItem.box, rootPos)
 
     # ---- DFS
     var stack: seq[TreeNode] = @[]
