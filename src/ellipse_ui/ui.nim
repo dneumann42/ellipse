@@ -83,10 +83,25 @@ template layout*(blk: untyped) =
   blk
   endLayout()
 
+proc text*(value: string, fontSize: uint16 = activeTheme.text.control,
+           color: Color = activeTheme.palette.textColor) =
+  ## `textElement` with the live theme's body size and text colour -- the
+  ## one-liner for labels inside items and layout blocks; pass a size
+  ## (from `TextSizes`) to step off the default voice.
+  textElement(value, TextConfig(fontSize: fontSize, color: color))
+
 proc shade*(over: bool): Color =
   if over:
     return buttonHoverBg
   return buttonBg
+
+proc shade*(over: bool, idle: Color, hover = buttonHoverBg): Color =
+  ## The same raised/idle pick with the resting colour chosen by the
+  ## caller: `.bg(shade(hovered(), panelBg))` for a list row that lives on
+  ## a panel, `fieldBg` for one inside a sunken box.
+  if over:
+    return hover
+  return idle
 
 proc button*(id: ElementId, label: string, width = fit(), height = fit()): bool =
   let t = activeTheme
@@ -101,6 +116,74 @@ proc button*(id: ElementId, label: string, width = fit(), height = fit()): bool 
   textElement(label, TextConfig(fontSize: t.text.button,
     color: t.palette.textColor))
   closeElement()
+
+## --- items: bracketed child elements ------------------------------------------
+##
+## The low-level clay rhythm -- `openElement` / `configureOpenElement` /
+## children / `closeElement` -- is what every repeated row or card dances
+## to. `item` brackets that rhythm so screens read as nesting and content;
+## the declaration stays a free-form clay builder at the call site. Like
+## the `clay` blocks, the declaration is configured *while the element is
+## open*, so it may call `hovered()` and `currentScrollOffset()`.
+##
+##   var r = 0
+##   while r < 24:
+##     item("list.row", r, row(width = grow(), padding = padAll(padItem))
+##         .bg(shade(hovered(), panelBg)).corner(itemRadius)):
+##       text("Entry " & $r)
+##     inc r
+##
+## `listRow` and `listCard` are that pattern with the theme's list styling
+## pre-answered -- take them when the default look fits, drop to `item`
+## the moment it doesn't. The styling lives in the `listRowDecl` /
+## `listCardDecl` procs, so a call site can reuse or fork it:
+## `item(label, i, listRowDecl(idle = fieldBg)):`.
+
+proc listRowDecl*(idle: Color = panelBg, hover = buttonHoverBg): ElementDeclaration =
+  ## The standard list-row declaration (see `listRow`): `grow` wide,
+  ## `fit` tall, `padItem` padded, vertically centred, `itemRadius`
+  ## corners, `idle` at rest and `hover` under the pointer. Reads the
+  ## hover state of whatever element is open at the call.
+  let t = activeTheme
+  result = row(width = grow(), height = fit(),
+      padding = padAll(t.metrics.padItem), alignY = centerY)
+    .bg(shade(hovered(), idle, hover))
+    .corner(t.radii.item)
+
+proc listCardDecl*(width: SizingAxis, idle: Color = buttonBg,
+                   hover = buttonHoverBg): ElementDeclaration =
+  ## The standard hover-card declaration (see `listCard`): `width` across,
+  ## full height, centred content, `padCard` inset, hairline border,
+  ## `button` corners, `idle` at rest and `hover` under the pointer.
+  let t = activeTheme
+  result = col(width = width, height = grow(),
+      alignX = centerX, alignY = centerY, padding = padAll(t.metrics.padCard))
+    .bg(shade(hovered(), idle, hover))
+    .corner(t.radii.button)
+    .border(t.metrics.borderHairline, t.palette.panelBorder)
+
+template item*(id: untyped, decl: untyped, body: untyped): untyped =
+  ## One element with an explicit id: open, configure, children, close.
+  openElement(id)
+  configureOpenElement(decl)
+  body
+  closeElement()
+
+template item*(label: untyped, index: untyped, decl: untyped,
+               body: untyped): untyped =
+  ## The loop-child form: clay's local id for `label` at position `index`
+  ## inside the open parent -- the stable hover identity repeating rows
+  ## and cards need, without spelling out `localIdWithIndex`.
+  item(localIdWithIndex(label, uint32(index)), decl, body)
+
+template listRow*(label: untyped, index: untyped, body: untyped): untyped =
+  ## A themed hover row inside a list panel, per `listRowDecl()`.
+  item(label, index, listRowDecl(), body)
+
+template listCard*(label: untyped, index: untyped, width: untyped,
+                   body: untyped): untyped =
+  ## A themed hover card for horizontal strips, per `listCardDecl(width)`.
+  item(label, index, listCardDecl(width), body)
 
 type MenuBody* = proc() {.closure.}
 

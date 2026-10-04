@@ -25,6 +25,10 @@ proc expect(cond: bool, msg: string) =
 proc mono(text: string; cfg: TextConfig): Size =
   Size(width: float32(text.len) * float32(cfg.fontSize), height: float32(cfg.fontSize))
 
+proc nearly(a, b: float32): bool =
+  let d = a - b
+  d < 0.01'f32 and d > -0.01'f32
+
 # --- caller state, immediate-mode style ------------------------------------------------
 
 var agree = false
@@ -318,6 +322,57 @@ proc main() {.raises.} =
   let dw = statA.box.width - statB.box.width
   expect(dw < 0.5 and dw > -0.5, "CardRow: siblings share the width evenly, got " &
     $statA.box.width & " vs " & $statB.box.width)
+
+  # --- items and scrollPanel -----------------------------------------------------
+  # a separate, self-consistent tree: repeated layouts must see the same shape.
+  proc drawItems() =
+    beginLayout()
+    clay "itemsroot", col(width = grow(), height = grow(), gap = 4):
+      scrollPanel "list", col(width = grow(), height = fixedPx(60), gap = 1)
+          .bg(fieldBg)
+          .border(hairline, panelBorder)
+          .corner(panelRadius)
+          .clip(horizontal = false, vertical = true,
+                childOffset = currentScrollOffset()):
+        var i = 0
+        while i < 8:
+          listRow("list.row", i):
+            text("Row " & $i)
+          inc i
+      # the raw `item` form: an explicit decl over the themed preset
+      item("plain", 3, row(width = grow(), height = fit())
+          .bg(shade(hovered(), panelBg))
+          .corner(itemRadius)):
+        text("Plain item")
+      listCard("list.card", 0, fixedPx(120)):
+        text("Card")
+    endLayout()
+
+  beginInputFrame()
+  setPointerState(vec2(-100.0, -100.0), false)
+  drawItems()
+  beginInputFrame()
+  drawItems()          # second frame: the clip data is published, bars appear
+  let listId = elementId("list")
+  expect(elementData(listId).found, "scrollPanel: the panel lays out")
+  let row0 = elementData(localIdWithIndex("list.row", 0'u32, listId.id))
+  let row7 = elementData(localIdWithIndex("list.row", 7'u32, listId.id))
+  expect(row0.found and row7.found, "listRow: indexed rows lay out")
+  expect(row0.found and nearly(row0.box.height, 30.0),
+    "listRow: height = mono text + 2x padItem, got " & $row0.box.height)
+  expect(row0.found and nearly(row0.box.width, 800.0),
+    "listRow: grows to the panel width, got " & $row0.box.width)
+  expect(elementData(localId("sb.vthumb", elementId("list.bar").id)).found,
+    "scrollPanel: the bar's thumb appears once the content overflows")
+  expect(elementData(localIdWithIndex("plain", 3'u32,
+      elementId("itemsroot").id)).found, "item: explicit-id form lays out")
+  let card0 = elementData(localIdWithIndex("list.card", 0'u32,
+    elementId("itemsroot").id))
+  expect(card0.found and nearly(card0.box.width, 120.0),
+    "listCard: fixed width honoured, got " & $card0.box.width)
+  let sc = scrollContainerData(listId)
+  expect(sc.found and sc.vertical and sc.contentDimensions.height > 60.0,
+    "scrollPanel: children scroll the clip container")
 
   expect(takeErrors().len == 0, "widgets: no clay errors after the session")
 

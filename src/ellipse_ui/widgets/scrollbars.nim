@@ -19,6 +19,14 @@
 ##     for long things...
 ##     scrollbar(hashId("panelbar"), hashId("panel"))
 ##
+## `scrollPanel` wraps that whole container shape -- open, configure (the
+## caller's decl), children, bar, close -- and names the bar `<panel>.bar`:
+##
+##   scrollPanel "panel", col(...)
+##       .clip(horizontal = false, vertical = true,
+##             childOffset = currentScrollOffset()):
+##     for long things...
+##
 ## Drag state lives here, keyed by container id -- like `menu`'s
 ## `openMenuId`, one frame's pointer decides the next frame's position.
 
@@ -207,12 +215,32 @@ proc advanceDrags*(container: ElementId, style: ScrollbarStyle) =
       inc i
 
 proc scrollbar*(id: ElementId, container: ElementId,
-                style = defaultScrollbarStyle()) =
+                style = activeTheme.scrollbar) =
   ## Draw and drive the floating scrollbar(s) of the scroll container
   ## `container`. Declare inside that container's scope, after its
   ## children. A vertical bar hugs the right edge, a horizontal one the
   ## bottom; each appears only while its axis actually overflows, and both
-  ## hide whenever the content fits.
+  ## hide whenever the content fits. The look comes from the live theme's
+  ## `scrollbar` tokens unless a style is passed.
   advanceDrags(container, style)
   scrollbarAxis(id, container, vertical, style)
   scrollbarAxis(id, container, horizontal, style)
+
+template scrollPanel*(label: untyped, decl: untyped, body: untyped): untyped =
+  ## A framed, scrollable container with its scrollbar attached: opens the
+  ## element `label`, configures `decl` -- add
+  ## `.clip(horizontal = .., vertical = .., childOffset = currentScrollOffset())`
+  ## for the scrolling axes -- runs `body`, then hangs the container's
+  ## floating `scrollbar` (under id `label & ".bar"`) before closing it.
+  ##
+  ##   scrollPanel("list", col(width = grow(), height = grow(), gap = 2)
+  ##       .bg(fieldBg).border(hairline, panelBorder).corner(panelRadius)
+  ##       .clip(horizontal = false, vertical = true,
+  ##             childOffset = currentScrollOffset())):
+  ##     ...items...
+  let scrollPanelId = elementId(label)
+  openElement(scrollPanelId)
+  configureOpenElement(decl)
+  body
+  scrollbar(elementId(label & ".bar"), scrollPanelId)
+  closeElement()

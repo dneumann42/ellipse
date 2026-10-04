@@ -100,6 +100,7 @@ func contrastTheme(): Theme =
   )
   t.radii = Radii(  ## sharp edges everywhere -- except the switch pill
     button: 0.0, field: 0.0, check: 0.0, tick: 0.0, inner: 0.0,
+    item: 0.0, panel: 0.0,
     popover: 0.0, popoverShadow: 0.0, tab: 0.0, tabPanel: 0.0,
     card: 0.0, pill: 0.0, switch: 12.0, switchKnob: 8.0,
   )
@@ -178,15 +179,14 @@ widget Toolbar(body: proc(): void):
 widget Scroll(body: proc(): void):
   ## Wheel-scrollable page body: a vertical clip container whose children
   ## ride the engine's current scroll offset (`updateUI` feeds it the wheel,
-  ## through the accel/glide filter in `ui`). A floating scrollbar hugs the
-  ## right edge whenever the content overflows.
-  clay "scroll", col(width = grow(), height = grow(), padding = padAll(28))
+  ## through the accel/glide filter in `ui`). `scrollPanel` attaches the
+  ## floating scrollbar that hugs the right edge whenever content overflows.
+  scrollPanel "scroll", col(width = grow(), height = grow(), padding = padAll(28))
       .clip(horizontal = false, vertical = true,
             childOffset = currentScrollOffset()):
     clay "content", col(width = grow(max = 820), height = fit(), gap = 10,
                         alignX = centerX):
       body()
-    scrollbar(hashId("page.bar"), hashId("scroll"))
 
 # --- the gallery itself -------------------------------------------------------
 
@@ -248,8 +248,7 @@ proc drawGallery() =
       label("Counter -- driven by the File menu, too")
       clay "counter", row(width = grow(), height = fit(), gap = 12,
                           alignY = centerY):
-        textElement($count, TextConfig(fontSize: counterFontSize(),
-                                       color: textColor))
+        text($count, counterFontSize())
         clay "buttons", row(gap = 8):
           if button(hashId("dec"), "Decrement", height = fixedPx(44)):
             dec count
@@ -279,47 +278,32 @@ proc drawGallery() =
       caption("Clip containers with floating scrollbars: grab a thumb and drag, click a bare track to jump, or spin the wheel -- the feel ramps up with velocity, glides to a stop, and springs at the ends.")
       clay "scrow", row(width = grow(), height = fixedPx(240), gap = 16,
                         alignY = top):
-        clay "vpanel", col(width = pct(0.5), height = grow(), gap = 2,
-                           padding = padAll(6))
+        scrollPanel "vpanel", col(width = pct(0.5), height = grow(), gap = 2,
+            padding = padAll(padItem))
             .bg(fieldBg)
-            .border(1, panelBorder)
-            .corner(10)
+            .border(hairline, panelBorder)
+            .corner(panelRadius)
             .clip(horizontal = false, vertical = true,
                   childOffset = currentScrollOffset()):
           var r = 0
           while r < 24:
-            openElement(localIdWithIndex("vpanel.row", uint32(r)))
-            configureOpenElement(row(width = grow(), height = fit(),
-                padding = padAll(6), alignY = centerY)
-              .bg(if hovered(): buttonHoverBg else: panelBg)
-              .corner(6))
-            textElement("Module entry " & $r,
-              TextConfig(fontSize: 16, color: textColor))
-            closeElement()
+            listRow("vpanel.row", r):
+              text("Module entry " & $r, 16)
             inc r
-          scrollbar(hashId("vbar"), hashId("vpanel"))
         clay "hwrap", col(width = grow(), height = grow(), gap = 6):
           label("Horizontal strip")
-          clay "hstrip", row(width = grow(), height = grow(), gap = 10,
-                             padding = padAll(8))
+          scrollPanel "hstrip", row(width = grow(), height = grow(), gap = 10,
+              padding = padAll(8))
               .bg(fieldBg)
-              .border(1, panelBorder)
-              .corner(10)
+              .border(hairline, panelBorder)
+              .corner(panelRadius)
               .clip(horizontal = true, vertical = false,
                     childOffset = currentScrollOffset()):
             var c = 0
             while c < 10:
-              openElement(localIdWithIndex("hstrip.card", uint32(c)))
-              configureOpenElement(col(width = fixedPx(150), height = grow(),
-                  alignX = centerX, alignY = centerY, padding = padAll(10))
-                .bg(if hovered(): buttonHoverBg else: buttonBg)
-                .corner(8)
-                .border(1, panelBorder))
-              textElement("Card " & $c,
-                TextConfig(fontSize: 18, color: textColor))
-              closeElement()
+              listCard("hstrip.card", c, fixedPx(150)):
+                text("Card " & $c)
               inc c
-            scrollbar(hashId("hbar"), hashId("hstrip"))
 
     clay "footer", row(width = grow(), height = fit(), gap = 14,
                        alignY = centerY):

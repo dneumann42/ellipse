@@ -23,7 +23,8 @@
 ##                  `setActiveTab`
 ##   cards          `widget Card`, `widget StatCard`, `widget CardRow`
 ##   scrollbars     `scrollbar` -- floating draggable bars for clip
-##                  containers, `ScrollbarStyle`
+##                  containers, `scrollPanel` -- a framed clip container
+##                  with its bar attached, `ScrollbarStyle`
 ##
 ## Immediate-mode contract: pass the current value in, store the return
 ## value back -- `checked = checkbox(id, "Wifi", checked)`. Transient state

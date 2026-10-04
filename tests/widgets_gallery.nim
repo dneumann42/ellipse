@@ -48,8 +48,7 @@ let tfId = hashId("tf")
 let mlId = hashId("ml")
 let nfId = hashId("qty")
 let noteId = hashId("note")
-let vbarId = hashId("vbar")
-let hbarId = hashId("hbar")
+let vbarId = hashId("vpanel.bar")   # `scrollPanel` names bars `<panel>.bar`
 
 proc fillOptions() =
   for i in 0 ..< 12:
@@ -91,43 +90,30 @@ proc draw() =
     h3("Scrolling")
     clay "scrow", row(width = grow(), height = fixedPx(200), gap = 16,
                       alignY = top):
-      clay "vpanel", col(width = pct(0.5), height = grow(), gap = 2,
-                         padding = padAll(6))
+      scrollPanel "vpanel", col(width = pct(0.5), height = grow(), gap = 2,
+          padding = padAll(padItem))
           .bg(fieldBg)
-          .border(1, panelBorder)
-          .corner(10)
+          .border(hairline, panelBorder)
+          .corner(panelRadius)
           .clip(horizontal = false, vertical = true,
                 childOffset = currentScrollOffset()):
         var r = 0
         while r < 18:
-          openElement(localIdWithIndex("vpanel.row", uint32(r)))
-          configureOpenElement(row(width = grow(), height = fit(),
-              padding = padAll(5), alignY = centerY)
-            .bg(if hovered(): buttonHoverBg else: panelBg)
-            .corner(6))
-          textElement("Row " & $r, TextConfig(fontSize: 15, color: textColor))
-          closeElement()
+          listRow("vpanel.row", r):
+            text("Row " & $r)
           inc r
-        scrollbar(vbarId, hashId("vpanel"))
-      clay "hstrip", row(width = grow(), height = grow(), gap = 10,
-                         padding = padAll(8))
+      scrollPanel "hstrip", row(width = grow(), height = grow(), gap = 10,
+          padding = padAll(8))
           .bg(fieldBg)
-          .border(1, panelBorder)
-          .corner(10)
+          .border(hairline, panelBorder)
+          .corner(panelRadius)
           .clip(horizontal = true, vertical = false,
                 childOffset = currentScrollOffset()):
         var c = 0
         while c < 10:
-          openElement(localIdWithIndex("hstrip.card", uint32(c)))
-          configureOpenElement(col(width = fixedPx(130), height = grow(),
-              alignX = centerX, alignY = centerY, padding = padAll(8))
-            .bg(if hovered(): buttonHoverBg else: buttonBg)
-            .corner(8)
-            .border(1, panelBorder))
-          textElement("Card " & $c, TextConfig(fontSize: 17, color: textColor))
-          closeElement()
+          listCard("hstrip.card", c, fixedPx(130)):
+            text("Card " & $c)
           inc c
-        scrollbar(hbarId, hashId("hstrip"))
   endLayout()
 
 proc boxCenter(id: ElementId): Vec2 =
@@ -171,7 +157,8 @@ proc pressEnter() =
   draw()
 
 proc saveShot(path: cstring) {.raises.} =
-  for e in takeErrors():
+  let errs = takeErrors()
+  for e in errs:
     echo "clay error: ", e.message
   let vd = scrollContainerData(hashId("vpanel"))
   echo "vpanel found=", vd.found, " pos=", vd.position.x, ",", vd.position.y,
@@ -180,7 +167,7 @@ proc saveShot(path: cstring) {.raises.} =
   let hd = scrollContainerData(hashId("hstrip"))
   echo "hstrip found=", hd.found, " cont=", hd.contentDimensions.width,
     " view=", hd.containerDimensions.width
-  let vt = elementData(localId("sb.vthumb", hashId("vbar").id))
+  let vt = elementData(localId("sb.vthumb", vbarId.id))
   echo "vthumb found=", vt.found, " box=", vt.box.x, ",", vt.box.y,
     " ", vt.box.width, "x", vt.box.height
   let ren = sdlRenderer()

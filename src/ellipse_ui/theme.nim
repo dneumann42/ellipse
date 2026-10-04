@@ -69,6 +69,8 @@ type
     check*: float32      ## tick boxes
     tick*: float32       ## the filled square inside a checked box
     inner*: float32      ## menu items, list rows, steppers
+    item*: float32       ## `ui.listRow` hover rows
+    panel*: float32      ## framed scroll panels (`scrollbars.scrollPanel`)
     popover*: float32    ## dropdown/menu panels
     popoverShadow*: float32 ## the shadow behind them
     tab*: float32        ## tab buttons (top corners)
@@ -99,6 +101,7 @@ type
     padCheckRow*, padCard*, padStat*, padPanel*, padToolbar*, padSwitch*: int
     padTabX*, padTabTop*, padTabBottom*: int
     padMinor*: int            ## small insets (labels, footers)
+    padItem*: int             ## `ui.listRow` rows
 
     # gaps between siblings
     gapCard*, gapCardRow*, gapProse*, gapTight*, gapList*: int
@@ -163,6 +166,7 @@ func defaultTextSizes*(): TextSizes =
 func defaultRadii*(): Radii =
   Radii(
     button: 8.0, field: 8.0, check: 5.0, tick: 3.0, inner: 6.0,
+    item: 6.0, panel: 10.0,
     popover: 10.0, popoverShadow: 14.0, tab: 8.0, tabPanel: 10.0,
     card: 12.0, pill: 12.0, switch: 12.0, switchKnob: 8.0,
   )
@@ -178,7 +182,7 @@ func defaultMetrics*(): Metrics =
     padButton: 8, padMenuItem: 8, padOption: 6, padList: 4,
     padFieldX: 10, padFieldY: 8, padCheckRow: 4, padCard: 14, padStat: 12,
     padPanel: 12, padToolbar: 4, padSwitch: 3, padTabX: 14, padTabTop: 7,
-    padTabBottom: 6, padMinor: 4,
+    padTabBottom: 6, padMinor: 4, padItem: 6,
     gapCard: 10, gapCardRow: 12, gapProse: 8, gapTight: 6, gapList: 2,
     borderRaised: 2, borderHairline: 1, borderTab: 2,
     headingPadH1: 28, headingPadH2: 20, headingPadH3: 14,
@@ -266,3 +270,12 @@ template dimColor*(): Color = activeTheme.palette.dimColor
 template labelColor*(): Color = activeTheme.palette.labelColor
 template onAccentColor*(): Color = activeTheme.palette.onAccent
 template shadowColor*(): Color = activeTheme.palette.shadow
+
+## A few numeric tokens share the shortcut treatment where call sites keep
+## needing them (list styling, framed panels): the rest read naturally as
+## `activeTheme.radii.card` and friends.
+
+template itemRadius*(): float32 = activeTheme.radii.item
+template panelRadius*(): float32 = activeTheme.radii.panel
+template padItem*(): int = activeTheme.metrics.padItem
+template hairline*(): int = activeTheme.metrics.borderHairline
