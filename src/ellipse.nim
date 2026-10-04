@@ -30,6 +30,7 @@ var volume = 0.5
 
 var backends: seq[string] = @[]
 var moduleNames: seq[string] = @[]
+var tabNames: seq[string] = @[]
 
 proc fillLists() =
   backends.add "OpenGL"
@@ -40,6 +41,9 @@ proc fillLists() =
   moduleNames.add "Input"
   moduleNames.add "Networking"
   moduleNames.add "Logging"
+  tabNames.add "Stats"
+  tabNames.add "Session"
+  tabNames.add "Actions"
 
 proc resetAll() =
   count = 0
@@ -53,6 +57,10 @@ proc resetAll() =
   notes = ""
   quantity = 2
   volume = 0.5
+
+proc tabActions() =
+  if button(hashId("btn-tab-reset"), "Reset all"):
+    resetAll()
 
 proc counterFontSize(): uint16 =
   if largeCount:
@@ -135,6 +143,25 @@ proc drawGallery() =
             dec count
           if button(hashId("inc"), "Increment", height = fixedPx(44)):
             inc count
+
+    Section(title = "Tabs & cards"):
+      caption("A TabbedView container: the strip swaps whole pages, and cards frame the controls on them.")
+      clay "tabwrap", row(width = grow(), height = fixedPx(250)):
+        TabbedView(id = hashId("gallery-tabs"), tabs = tabNames):
+          let page = activeTab(hashId("gallery-tabs"))
+          if page == 0:
+            CardRow:
+              StatCard(label = "Count", value = $count, hint = "menu or buttons")
+              StatCard(label = "Quantity", value = $quantity, hint = "")
+              StatCard(label = "Modules", value = $countSelected(modules),
+                       hint = "of " & $moduleNames.len)
+          elif page == 1:
+            Card(title = "Session", actions = emptySlot):
+              bodyText("Cards hug their content; the empty `actions` slot costs nothing.")
+              wifi = switch(hashId("sw-tab"), "Wifi", wifi)
+          else:
+            Card(title = "Actions", actions = tabActions):
+              bodyText("The header's right edge is the `actions` slot -- here a button that resets the gallery.")
 
     clay "footer", row(width = grow(), height = fit(), gap = 14,
                        alignY = centerY):

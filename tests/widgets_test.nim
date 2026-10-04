@@ -35,6 +35,8 @@ var nameText = "Ada"
 var noteText = "ab\ncd\nef"
 var qty = 3
 var noteClicked = false
+var panelTab = 0
+var refreshClicked = false
 
 var comboOpts: seq[string] = @[]
 comboOpts.add "Alpha"
@@ -46,6 +48,11 @@ multiOpts.add "One"
 multiOpts.add "Two"
 multiOpts.add "Three"
 
+var viewTabs: seq[string] = @[]
+viewTabs.add "General"
+viewTabs.add "Audio"
+viewTabs.add "Video"
+
 let cbId = hashId("cb")
 let swId = hashId("sw")
 let comboId = hashId("combo")
@@ -54,6 +61,14 @@ let tfId = hashId("tf")
 let mlId = hashId("ml")
 let nfId = hashId("qty")
 let noteId = hashId("note")
+let viewId = hashId("view")
+let refreshId = hashId("refresh")
+let cardHostId = hashId("cardhost")
+let cardRowId = hashId("cardrow")
+
+proc cardActions() =
+  if button(refreshId, "Refresh"):
+    refreshClicked = true
 
 proc draw() =
   beginLayout()
@@ -71,6 +86,16 @@ proc draw() =
     qty = intNumberField(nfId, qty, 1)
     if textLink(noteId, "Notes"):
       noteClicked = true
+    TabbedView(id = viewId, tabs = viewTabs):
+      panelTab = activeTab(viewId)
+      bodyText("Page " & $panelTab)
+    clay "cardhost", row(width = grow(), height = fit()):
+      Card(title = "Network", actions = cardActions):
+        bodyText("Linked at 1 Gb/s")
+    clay "cardrow", row(width = grow(), height = fit()):
+      CardRow:
+        StatCard(label = "Up", value = "4d", hint = "since boot")
+        StatCard(label = "Pings", value = "12", hint = "")
   endLayout()
 
 proc frame() =
@@ -253,6 +278,46 @@ proc main() {.raises.} =
   # --- text link ---------------------------------------------------------------------
   click(noteId)
   expect(noteClicked, "textLink: click reports true for the frame")
+
+  # --- tabbed view -------------------------------------------------------------------
+  let strip = localId("tabs.strip", viewId.id)
+  let panel = localId("tabs.panel", viewId.id)
+  let tab1 = localIdWithIndex("tabs.tab", 1'u32, viewId.id)
+  expect(elementData(strip).found and elementData(panel).found,
+    "TabbedView: strip and panel laid out")
+  expect(elementData(tab1).found, "TabbedView: every tab laid out")
+  expect(activeTab(viewId) == 0 and panelTab == 0,
+    "TabbedView: the first tab starts selected")
+  click(tab1)
+  expect(activeTab(viewId) == 1, "TabbedView: clicking a tab selects it")
+  expect(panelTab == 1, "TabbedView: the body sees the new index in-frame")
+  setActiveTab(viewId, 2)
+  frame()
+  expect(panelTab == 2, "TabbedView: setActiveTab moves the selection")
+  viewTabs.setLen(2)                        # the third tab goes away
+  frame()
+  expect(activeTab(viewId) == 0, "TabbedView: a stale index clamps to the first tab")
+  viewTabs.add "Video"
+  setActiveTab(viewId, 2)
+
+  # --- cards ---------------------------------------------------------------------------
+  let cardRoot = ElementId(id: textChildId(cardHostId.id))
+  let card = elementData(cardRoot)
+  let host = elementData(cardHostId)
+  expect(card.found, "Card: laid out inside its host")
+  expect(card.found and host.found and
+      card.box.width > host.box.width - 1.0,
+    "Card: grows to its container, got " & $card.box.width)
+  expect(elementData(refreshId).found, "Card: the actions slot renders")
+  click(refreshId)
+  expect(refreshClicked, "Card: actions stay interactive")
+  let rowRoot = ElementId(id: textChildId(cardRowId.id))
+  let statA = elementData(ElementId(id: hashNumber(0'u32, rowRoot.id)))
+  let statB = elementData(ElementId(id: hashNumber(1'u32, rowRoot.id)))
+  expect(statA.found and statB.found, "CardRow: both stat cards laid out")
+  let dw = statA.box.width - statB.box.width
+  expect(dw < 0.5 and dw > -0.5, "CardRow: siblings share the width evenly, got " &
+    $statA.box.width & " vs " & $statB.box.width)
 
   expect(takeErrors().len == 0, "widgets: no clay errors after the session")
 
