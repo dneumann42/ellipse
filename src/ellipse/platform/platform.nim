@@ -46,9 +46,13 @@ const
   EventMouseButtonUp = 0x00000402'u32
   EventMouseWheel    = 0x00000403'u32
 
+const
+  ButtonLeft = 1'u8          ## SDL_BUTTON_LEFT
+  ButtonLeftMask = 1'u32     ## SDL_BUTTON_LMASK, the `state` bit for it
+
 type
   SDL_Window {.importc: "SDL_Window", header: "<SDL3/SDL.h>".} = object
-  SDL_Renderer {.importc: "SDL_Renderer", header: "<SDL3/SDL.h>".} = object
+  SDL_Renderer* {.importc: "SDL_Renderer", header: "<SDL3/SDL.h>".} = object
   SDL_Event {.importc: "SDL_Event", header: "<SDL3/SDL.h>".} = object
 
   SDL_CommonEvent = object
@@ -160,9 +164,19 @@ proc `=destroy`*(renderer: var Renderer) =
 proc `=copy`(dest: var Renderer, source: Renderer) {.error.}
 
 type
+  PointerState* = object
+    ## Primary-pointer position (window pixels) and left-button state, as
+    ## last seen by `pumpEvents`. The UI's layout root is the window, so the
+    ## position is also clay-relative.
+    x*, y*: float32
+    down*: bool
+
+type
   PlatformApplication* = object
     window: Window
     renderer: Renderer
+    pointer: PointerState
+    width, height: float32
     running: bool
 
 proc `=destroy`(app: var PlatformApplication) =
@@ -180,6 +194,11 @@ proc sdlHandle(ok: bool, id: string) {.raises.} =
 
 var activeApp: PlatformApplication
 
+proc sdlRenderer*(): ptr SDL_Renderer =
+  ## The live SDL_Renderer handle, for drawing modules (see
+  ## `ellipse/platform/renderer`). Only valid inside the main loop.
+  activeApp.renderer.raw
+
 type
   FrameFn* = proc() {.closure, raises.}
 
@@ -193,6 +212,8 @@ proc initialize*() {.raises.} =
   sdlHandle(SDL_SetAppMetadata(an.toCString, av.toCString, aid.toCString), "SDL_SetAppMetadata()")
   sdlHandle(SDL_Init(Video or Audio), "SDL_Init()")
   sdlHandle(SDL_CreateWindowAndRenderer("ellipse/renderer", 1280, 720, WindowResizable, addr activeApp.window.raw, addr activeApp.renderer.raw), "SDL_CreateWindowAndRenderer()")
+  activeApp.width = 1280.0
+  activeApp.height = 720.0
 
 const
   TicksPerSecond = 60'i64
@@ -232,6 +253,38 @@ proc pumpEvents(app: var PlatformApplication) =
     let kind = cast[ptr SDL_CommonEvent](addr event)[].typ
     if kind == EventQuit or kind == EventTerminating or kind == EventWindowCloseRequested:
       app.running = false
+    elif kind == EventWindowPixelResized:
+      # Track the live window size so the UI can re-layout the moment the
+      # window is resized. `data1`/`data2` carry the new drawable size in
+      # renderer pixels -- the space we draw and report pointer positions in.
+      let e = cast[ptr SDL_WindowEvent](addr event)[]
+      if e.data1 > 0 and e.data2 > 0:
+        app.width = float32(e.data1)
+        app.height = float32(e.data2)
+    elif kind == EventMouseMotion:
+      let e = cast[ptr SDL_MouseMotionEvent](addr event)[]
+      app.pointer.x = e.x
+      app.pointer.y = e.y
+      app.pointer.down = (e.state and ButtonLeftMask) != 0
+    elif kind == EventMouseButtonDown:
+      let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
+      if e.button == ButtonLeft:
+        app.pointer.down = true
+    elif kind == EventMouseButtonUp:
+      let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
+      if e.button == ButtonLeft:
+        app.pointer.down = false
+
+proc pointerState*(): PointerState =
+  ## The pointer as of the most recent event pump; feed it to
+  ## `clay.setPointerState` once per update tick.
+  activeApp.pointer
+
+proc windowPixelSize*(): tuple[width, height: float32] =
+  ## The window's drawable size in renderer pixels, as of the most recent
+  ## event pump. Feed it to `clay.setLayoutDimensions` each update tick so
+  ## the layout tracks live window resizes.
+  (activeApp.width, activeApp.height)
 
 proc drawFrame(app: var PlatformApplication; render: FrameFn) {.raises.} =
   sdlHandle(SDL_SetRenderDrawColor(app.renderer.raw, 0, 0, 0, 255), "SDL_SetRenderDrawColor()")

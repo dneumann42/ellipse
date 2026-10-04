@@ -78,6 +78,8 @@ proc updateScrollContainers*(dragScrolling: bool, scrollDelta: Vec2,
                              deltaTime: float32) =
   updateScrollContainers(currentContext(), dragScrolling, scrollDelta, deltaTime)
 proc setMeasureText*(fn: MeasureFn) = setMeasureText(currentContext(), fn)
+proc setLayoutDimensions*(dims: Size) = setLayoutDimensions(currentContext(), dims)
+proc layoutDimensions*(): Size = layoutDimensions(currentContext())
 proc takeErrors*(): seq[ErrorData] = takeErrors(currentContext())
 proc openElementId*(): uint32 = openElementId(currentContext())
 proc currentScrollOffset*(): Vec2 = currentScrollOffset(currentContext())
