@@ -28,9 +28,12 @@ var notes = ""
 var quantity = 2
 var volume = 0.5
 
+var themeIndex = 0
+
 var backends: seq[string] = @[]
 var moduleNames: seq[string] = @[]
 var tabNames: seq[string] = @[]
+var themeNames: seq[string] = @[]
 
 proc fillLists() =
   backends.add "OpenGL"
@@ -44,6 +47,99 @@ proc fillLists() =
   tabNames.add "Stats"
   tabNames.add "Session"
   tabNames.add "Actions"
+  themeNames.add "Dark (default)"
+  themeNames.add "Light"
+  themeNames.add "High contrast"
+  themeNames.add "Warm sepia"
+
+# --- themes ------------------------------------------------------------------
+# Presets layered over the library default; every widget reads `activeTheme`
+# while it renders, so `setTheme` restyles the whole gallery from the next
+# declaration on (the next frame repaints everything anyway).
+
+func lightTheme(): Theme =
+  var t = defaultTheme()
+  t.palette = Palette(
+    bg: rgb(244, 245, 248),
+    panelBg: rgb(255, 255, 255),
+    panelBorder: rgb(208, 212, 222),
+    buttonBg: rgb(226, 230, 238),
+    buttonHoverBg: rgb(203, 210, 224),
+    fieldBg: rgb(255, 255, 255),
+    selectedBg: rgb(206, 221, 248),
+    accent: rgb(46, 92, 190),
+    textColor: rgb(24, 27, 34),
+    dimColor: rgb(116, 122, 138),
+    labelColor: rgb(72, 78, 94),
+    onAccent: rgb(255, 255, 255),
+    shadow: rgb(20, 24, 40, 60),
+  )
+  t.scrollbar = ScrollbarStyle(
+    width: 10.0, margin: 4.0, radius: 5.0, minThumb: 28.0,
+    track: rgb(226, 229, 238, 150),
+    thumb: rgb(150, 158, 176, 190),
+    thumbHot: rgb(112, 122, 145, 230))
+  t
+
+func contrastTheme(): Theme =
+  var t = defaultTheme()
+  t.palette = Palette(
+    bg: rgb(0, 0, 0),
+    panelBg: rgb(8, 8, 8),
+    panelBorder: rgb(255, 255, 255),
+    buttonBg: rgb(24, 24, 24),
+    buttonHoverBg: rgb(64, 64, 64),
+    fieldBg: rgb(0, 0, 0),
+    selectedBg: rgb(0, 0, 128),
+    accent: rgb(255, 214, 0),
+    textColor: rgb(255, 255, 255),
+    dimColor: rgb(208, 208, 208),
+    labelColor: rgb(235, 235, 235),
+    onAccent: rgb(0, 0, 0),
+    shadow: rgb(0, 0, 0, 0),
+  )
+  t.radii = Radii(  ## sharp edges everywhere -- except the switch pill
+    button: 0.0, field: 0.0, check: 0.0, tick: 0.0, inner: 0.0,
+    popover: 0.0, popoverShadow: 0.0, tab: 0.0, tabPanel: 0.0,
+    card: 0.0, pill: 0.0, switch: 12.0, switchKnob: 8.0,
+  )
+  t.scrollbar = ScrollbarStyle(
+    width: 12.0, margin: 4.0, radius: 0.0, minThumb: 32.0,
+    track: rgb(24, 24, 24, 200),
+    thumb: rgb(255, 214, 0, 230),
+    thumbHot: rgb(255, 255, 255, 255))
+  t
+
+func warmTheme(): Theme =
+  var t = defaultTheme()
+  t.palette = Palette(
+    bg: rgb(28, 24, 20),
+    panelBg: rgb(42, 36, 30),
+    panelBorder: rgb(82, 68, 52),
+    buttonBg: rgb(72, 60, 46),
+    buttonHoverBg: rgb(98, 82, 62),
+    fieldBg: rgb(34, 29, 24),
+    selectedBg: rgb(92, 74, 52),
+    accent: rgb(224, 164, 78),
+    textColor: rgb(240, 230, 214),
+    dimColor: rgb(156, 140, 118),
+    labelColor: rgb(200, 184, 158),
+    onAccent: rgb(26, 22, 18),
+    shadow: rgb(0, 0, 0, 80),
+  )
+  t.scrollbar = ScrollbarStyle(
+    width: 10.0, margin: 4.0, radius: 5.0, minThumb: 28.0,
+    track: rgb(20, 17, 14, 140),
+    thumb: rgb(150, 128, 96, 180),
+    thumbHot: rgb(200, 170, 120, 235))
+  t
+
+proc applyTheme() =
+  case themeIndex
+  of 1: setTheme(lightTheme())
+  of 2: setTheme(contrastTheme())
+  of 3: setTheme(warmTheme())
+  else: setTheme(defaultTheme())
 
 proc resetAll() =
   count = 0
@@ -57,6 +153,8 @@ proc resetAll() =
   notes = ""
   quantity = 2
   volume = 0.5
+  themeIndex = 0
+  applyTheme()
 
 proc tabActions() =
   if button(hashId("btn-tab-reset"), "Reset all"):
@@ -98,6 +196,17 @@ proc drawGallery() =
     overline("ellipse_ui on clay")
     if showIntro:
       bodyText("The standard widget set of the new UI system: toggles, dropdowns, text and number entry, headings and reading text -- all immediate-mode clay layout blocks. Scroll with the wheel or drag the floating scrollbar thumbs; the File and View menus above drive this same state.")
+
+    Section(title = "Theme"):
+      clay "throw", row(width = grow(), height = fit(), gap = 16,
+                        alignY = top):
+        Labeled(label = "Look"):
+          let sel = comboBox(hashId("combo-theme"), themeNames, themeIndex,
+                             "Pick one")
+          if sel != themeIndex:
+            themeIndex = sel
+            applyTheme()
+      caption("One combobox swaps the live theme; every widget -- menus, fields, scrollbars, this very dropdown -- reads its tokens from `activeTheme` as it renders.")
 
     Section(title = "Toggles & buttons"):
       clay "trow", row(width = grow(), height = fit(), gap = 28,
