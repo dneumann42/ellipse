@@ -33,10 +33,10 @@ proc main() {.raises.} =
   clay "panel", col(width = fixedPx(400), padding = padAll(10), gap = 5):
     clay row(width = grow(), gap = 5):
       clay "a", col(width = fixedPx(100), height = fixedPx(50))
-        .withBg(rgb(255, 0, 0))
-        .withCorner(4):
+        .bg(rgb(255, 0, 0))
+        .corner(4):
         discard
-      clay "b", col(width = grow(), height = fixedPx(50)).withBg(rgb(0, 255, 0)):
+      clay "b", col(width = grow(), height = fixedPx(50)).bg(rgb(0, 255, 0)):
         discard
     textElement("footer")
   endLayout(ctx)
@@ -78,7 +78,7 @@ proc main() {.raises.} =
 
   # leaf form: body is just `discard`
   beginLayout()
-  clay "solid", row(width = fixedPx(30), height = fixedPx(30)).withBg(rgb(1, 2, 3)):
+  clay "solid", row(width = fixedPx(30), height = fixedPx(30)).bg(rgb(1, 2, 3)):
     discard
   endLayout(ctx)
   expect(elementData(hashId("solid")).found, "dsl: element with empty body")

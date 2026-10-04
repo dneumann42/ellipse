@@ -88,7 +88,7 @@ clay "sidebar", col(width = fixedPx(w)):
 | Arena allocator, max counts  | =seq=/=Table=, generation-stamped stores; no capacity errors     |
 |= CLAY(...){...}= macro layer | =clay= template plugin (=src/clay/deps/mclay.nim=)               |
 | Designated-initializer decls | Plain objects + factories (=row=, =col=, =grow=, =pct=, =fit=)   |
-| Chained =withBg=/=withBorder=| Same, as =ElementDeclaration= combinators                        |
+| Chained =bg=/=border=| Same, as =ElementDeclaration= combinators                        |
 |= Clay_ErrorHandler= callback | Errors accumulate; =takeErrors()= drains them after the frame    |
 |= double= / =float= mixing    | Everything =float32= (as =clay.h= computes)                      |
 | Transition engine            | =lerp= / =easeOut= helpers (see "Animations")                    |

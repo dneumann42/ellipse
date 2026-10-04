@@ -13,7 +13,7 @@
 ##     memory, errors accumulate in `takeErrors`, and the context is a `ref`.
 ##   - No wrapper structs or designated-initializer macros: declarations are
 ##     plain objects with defaults, built with `row`/`col`/`grow`/`pct`/...
-##     factories and combinators (`withBg`, `withBorder`, `withFloating`).
+##     factories and combinators (`bg`, `border`, `floating`).
 ##   - The C macro layer (CLAY(...){...}, CLAY_ID, ...) is *not* ported as
 ##     macros. A Nimony template plugin (`clay`) brackets elements and hashes
 ##     string-literal ids at compile time; see src/clay/deps/mclay.nim.

@@ -244,7 +244,8 @@ type
   ElementDeclaration* = object
     ## The full configuration of a container/visual element: the single
     ## struct passed to `openElement`. Build it with `row`/`col` and the
-    ## `with*` combinators, or fill the fields directly.
+    ## decoration combinators (`bg`, `border`, `corner`, ...), or fill the
+    ## fields directly.
     layout*: LayoutConfig
     background*: Color
     overlay*: Color
@@ -373,10 +374,11 @@ func pct*(fraction: float32): SizingAxis =
 ## These replace Clay's `CLAY_SIZING_*` / `CLAY_BORDER_*` / designated-init
 ## macros. `row` and `col` build a full `ElementDeclaration` from named
 ## arguments (mirroring the `row(...)` / `col(...)` sketch in docs/ui.org);
-## `with*` combinators decorate it visually. All take `sink` and return a new
+## decoration combinators (`bg`, `border`, `corner`, ...) decorate it
+## visually. All take `sink` and return a new
 ## declaration, so they chain:
 ##
-##   row(gap = 8, width = grow()).withBg(panel).withBorder(1, line)
+##   row(gap = 8, width = grow()).bg(panel).border(1, line)
 
 func row*(
   gap: int = 0,
@@ -412,26 +414,26 @@ func col*(
     direction: topToBottom,
   ))
 
-proc withBg*(d: sink ElementDeclaration, color: Color): ElementDeclaration =
+proc bg*(d: sink ElementDeclaration, color: Color): ElementDeclaration =
   result = d
   result.background = color
 
-proc withOverlay*(d: sink ElementDeclaration, color: Color): ElementDeclaration =
+proc overlay*(d: sink ElementDeclaration, color: Color): ElementDeclaration =
   result = d
   result.overlay = color
 
-proc withCorner*(d: sink ElementDeclaration, radius: float32): ElementDeclaration {.inline.} =
+proc corner*(d: sink ElementDeclaration, radius: float32): ElementDeclaration {.inline.} =
   result = d
   result.corner = allCorners(radius)
 
-proc withCorner*(d: sink ElementDeclaration, topLeft, topRight, bottomLeft, bottomRight: float32): ElementDeclaration =
+proc corner*(d: sink ElementDeclaration, topLeft, topRight, bottomLeft, bottomRight: float32): ElementDeclaration =
   result = d
   result.corner = CornerRadius(
     topLeft: topLeft, topRight: topRight,
     bottomLeft: bottomLeft, bottomRight: bottomRight,
   )
 
-proc withBorder*(
+proc border*(
   d: sink ElementDeclaration, width: int, color: Color,
   betweenChildren: int = 0,
 ): ElementDeclaration =
@@ -444,40 +446,40 @@ proc withBorder*(
     ),
   )
 
-proc withImage*(d: sink ElementDeclaration, data: pointer, tint: Color = Color()): ElementDeclaration =
+proc image*(d: sink ElementDeclaration, data: pointer, tint: Color = Color()): ElementDeclaration =
   result = d
   result.image = ImageConfig(data: data, tint: tint)
 
-proc withCustom*(d: sink ElementDeclaration, data: pointer): ElementDeclaration =
+proc custom*(d: sink ElementDeclaration, data: pointer): ElementDeclaration =
   result = d
   result.custom = CustomConfig(data: data)
 
-proc withClip*(d: sink ElementDeclaration, horizontal, vertical: bool, childOffset = Vec2()): ElementDeclaration =
+proc clip*(d: sink ElementDeclaration, horizontal, vertical: bool, childOffset = Vec2()): ElementDeclaration =
   ## Makes this element a clip (scroll) container on the given axes.
   result = d
   result.clip = ClipConfig(horizontal: horizontal, vertical: vertical, childOffset: childOffset)
 
-proc withGap*(d: sink ElementDeclaration, gap: int): ElementDeclaration {.inline.} =
+proc gap*(d: sink ElementDeclaration, gap: int): ElementDeclaration {.inline.} =
   result = d
   result.layout.gap = gap
 
-proc withPadding*(d: sink ElementDeclaration, padding: Padding): ElementDeclaration {.inline.} =
+proc padding*(d: sink ElementDeclaration, padding: Padding): ElementDeclaration {.inline.} =
   result = d
   result.layout.padding = padding
 
-proc withAlign*(d: sink ElementDeclaration, x: AlignX, y: AlignY): ElementDeclaration {.inline.} =
+proc align*(d: sink ElementDeclaration, x: AlignX, y: AlignY): ElementDeclaration {.inline.} =
   result = d
   result.layout.align = ChildAlignment(x: x, y: y)
 
-proc withSizing*(d: sink ElementDeclaration, width, height: SizingAxis): ElementDeclaration {.inline.} =
+proc sizing*(d: sink ElementDeclaration, width, height: SizingAxis): ElementDeclaration {.inline.} =
   result = d
   result.layout.sizing = Sizing(width: width, height: height)
 
-proc withAspect*(d: sink ElementDeclaration, ratio: float32): ElementDeclaration {.inline.} =
+proc aspect*(d: sink ElementDeclaration, ratio: float32): ElementDeclaration {.inline.} =
   result = d
   result.aspectRatio = ratio
 
-proc withFloating*(
+proc floating*(
   d: sink ElementDeclaration,
   attachTo: AttachTo,
   offset: Vec2 = Vec2(),

@@ -113,7 +113,7 @@ func pointerOverIds*(ctx: Context): seq[ElementId] =
 
 proc currentScrollOffset*(ctx: Context): Vec2 =
   ## The scroll position of the enclosing scroll container, read *during*
-  ## declaration to feed `withClip(..., childOffset = currentScrollOffset())`.
+  ## declaration to feed `clip(..., childOffset = currentScrollOffset())`.
   ## Clay does this with `Clay_GetScrollOffset()` inside `CLAY(...)`.
   if ctx.openStack.len == 0:
     return Vec2()

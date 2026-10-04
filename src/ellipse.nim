@@ -4,23 +4,15 @@ import clay
 import ellipse/logger
 import ellipse/platform/platform
 import ellipse/platform/renderer
+import ellipse_ui/ui
 
 addHandler initStandardLogger()
 
 const
-  bgColor = rgb(12, 12, 16)
-  panelBg = rgb(28, 30, 38)
-  panelBorder = rgb(60, 64, 78)
-  buttonBg = rgb(52, 56, 72)
-  buttonHoverBg = rgb(84, 90, 116)
-  textColor = rgb(230, 232, 238)
+  incBtn = hashId("inc")
+  decBtn = hashId("dec")
 
 var count = 0
-
-proc shade(over: bool): Color =
-  if over:
-    return buttonHoverBg
-  return buttonBg
 
 proc update() {.raises.} =
   let pointer = pointerState()
@@ -48,26 +40,22 @@ proc update() {.raises.} =
   # Clay's pointer queries hit *last* frame's boxes: handle input right here,
   # between `setPointerState` and this frame's `beginLayout` (frame contract).
   let clicked = pointerData(currentContext()).state == pressedThisFrame
-  if clicked and pointerOver(hashId("dec")):
+  if clicked and pointerOver(decBtn):
     dec count
-  if clicked and pointerOver(hashId("inc")):
+  if clicked and pointerOver(incBtn):
     inc count
 
   beginLayout()
   clay "app", row(width = grow(), height = grow(), alignX = centerX, alignY = centerY)
-      .withBg(bgColor):
+      .bg(bgColor):
     clay "counter", col(gap = 16, padding = padAll(24), alignX = centerX)
-        .withBg(panelBg).withBorder(1, panelBorder).withCorner(12):
+        .bg(panelBg).border(1, panelBorder).corner(12):
       textElement($count, TextConfig(fontSize: 48, color: textColor))
       clay "buttons", row(gap = 8):
-        clay "dec", col(width = fixedPx(64), height = fixedPx(48),
-            alignX = centerX, alignY = centerY)
-            .withBg(shade(pointerOver(hashId("dec")))).withCorner(8):
-          textElement("-", TextConfig(fontSize: 28, color: textColor))
-        clay "inc", col(width = fixedPx(64), height = fixedPx(48),
-            alignX = centerX, alignY = centerY)
-            .withBg(shade(pointerOver(hashId("inc")))).withCorner(8):
-          textElement("+", TextConfig(fontSize: 28, color: textColor))
+        if button(decBtn, "Decrement", height = fixedPx(48)):
+          discard
+        if button(incBtn, "Increment", height = fixedPx(48)):
+          discard
   endLayout()
 
 proc render() {.raises.} =
