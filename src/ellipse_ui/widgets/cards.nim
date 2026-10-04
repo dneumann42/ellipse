@@ -25,16 +25,18 @@ widget Card(title: string, actions: proc(): void, body: proc(): void):
   ## `Card(title = "Status", actions = emptySlot): ...`. The card hugs
   ## its content vertically and grows to its container's width.
   openElement()
-  configureOpenElement(col(width = grow(), height = fit(), gap = 10,
-      padding = padAll(14))
-    .bg(panelBg)
-    .border(1, panelBorder)
-    .corner(12))
+  let t = activeTheme
+  configureOpenElement(col(width = grow(), height = fit(), gap = t.metrics.gapCard,
+      padding = padAll(t.metrics.padCard))
+    .bg(t.palette.panelBg)
+    .border(t.metrics.borderHairline, t.palette.panelBorder)
+    .corner(t.radii.card))
   if title.len > 0:
     openElement()
     configureOpenElement(row(width = grow(), height = fit(), gap = 8,
         alignY = centerY))
-    textElement(title, TextConfig(fontSize: 19, color: textColor))
+    textElement(title, TextConfig(fontSize: t.text.cardTitle,
+      color: t.palette.textColor))
     # spacer pushing the actions to the right edge
     openElement()
     configureOpenElement(row(width = grow(), height = fit()))
@@ -49,15 +51,16 @@ widget StatCard(label: string, value: string, hint: string):
   ## (pass `""` to omit the hint). Grows to share its row's width --
   ## natural inside `CardRow`.
   openElement()
-  configureOpenElement(col(width = grow(), height = fit(), gap = 2,
-      padding = padAll(12), alignX = centerX)
-    .bg(panelBg)
-    .border(1, panelBorder)
-    .corner(12))
-  textElement(label, TextConfig(fontSize: 14, color: dimColor))
-  textElement(value, TextConfig(fontSize: 26, color: textColor))
+  let t = activeTheme
+  configureOpenElement(col(width = grow(), height = fit(), gap = t.metrics.gapList,
+      padding = padAll(t.metrics.padStat), alignX = centerX)
+    .bg(t.palette.panelBg)
+    .border(t.metrics.borderHairline, t.palette.panelBorder)
+    .corner(t.radii.card))
+  textElement(label, TextConfig(fontSize: t.text.statLabel, color: t.palette.dimColor))
+  textElement(value, TextConfig(fontSize: t.text.statValue, color: t.palette.textColor))
   if hint.len > 0:
-    textElement(hint, TextConfig(fontSize: 13, color: labelColor))
+    textElement(hint, TextConfig(fontSize: t.text.statHint, color: t.palette.labelColor))
   closeElement()
 
 widget CardRow(body: proc(): void):
@@ -70,6 +73,7 @@ widget CardRow(body: proc(): void):
   ##
   ## `Card`s work here too, and nest the same way.
   openElement()
-  configureOpenElement(row(width = grow(), height = fit(), gap = 12))
+  configureOpenElement(row(width = grow(), height = fit(),
+      gap = activeTheme.metrics.gapCardRow))
   body()
   closeElement()

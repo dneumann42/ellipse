@@ -54,10 +54,11 @@ func selectionSummary*(sel: Selection, options: seq[string]): string =
 
 proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
                   placeholder = "Select...", width = grow(),
-                  height = fixedPx(40)): Selection =
+                  height = fixedPx(activeTheme.metrics.controlHeight)): Selection =
   ## Returns the selection mask to store back. The popover stays open while
   ## the user ticks items; a click outside it closes.
   result = selection
+  let t = activeTheme
   let began = pressedNow()
   let popId = localId("multi.pop", id.id)
 
@@ -70,34 +71,36 @@ proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
 
   openElement(id)
   configureOpenElement(row(width = width, height = height, gap = 8,
-      padding = padAll(8), alignY = centerY)
+      padding = padAll(t.metrics.padButton), alignY = centerY)
     .bg(shade(pointerOver(id) or isOpen))
-    .corner(8)
-    .border(1, if isOpen: accent else: panelBorder))
+    .corner(t.radii.field)
+    .border(t.metrics.borderHairline,
+      if isOpen: t.palette.accent else: t.palette.panelBorder))
   let summary = selectionSummary(result, options)
   var shown = placeholder
-  var shownColor = dimColor
+  var shownColor = t.palette.dimColor
   if summary.len > 0:
     shown = summary
-    shownColor = textColor
-  textElement(shown, TextConfig(fontSize: 18, color: shownColor,
+    shownColor = t.palette.textColor
+  textElement(shown, TextConfig(fontSize: t.text.control, color: shownColor,
     wrap: noWrap))
   openElement()
   configureOpenElement(row(width = grow(), height = fit()))
   closeElement()
   textElement(if isOpen: "^" else: "v",
-    TextConfig(fontSize: 16, color: dimColor))
+    TextConfig(fontSize: t.text.chevron, color: t.palette.dimColor))
   closeElement()
 
   if isOpen:
     openElement(popId)
-    configureOpenElement(col(gap = 2, padding = padAll(4),
-        width = pct(1.0), height = fit(max = 260))
-      .bg(panelBg)
-      .border(1, panelBorder)
-      .corner(10)
+    configureOpenElement(col(gap = t.metrics.gapList,
+        padding = padAll(t.metrics.padList),
+        width = pct(1.0), height = fit(max = t.metrics.multiListMaxHeight))
+      .bg(t.palette.panelBg)
+      .border(t.metrics.borderHairline, t.palette.panelBorder)
+      .corner(t.radii.popover)
       .floating(attachElementId,
-        offset = vec2(0.0, 6.0), zIndex = 200,
+        offset = vec2(0.0, t.metrics.popoverOffset), zIndex = 200,
         points = AttachPoints(element: pointLeftTop,
                               parent: pointLeftBottom),
         parentId = id.id)
@@ -111,24 +114,28 @@ proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
       if picked:
         result = result xor bit(i)
       var d = row(width = grow(), height = fit(), gap = 8,
-          padding = padAll(6), alignY = centerY)
-      d.corner = allCorners(6)
+          padding = padAll(t.metrics.padOption), alignY = centerY)
+      d.corner = allCorners(t.radii.inner)
       if hovered():
-        d.background = buttonHoverBg
+        d.background = t.palette.buttonHoverBg
       configureOpenElement(d)
       openElement()
-      configureOpenElement(col(width = fixedPx(18), height = fixedPx(18),
+      configureOpenElement(col(width = fixedPx(t.metrics.checkSizeSm),
+          height = fixedPx(t.metrics.checkSizeSm),
           alignX = centerX, alignY = centerY)
-        .bg(fieldBg)
-        .corner(4)
-        .border(1, if isSet(result, i): accent else: panelBorder))
+        .bg(t.palette.fieldBg)
+        .corner(t.radii.check)
+        .border(t.metrics.borderHairline,
+          if isSet(result, i): t.palette.accent else: t.palette.panelBorder))
       if isSet(result, i):
         openElement()
-        configureOpenElement(col(width = fixedPx(9), height = fixedPx(9))
-            .bg(accent).corner(2))
+        configureOpenElement(col(width = fixedPx(t.metrics.tickSizeSm),
+            height = fixedPx(t.metrics.tickSizeSm))
+            .bg(t.palette.accent).corner(t.radii.tick))
         closeElement()
       closeElement()
-      textElement(options[i], TextConfig(fontSize: 17, color: textColor))
+      textElement(options[i], TextConfig(fontSize: t.text.option,
+        color: t.palette.textColor))
       closeElement()
       inc i
 
@@ -146,11 +153,11 @@ proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
       let btnId = if pair == 0: allId else: noneId
       openElement(btnId)
       configureOpenElement(row(width = grow(), height = fit(),
-          padding = padAll(4), alignX = centerX)
+          padding = padAll(t.metrics.padMinor), alignX = centerX)
         .bg(shade(pointerOver(btnId)))
-        .corner(6))
+        .corner(t.radii.inner))
       textElement(if pair == 0: "All" else: "None",
-        TextConfig(fontSize: 15, color: textColor))
+        TextConfig(fontSize: t.text.label, color: t.palette.textColor))
       closeElement()
     closeElement()
 

@@ -8,13 +8,8 @@ import ../ellipse/logger
 import ellipse/platform/platform
 import ellipse/platform/renderer
 
-const
-  bgColor* = rgb(12, 12, 16)
-  panelBg* = rgb(28, 30, 38)
-  panelBorder* = rgb(60, 64, 78)
-  buttonBg* = rgb(52, 56, 72)
-  buttonHoverBg* = rgb(84, 90, 116)
-  textColor* = rgb(230, 232, 238)
+import ./theme
+export theme
 
 ## --- wheel feel ----------------------------------------------------------------
 ##
@@ -94,15 +89,17 @@ proc shade*(over: bool): Color =
   return buttonBg
 
 proc button*(id: ElementId, label: string, width = fit(), height = fit()): bool =
+  let t = activeTheme
   let over = pointerOver(id)
   result = over and currentContext().pointerData().state == pressedThisFrame
   openElement(id)
   configureOpenElement(col(width = width, height = height, alignX = centerX,
-      alignY = centerY, padding = padAll(8))
+      alignY = centerY, padding = padAll(t.metrics.padButton))
       .bg(shade(over))
-      .corner(8)
-      .border(2, panelBorder))
-  textElement(label, TextConfig(fontSize: 28, color: textColor))
+      .corner(t.radii.button)
+      .border(t.metrics.borderRaised, t.palette.panelBorder))
+  textElement(label, TextConfig(fontSize: t.text.button,
+    color: t.palette.textColor))
   closeElement()
 
 type MenuBody* = proc() {.closure.}
@@ -116,14 +113,17 @@ proc menuPressed(): bool =
   currentContext().pointerData().state == pressedThisFrame
 
 proc toolBar*(id: string, blk: MenuBody) =
+  let t = activeTheme
   menuPress = false
   openElement(elementId(id))
-  configureOpenElement(row(width = grow(), height = fixedPx(48), gap = 4,
-                           padding = padAll(4)).bg(panelBg))
+  configureOpenElement(row(width = grow(), height = fixedPx(t.metrics.toolbarHeight),
+                           gap = t.metrics.padToolbar,
+                           padding = padAll(t.metrics.padToolbar)).bg(t.palette.panelBg))
   blk()
   closeElement()
 
 proc menu*(label: string, blk: MenuBody) =
+  let t = activeTheme
   let btnId = elementId("menu." & label)
   let popId = elementId("menu." & label & ".pop")
   let clicked = menuPressed()
@@ -139,27 +139,28 @@ proc menu*(label: string, blk: MenuBody) =
   let over = pointerOver(btnId)
   openElement(btnId)
   configureOpenElement(col(width = fit(), height = grow(), alignX = centerX,
-                           alignY = centerY, padding = padAll(8))
+      alignY = centerY, padding = padAll(t.metrics.padButton))
       .bg(shade(over or isOpen))
-      .corner(8)
-      .border(1, panelBorder))
-  textElement(label, TextConfig(fontSize: 18, color: textColor))
+      .corner(t.radii.button)
+      .border(t.metrics.borderHairline, t.palette.panelBorder))
+  textElement(label, TextConfig(fontSize: t.text.menu, color: t.palette.textColor))
   closeElement()
 
   if isOpen:
     openElement(popId)
-    configureOpenElement(col(width = fit(), height = fit(), gap = 2,
-                             padding = padAll(6))
-        .bg(panelBg).border(1, panelBorder).corner(10)
+    configureOpenElement(col(width = fit(), height = fit(), gap = t.metrics.gapList,
+                             padding = padAll(t.metrics.padOption))
+        .bg(t.palette.panelBg).border(t.metrics.borderHairline, t.palette.panelBorder)
+        .corner(t.radii.popover)
         .floating(attachElementId,
-                  offset = vec2(0.0, 6.0), zIndex = 100,
+                  offset = vec2(0.0, t.metrics.popoverOffset), zIndex = 100,
                   points = AttachPoints(element: pointLeftTop,
                                         parent: pointLeftBottom),
                   parentId = btnId.id))
     menuSelected = false
     if elementData(popId).found:
       var sh = col(width = grow(), height = grow())
-        .bg(rgb(0, 0, 0, 70)).corner(14)
+        .bg(t.palette.shadow).corner(t.radii.popoverShadow)
         .floating(attachParent,
                   offset = vec2(0.0, 4.0), zIndex = 99,
                   points = AttachPoints(element: pointLeftTop,
@@ -175,27 +176,31 @@ proc menu*(label: string, blk: MenuBody) =
     closeElement()
 
 proc menuItem*(label: string, shortcut = ""): bool =
+  let t = activeTheme
   openElement()
   result = menuPressed() and hovered()
   if result:
     menuSelected = true
-  var d = row(width = grow(), height = fit(), gap = 16, padding = padAll(8))
+  var d = row(width = grow(), height = fit(), gap = 16,
+              padding = padAll(t.metrics.padMenuItem))
   if hovered():
     d.background = buttonHoverBg
-  d.corner = allCorners(6)
+  d.corner = allCorners(t.radii.inner)
   configureOpenElement(d)
-  textElement(label, TextConfig(fontSize: 18, color: textColor))
+  textElement(label, TextConfig(fontSize: t.text.menu, color: t.palette.textColor))
   if shortcut.len > 0:
     openElement()
     configureOpenElement(row(width = grow(), height = fit(), alignX = right))
-    textElement(shortcut, TextConfig(fontSize: 18, color: rgb(130, 134, 150)))
+    textElement(shortcut, TextConfig(fontSize: t.text.menu, color: t.palette.dimColor))
     closeElement()
   closeElement()
 
 proc menuSeparator*() =
+  let t = activeTheme
   openElement()
   var d = row(width = grow(), height = fixedPx(9))
-  d.border = BorderConfig(color: panelBorder, width: BorderWidth(top: 1))
+  d.border = BorderConfig(color: t.palette.panelBorder,
+                          width: BorderWidth(top: t.metrics.borderHairline))
   configureOpenElement(d)
   closeElement()
 

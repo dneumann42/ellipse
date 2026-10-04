@@ -42,10 +42,13 @@ proc tabStrip*(id: ElementId, labels: seq[string], selected: int): int =
   ## buttons take ids local to `id`, so several strips can share a
   ## screen.
   result = selected
+  let th = activeTheme
   openElement(localId("tabs.strip", id.id))
-  var d = row(width = grow(), height = fit(), gap = 4,
-      padding = Padding(left: 4, right: 4, top: 4, bottom: 0))
-  d.border = BorderConfig(color: panelBorder, width: BorderWidth(bottom: 1))
+  var d = row(width = grow(), height = fit(), gap = th.metrics.padToolbar,
+      padding = Padding(left: th.metrics.padToolbar, right: th.metrics.padToolbar,
+                        top: th.metrics.padToolbar, bottom: 0))
+  d.border = BorderConfig(color: th.palette.panelBorder,
+    width: BorderWidth(bottom: th.metrics.borderHairline))
   configureOpenElement(d)
   var i = 0
   while i < labels.len:
@@ -53,17 +56,20 @@ proc tabStrip*(id: ElementId, labels: seq[string], selected: int): int =
     let over = pointerOver(tabId)
     openElement(tabId)
     var t = col(width = fit(), height = fit(), alignX = centerX,
-        padding = Padding(left: 14, right: 14, top: 7, bottom: 6))
-    t.corner = CornerRadius(topLeft: 8, topRight: 8, bottomLeft: 0,
-                            bottomRight: 0)
+        padding = Padding(left: th.metrics.padTabX, right: th.metrics.padTabX,
+                          top: th.metrics.padTabTop, bottom: th.metrics.padTabBottom))
+    t.corner = CornerRadius(topLeft: th.radii.tab, topRight: th.radii.tab,
+                            bottomLeft: 0, bottomRight: 0)
     if i == selected:
-      t.background = panelBg
-      t.border = BorderConfig(color: accent, width: BorderWidth(bottom: 2))
+      t.background = th.palette.panelBg
+      t.border = BorderConfig(color: th.palette.accent,
+        width: BorderWidth(bottom: th.metrics.borderTab))
     elif over:
-      t.background = buttonBg
+      t.background = th.palette.buttonBg
     configureOpenElement(t)
-    textElement(labels[i], TextConfig(fontSize: 17,
-      color: if i == selected or over: textColor else: dimColor))
+    textElement(labels[i], TextConfig(fontSize: th.text.option,
+      color: if i == selected or over: th.palette.textColor
+             else: th.palette.dimColor))
     closeElement()
     if clickedIn(tabId):
       result = i
@@ -86,10 +92,11 @@ widget TabbedView(id: ElementId, tabs: seq[string], body: proc(): void):
     setActiveTab(id, picked)
   openElement(localId("tabs.panel", id.id))
   configureOpenElement(col(width = grow(), height = grow(), gap = 8,
-      padding = padAll(12))
+      padding = padAll(activeTheme.metrics.padPanel))
     .bg(panelBg)
-    .border(1, panelBorder)
-    .corner(0, 10, 10, 10))
+    .border(activeTheme.metrics.borderHairline, panelBorder)
+    .corner(0, activeTheme.radii.tabPanel, activeTheme.radii.tabPanel,
+            activeTheme.radii.tabPanel))
   body()
   closeElement()
   closeElement()

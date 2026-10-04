@@ -22,13 +22,6 @@ import ../ui
 
 import ellipse/platform/platform
 
-const
-  accent* = rgb(96, 130, 220)      ## focus rings, checked boxes, links
-  fieldBg* = rgb(20, 22, 28)       ## text-field and dropdown interiors
-  selectedBg* = rgb(64, 70, 92)    ## the chosen row in an option list
-  dimColor* = rgb(130, 134, 150)   ## placeholders, captions, hints
-  labelColor* = rgb(180, 184, 196) ## field labels and secondary text
-
 proc pressedNow*(): bool =
   ## The primary button went down *this* frame (one-shot click edge).
   currentContext().pointerData().state == pressedThisFrame
@@ -448,7 +441,9 @@ widget Labeled(label: string, control: proc(): void):
   ## The trailing block fills `control`, so the assignment can capture the
   ## caller's locals.
   openElement()
-  configureOpenElement(col(width = grow(), gap = 6, padding = padAll(4)))
-  textElement(label, TextConfig(fontSize: 15, color: labelColor))
+  let t = activeTheme
+  configureOpenElement(col(width = grow(), gap = t.metrics.gapTight,
+      padding = padAll(t.metrics.padMinor)))
+  textElement(label, TextConfig(fontSize: t.text.label, color: t.palette.labelColor))
   control()
   closeElement()

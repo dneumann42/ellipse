@@ -29,22 +29,9 @@ import ../ui
 
 import ./common
 
-type
-  ScrollbarStyle* = object
-    width*: float32      ## bar thickness
-    margin*: float32     ## inset from the container's edge
-    radius*: float32     ## corner radius of track and thumb
-    minThumb*: float32   ## shortest thumb, in pixels
-    track*: Color
-    thumb*: Color
-    thumbHot*: Color     ## hovered or dragged thumb
-
-const
-  defaultScrollbarStyle* = ScrollbarStyle(
-    width: 10.0, margin: 4.0, radius: 5.0, minThumb: 28.0,
-    track: rgb(6, 6, 9, 120),
-    thumb: rgb(118, 124, 148, 170),
-    thumbHot: rgb(168, 176, 205, 235))
+## `ScrollbarStyle` and its default live in `ellipse_ui/theme` so a pushed
+## theme can restyle every bar at once; callers may still pass an explicit
+## style to `scrollbar`.
 
 type
   BarAxis = enum vertical, horizontal
@@ -220,7 +207,7 @@ proc advanceDrags*(container: ElementId, style: ScrollbarStyle) =
       inc i
 
 proc scrollbar*(id: ElementId, container: ElementId,
-                style = defaultScrollbarStyle) =
+                style = defaultScrollbarStyle()) =
   ## Draw and drive the floating scrollbar(s) of the scroll container
   ## `container`. Declare inside that container's scope, after its
   ## children. A vertical bar hugs the right edge, a horizontal one the

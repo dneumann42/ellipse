@@ -14,8 +14,8 @@ import ellipse/platform/platform   ## KeyEvent/kevEnter for the multiline remap
 import ./common
 
 proc textField*(id: ElementId, text: string, placeholder = "",
-                fontSize: uint16 = 18, width = grow(),
-                height = fixedPx(40)): string =
+                fontSize: uint16 = activeTheme.text.control, width = grow(),
+                height = fixedPx(activeTheme.metrics.controlHeight)): string =
   result = text
 
   let wasFocused = focused(id)
@@ -35,13 +35,15 @@ proc textField*(id: ElementId, text: string, placeholder = "",
       blur()
   result = edited
 
+  let t = activeTheme
   openElement(id)
   configureOpenElement(row(width = width, height = height,
-      padding = Padding(left: 10, right: 10, top: 8, bottom: 8),
+      padding = Padding(left: t.metrics.padFieldX, right: t.metrics.padFieldX,
+                        top: t.metrics.padFieldY, bottom: t.metrics.padFieldY),
       alignY = centerY)
-    .bg(fieldBg)
-    .corner(8)
-    .border(1, fieldBorder(id)))
+    .bg(t.palette.fieldBg)
+    .corner(t.radii.field)
+    .border(t.metrics.borderHairline, fieldBorder(id)))
 
   var shown = edited
   var color = textColor
@@ -55,7 +57,7 @@ proc textField*(id: ElementId, text: string, placeholder = "",
   closeElement()
 
 proc multilineField*(id: ElementId, text: string, placeholder = "",
-                     fontSize: uint16 = 18, rows: int = 4,
+                     fontSize: uint16 = activeTheme.text.control, rows: int = 4,
                      width = grow()): string =
   ## The same edit engine over a taller, word-wrapped box. Enter inserts a
   ## newline instead of committing; a click outside leaves the field.
@@ -85,16 +87,19 @@ proc multilineField*(id: ElementId, text: string, placeholder = "",
     syncCaret(edited.len)
   result = edited
 
+  let t = activeTheme
   openElement(id)
   configureOpenElement(col(width = width,
-      height = fixedPx(float32(rows) * 26.0),
-      padding = Padding(left: 10, right: 10, top: 8, bottom: 8))
-    .bg(fieldBg)
-    .corner(8)
-    .border(1, fieldBorder(id)))
-  let cfg = TextConfig(fontSize: fontSize, color: textColor)
+      height = fixedPx(float32(rows) * t.metrics.textRowHeight),
+      padding = Padding(left: t.metrics.padFieldX, right: t.metrics.padFieldX,
+                        top: t.metrics.padFieldY, bottom: t.metrics.padFieldY))
+    .bg(t.palette.fieldBg)
+    .corner(t.radii.field)
+    .border(t.metrics.borderHairline, fieldBorder(id)))
+  let cfg = TextConfig(fontSize: fontSize, color: t.palette.textColor)
   if edited.len == 0 and not focused(id):
-    textElement(placeholder, TextConfig(fontSize: fontSize, color: dimColor))
+    textElement(placeholder,
+      TextConfig(fontSize: fontSize, color: t.palette.dimColor))
   else:
     textElement(edited, cfg)
   if focused(id):

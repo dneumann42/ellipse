@@ -94,7 +94,8 @@ proc sanitizeNum(buf: string, allowNeg: bool): string =
 
 proc numberField*(id: ElementId, value: float, step = 1.0,
                   minVal = -1.0e9, maxVal = 1.0e9, whole = false,
-                  width = grow(), height = fixedPx(40)): float =
+                  width = grow(),
+                  height = fixedPx(activeTheme.metrics.controlHeight)): float =
   result = value
   let wasFocused = focused(id)
 
@@ -146,17 +147,19 @@ proc numberField*(id: ElementId, value: float, step = 1.0,
       if focused(id):
         numBuffer = fmtVal(result, whole)
 
+  let t = activeTheme
   openElement(id)
-  configureOpenElement(row(width = width, height = height, gap = 6,
-      padding = Padding(left: 10, right: 8, top: 8, bottom: 8),
+  configureOpenElement(row(width = width, height = height, gap = t.metrics.gapTight,
+      padding = Padding(left: t.metrics.padFieldX, right: t.metrics.padFieldY,
+                        top: t.metrics.padFieldY, bottom: t.metrics.padFieldY),
       alignY = centerY)
-    .bg(fieldBg)
-    .corner(8)
-    .border(1, fieldBorder(id)))
+    .bg(t.palette.fieldBg)
+    .corner(t.radii.field)
+    .border(t.metrics.borderHairline, fieldBorder(id)))
 
   openElement()
   configureOpenElement(row(width = grow(), height = fit(), alignX = right))
-  let cfg = TextConfig(fontSize: 18, color: textColor,
+  let cfg = TextConfig(fontSize: t.text.control, color: t.palette.textColor,
     wrap: noWrap, justify: justifyRight)
   textElement(if focused(id): numBuffer else: fmtVal(result, whole), cfg)
   if focused(id):
@@ -164,26 +167,29 @@ proc numberField*(id: ElementId, value: float, step = 1.0,
   closeElement()
 
   openElement(decId)
-  configureOpenElement(col(width = fixedPx(26), height = fixedPx(26),
+  configureOpenElement(col(width = fixedPx(t.metrics.stepperSize),
+      height = fixedPx(t.metrics.stepperSize),
       alignX = centerX, alignY = centerY)
     .bg(shade(pointerOver(decId)))
-    .corner(6))
-  textElement("-", TextConfig(fontSize: 18, color: textColor))
+    .corner(t.radii.inner))
+  textElement("-", TextConfig(fontSize: t.text.control, color: t.palette.textColor))
   closeElement()
 
   openElement(incId)
-  configureOpenElement(col(width = fixedPx(26), height = fixedPx(26),
+  configureOpenElement(col(width = fixedPx(t.metrics.stepperSize),
+      height = fixedPx(t.metrics.stepperSize),
       alignX = centerX, alignY = centerY)
     .bg(shade(pointerOver(incId)))
-    .corner(6))
-  textElement("+", TextConfig(fontSize: 18, color: textColor))
+    .corner(t.radii.inner))
+  textElement("+", TextConfig(fontSize: t.text.control, color: t.palette.textColor))
   closeElement()
 
   closeElement()
 
 proc intNumberField*(id: ElementId, value: int, step = 1,
                      minVal = -1000000000, maxVal = 1000000000,
-                     width = grow(), height = fixedPx(40)): int =
+                     width = grow(),
+                     height = fixedPx(activeTheme.metrics.controlHeight)): int =
   ## Whole-number view of `numberField`: formats without a fraction and
   ## rounds what comes back.
   let raw = numberField(id, float(value), float(step), float(minVal),

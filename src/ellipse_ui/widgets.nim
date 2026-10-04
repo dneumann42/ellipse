@@ -9,8 +9,8 @@
 ##
 ##   module         provides
 ##   -------------+----------------------------------------------------------
-##   common         shared colours, click edges, the focus/caret edit engine,
-##                  `widget Labeled`
+##   theme          `Theme` tokens + `activeTheme`, push/pop/`withTheme`
+##   common         click edges, the focus/caret edit engine, `widget Labeled`
 ##   checkboxes     `checkbox`, `switch`
 ##   comboboxes     `comboBox` -- a single-choice dropdown
 ##   multiselects   `multiSelect` -- a checkable list over a bitmask

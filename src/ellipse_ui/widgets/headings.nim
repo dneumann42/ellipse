@@ -1,7 +1,8 @@
 ## A type scale: six heading levels plus a `Section` widget that wraps a
 ## heading and its content. Levels differ in size, colour, spacing and --
 ## for the top two -- a bottom rule, all on one proc so the look stays
-## consistent across screens.
+## consistent across screens. Sizes and spacing come from the live theme
+## (see `ellipse_ui/theme`).
 
 import clay
 import ../ui
@@ -9,32 +10,37 @@ import ../ui
 import ./common
 
 proc headingFontSize*(level: int): uint16 =
+  let t = activeTheme.text
   case level
-  of 1: return 42.uint16
-  of 2: return 32.uint16
-  of 3: return 26.uint16
-  of 4: return 21.uint16
-  of 5: return 18.uint16
-  else: return 16.uint16
+  of 1: return t.h1
+  of 2: return t.h2
+  of 3: return t.h3
+  of 4: return t.h4
+  of 5: return t.h5
+  else: return t.h6
 
 proc headingTopPad(level: int): int =
+  let m = activeTheme.metrics
   case level
-  of 1: return 28
-  of 2: return 20
-  of 3: return 14
-  else: return 10
+  of 1: return m.headingPadH1
+  of 2: return m.headingPadH2
+  of 3: return m.headingPadH3
+  else: return m.headingPadMinor
 
 proc heading*(text: string, level: int = 1) =
   ## One heading line. Elements use clay's auto ids, so any number of
   ## headings can repeat inside one parent without id collisions.
+  let t = activeTheme
   openElement()
   var d = row(width = grow(), height = fit(),
       padding = Padding(left: 0, right: 0,
-                        top: headingTopPad(level), bottom: 6))
+                        top: headingTopPad(level),
+                        bottom: t.metrics.headingPadBottom))
   if level <= 2:
-    d.border = BorderConfig(color: panelBorder, width: BorderWidth(bottom: 1))
+    d.border = BorderConfig(color: t.palette.panelBorder,
+      width: BorderWidth(bottom: t.metrics.borderHairline))
   configureOpenElement(d)
-  let fg = if level <= 4: textColor else: dimColor
+  let fg = if level <= 4: t.palette.textColor else: t.palette.dimColor
   textElement(text, TextConfig(fontSize: headingFontSize(level), color: fg))
   closeElement()
 
@@ -62,10 +68,10 @@ widget Section(title: string, body: proc(): void):
   ##   Section(title = "Audio"):
   ##     volume = textField(hashId("vol"), volume)
   openElement()
-  configureOpenElement(col(width = grow(), gap = 10))
+  configureOpenElement(col(width = grow(), gap = activeTheme.metrics.gapCard))
   heading(title, 2)
   openElement()
-  configureOpenElement(col(width = grow(), gap = 6))
+  configureOpenElement(col(width = grow(), gap = activeTheme.metrics.gapTight))
   body()
   closeElement()
   closeElement()

@@ -12,10 +12,12 @@ import ./scrollbars
 var openComboId = 0'u32
 
 proc comboBox*(id: ElementId, options: seq[string], selected: int,
-               placeholder = "", width = grow(), height = fixedPx(40)): int =
+               placeholder = "", width = grow(),
+               height = fixedPx(activeTheme.metrics.controlHeight)): int =
   ## Returns the selection index to store back -- the clicked row, or
   ## `selected` unchanged. -1 shows `placeholder`.
   result = selected
+  let t = activeTheme
   let began = pressedNow()
   let popId = localId("combo.pop", id.id)
 
@@ -28,34 +30,36 @@ proc comboBox*(id: ElementId, options: seq[string], selected: int,
 
   openElement(id)
   configureOpenElement(row(width = width, height = height, gap = 8,
-      padding = padAll(8), alignY = centerY)
+      padding = padAll(t.metrics.padButton), alignY = centerY)
     .bg(shade(pointerOver(id) or isOpen))
-    .corner(8)
-    .border(1, if isOpen: accent else: panelBorder))
+    .corner(t.radii.field)
+    .border(t.metrics.borderHairline,
+      if isOpen: t.palette.accent else: t.palette.panelBorder))
   var shown = placeholder
-  var shownColor = dimColor
+  var shownColor = t.palette.dimColor
   if selected >= 0 and selected < options.len:
     shown = options[selected]
-    shownColor = textColor
-  textElement(shown, TextConfig(fontSize: 18, color: shownColor,
+    shownColor = t.palette.textColor
+  textElement(shown, TextConfig(fontSize: t.text.control, color: shownColor,
     wrap: noWrap))
   # spacer pushing the chevron to the right edge
   openElement()
   configureOpenElement(row(width = grow(), height = fit()))
   closeElement()
   textElement(if isOpen: "^" else: "v",
-    TextConfig(fontSize: 16, color: dimColor))
+    TextConfig(fontSize: t.text.chevron, color: t.palette.dimColor))
   closeElement()
 
   if isOpen:
     openElement(popId)
-    configureOpenElement(col(gap = 2, padding = padAll(4),
-        width = pct(1.0), height = fit(max = 240))
-      .bg(panelBg)
-      .border(1, panelBorder)
-      .corner(10)
+    configureOpenElement(col(gap = t.metrics.gapList,
+        padding = padAll(t.metrics.padList),
+        width = pct(1.0), height = fit(max = t.metrics.listMaxHeight))
+      .bg(t.palette.panelBg)
+      .border(t.metrics.borderHairline, t.palette.panelBorder)
+      .corner(t.radii.popover)
       .floating(attachElementId,
-        offset = vec2(0.0, 6.0), zIndex = 200,
+        offset = vec2(0.0, t.metrics.popoverOffset), zIndex = 200,
         points = AttachPoints(element: pointLeftTop,
                               parent: pointLeftBottom),
         parentId = id.id)
@@ -65,14 +69,16 @@ proc comboBox*(id: ElementId, options: seq[string], selected: int,
     while i < options.len:
       openElement(localIdWithIndex("combo.opt", uint32(i), id.id))
       let picked = began and hovered()
-      var d = row(width = grow(), height = fit(), padding = padAll(6))
-      d.corner = allCorners(6)
+      var d = row(width = grow(), height = fit(),
+          padding = padAll(t.metrics.padOption))
+      d.corner = allCorners(t.radii.inner)
       if i == result:
-        d.background = selectedBg
+        d.background = t.palette.selectedBg
       elif hovered():
-        d.background = buttonHoverBg
+        d.background = t.palette.buttonHoverBg
       configureOpenElement(d)
-      textElement(options[i], TextConfig(fontSize: 18, color: textColor))
+      textElement(options[i], TextConfig(fontSize: t.text.control,
+        color: t.palette.textColor))
       closeElement()
       if picked:
         result = i
