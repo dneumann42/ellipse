@@ -7,6 +7,7 @@ import clay
 import ../ui
 
 import ./common
+import ./scrollbars
 
 var openComboId = 0'u32
 
@@ -77,4 +78,5 @@ proc comboBox*(id: ElementId, options: seq[string], selected: int,
         result = i
         openComboId = 0'u32
       inc i
+    scrollbar(popId, popId)
     closeElement()

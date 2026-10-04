@@ -168,10 +168,11 @@ proc configureOpenElement*(ctx: Context; decl: ElementDeclaration) =
       ctx.scrollDatas[existing].openThisFrame = true
       if querying:
         ctx.scrollDatas[existing].position = position
+        ctx.scrollDatas[existing].target = position
     else:
       ctx.scrollDatas.add ScrollData(
         elementIndex: index, elementGen: el.gen, elementId: el.id,
-        position: position, openThisFrame: true,
+        position: position, target: position, openThisFrame: true,
       )
 
   ctx.elements[index] = el

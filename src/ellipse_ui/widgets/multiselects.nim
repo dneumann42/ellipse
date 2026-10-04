@@ -7,6 +7,7 @@ import clay
 import ../ui
 
 import ./common
+import ./scrollbars
 
 type Selection* = uint64
 
@@ -153,4 +154,5 @@ proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
       closeElement()
     closeElement()
 
+    scrollbar(popId, popId)
     closeElement()   # pop

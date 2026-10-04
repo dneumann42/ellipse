@@ -66,6 +66,8 @@ type
     pointerOrigin*: Vec2          ## pointer at drag start
     momentum*: Vec2
     position*: Vec2               ## current scroll offset (<= 0 per axis)
+    target*: Vec2                 ## where the spring is pulling `position`
+    springVel*: Vec2              ## spring integrator velocity
     momentumTime*: float32
     openThisFrame*: bool
     pointerScrollActive*: bool

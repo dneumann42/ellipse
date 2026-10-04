@@ -22,6 +22,8 @@
 ##   tabs           `widget TabbedView`, `tabStrip`, `activeTab`,
 ##                  `setActiveTab`
 ##   cards          `widget Card`, `widget StatCard`, `widget CardRow`
+##   scrollbars     `scrollbar` -- floating draggable bars for clip
+##                  containers, `ScrollbarStyle`
 ##
 ## Immediate-mode contract: pass the current value in, store the return
 ## value back -- `checked = checkbox(id, "Wifi", checked)`. Transient state
@@ -29,7 +31,7 @@
 ## modules, keyed by element id, like `ui.menu` already does.
 
 import ./widgets/[common, checkboxes, comboboxes, multiselects, textfields,
-                  numberfields, headings, texts, tabs, cards]
+                  numberfields, headings, texts, tabs, cards, scrollbars]
 
 export common, checkboxes, comboboxes, multiselects, textfields,
-       numberfields, headings, texts, tabs, cards
+       numberfields, headings, texts, tabs, cards, scrollbars

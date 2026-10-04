@@ -48,12 +48,12 @@ let tfId = hashId("tf")
 let mlId = hashId("ml")
 let nfId = hashId("qty")
 let noteId = hashId("note")
+let vbarId = hashId("vbar")
+let hbarId = hashId("hbar")
 
 proc fillOptions() =
-  comboOpts.add "Alpha"
-  comboOpts.add "Beta"
-  comboOpts.add "Gamma"
-  comboOpts.add "Delta"
+  for i in 0 ..< 12:
+    comboOpts.add "Option " & $i
   multiOpts.add "Render"
   multiOpts.add "Audio"
   multiOpts.add "Input"
@@ -88,6 +88,46 @@ proc draw() =
     if textLink(noteId, "Read the docs"):
       discard
     badge("beta")
+    h3("Scrolling")
+    clay "scrow", row(width = grow(), height = fixedPx(200), gap = 16,
+                      alignY = top):
+      clay "vpanel", col(width = pct(0.5), height = grow(), gap = 2,
+                         padding = padAll(6))
+          .bg(fieldBg)
+          .border(1, panelBorder)
+          .corner(10)
+          .clip(horizontal = false, vertical = true,
+                childOffset = currentScrollOffset()):
+        var r = 0
+        while r < 18:
+          openElement(localIdWithIndex("vpanel.row", uint32(r)))
+          configureOpenElement(row(width = grow(), height = fit(),
+              padding = padAll(5), alignY = centerY)
+            .bg(if hovered(): buttonHoverBg else: panelBg)
+            .corner(6))
+          textElement("Row " & $r, TextConfig(fontSize: 15, color: textColor))
+          closeElement()
+          inc r
+        scrollbar(vbarId, hashId("vpanel"))
+      clay "hstrip", row(width = grow(), height = grow(), gap = 10,
+                         padding = padAll(8))
+          .bg(fieldBg)
+          .border(1, panelBorder)
+          .corner(10)
+          .clip(horizontal = true, vertical = false,
+                childOffset = currentScrollOffset()):
+        var c = 0
+        while c < 10:
+          openElement(localIdWithIndex("hstrip.card", uint32(c)))
+          configureOpenElement(col(width = fixedPx(130), height = grow(),
+              alignX = centerX, alignY = centerY, padding = padAll(8))
+            .bg(if hovered(): buttonHoverBg else: buttonBg)
+            .corner(8)
+            .border(1, panelBorder))
+          textElement("Card " & $c, TextConfig(fontSize: 17, color: textColor))
+          closeElement()
+          inc c
+        scrollbar(hbarId, hashId("hstrip"))
   endLayout()
 
 proc boxCenter(id: ElementId): Vec2 =
@@ -97,6 +137,14 @@ proc boxCenter(id: ElementId): Vec2 =
 proc framePointer(x, y: float32, down: bool) =
   beginInputFrame()
   setPointerState(vec2(x, y), down)
+  draw()
+
+proc frameWheel(x, y: float32, down: bool, wheel: Vec2) =
+  ## One frame that also feeds `wheel` straight into the scroll engine --
+  ## in the app this is `updateUI`, minus the wheel-acceleration filter.
+  beginInputFrame()
+  setPointerState(vec2(x, y), down)
+  updateScrollContainers(false, wheel, 0.016'f32)
   draw()
 
 proc typeStr(s: string) =
@@ -123,6 +171,18 @@ proc pressEnter() =
   draw()
 
 proc saveShot(path: cstring) {.raises.} =
+  for e in takeErrors():
+    echo "clay error: ", e.message
+  let vd = scrollContainerData(hashId("vpanel"))
+  echo "vpanel found=", vd.found, " pos=", vd.position.x, ",", vd.position.y,
+    " cont=", vd.contentDimensions.width, "x", vd.contentDimensions.height,
+    " view=", vd.containerDimensions.width, "x", vd.containerDimensions.height
+  let hd = scrollContainerData(hashId("hstrip"))
+  echo "hstrip found=", hd.found, " cont=", hd.contentDimensions.width,
+    " view=", hd.containerDimensions.width
+  let vt = elementData(localId("sb.vthumb", hashId("vbar").id))
+  echo "vthumb found=", vt.found, " box=", vt.box.x, ",", vt.box.y,
+    " ", vt.box.width, "x", vt.box.height
   let ren = sdlRenderer()
   discard SDL_SetRenderDrawColor(ren, 12, 12, 16, 255)
   discard SDL_RenderClear(ren)
@@ -172,6 +232,31 @@ proc main() {.raises.} =
   framePointer(cp.x, cp.y, false)   # popover open
 
   saveShot("build/widgets_gallery.bmp")   # popover open over the fields
+
+  # --- scrolling containers: drag the vertical panel's scrollbar thumb,
+  # then wheel-scroll the horizontal strip. The bars themselves need one
+  # frame of published container geometry before they appear.
+  framePointer(-100.0, -100.0, false)
+  framePointer(-100.0, -100.0, false)
+
+  let vtId = localId("sb.vthumb", vbarId.id)
+  let vt = boxCenter(vtId)
+  framePointer(vt.x, vt.y, true)          # grab the thumb
+  framePointer(vt.x, vt.y + 60.0, true)   # drag it down
+  framePointer(vt.x, vt.y + 60.0, false)  # release
+  framePointer(-100.0, -100.0, false)     # let the new position render
+
+  let hp = boxCenter(hashId("hstrip"))
+  var n = 0
+  while n < 20:   # a brisk wheel flick to the right
+    frameWheel(hp.x, hp.y, false, vec2(-2.0, 0.0))
+    inc n
+  n = 0
+  while n < 24:   # coast the spring to rest
+    frameWheel(hp.x, hp.y, false, vec2(0.0, 0.0))
+    inc n
+
+  saveShot("build/widgets_gallery_scrolled.bmp")
 
 when isMainModule:
   try:

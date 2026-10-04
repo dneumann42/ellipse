@@ -79,13 +79,16 @@ widget Toolbar(body: proc(): void):
 
 widget Scroll(body: proc(): void):
   ## Wheel-scrollable page body: a vertical clip container whose children
-  ## ride the engine's current scroll offset (`updateUI` feeds it the wheel).
+  ## ride the engine's current scroll offset (`updateUI` feeds it the wheel,
+  ## through the accel/glide filter in `ui`). A floating scrollbar hugs the
+  ## right edge whenever the content overflows.
   clay "scroll", col(width = grow(), height = grow(), padding = padAll(28))
       .clip(horizontal = false, vertical = true,
             childOffset = currentScrollOffset()):
     clay "content", col(width = grow(max = 820), height = fit(), gap = 10,
                         alignX = centerX):
       body()
+    scrollbar(hashId("page.bar"), hashId("scroll"))
 
 # --- the gallery itself -------------------------------------------------------
 
@@ -94,7 +97,7 @@ proc drawGallery() =
     heading("Widget Gallery", 1)
     overline("ellipse_ui on clay")
     if showIntro:
-      bodyText("The standard widget set of the new UI system: toggles, dropdowns, text and number entry, headings and reading text -- all immediate-mode clay layout blocks. Scroll with the wheel; the File and View menus above drive this same state.")
+      bodyText("The standard widget set of the new UI system: toggles, dropdowns, text and number entry, headings and reading text -- all immediate-mode clay layout blocks. Scroll with the wheel or drag the floating scrollbar thumbs; the File and View menus above drive this same state.")
 
     Section(title = "Toggles & buttons"):
       clay "trow", row(width = grow(), height = fit(), gap = 28,
@@ -162,6 +165,52 @@ proc drawGallery() =
           else:
             Card(title = "Actions", actions = tabActions):
               bodyText("The header's right edge is the `actions` slot -- here a button that resets the gallery.")
+
+    Section(title = "Scrolling containers"):
+      caption("Clip containers with floating scrollbars: grab a thumb and drag, click a bare track to jump, or spin the wheel -- the feel ramps up with velocity, glides to a stop, and springs at the ends.")
+      clay "scrow", row(width = grow(), height = fixedPx(240), gap = 16,
+                        alignY = top):
+        clay "vpanel", col(width = pct(0.5), height = grow(), gap = 2,
+                           padding = padAll(6))
+            .bg(fieldBg)
+            .border(1, panelBorder)
+            .corner(10)
+            .clip(horizontal = false, vertical = true,
+                  childOffset = currentScrollOffset()):
+          var r = 0
+          while r < 24:
+            openElement(localIdWithIndex("vpanel.row", uint32(r)))
+            configureOpenElement(row(width = grow(), height = fit(),
+                padding = padAll(6), alignY = centerY)
+              .bg(if hovered(): buttonHoverBg else: panelBg)
+              .corner(6))
+            textElement("Module entry " & $r,
+              TextConfig(fontSize: 16, color: textColor))
+            closeElement()
+            inc r
+          scrollbar(hashId("vbar"), hashId("vpanel"))
+        clay "hwrap", col(width = grow(), height = grow(), gap = 6):
+          label("Horizontal strip")
+          clay "hstrip", row(width = grow(), height = grow(), gap = 10,
+                             padding = padAll(8))
+              .bg(fieldBg)
+              .border(1, panelBorder)
+              .corner(10)
+              .clip(horizontal = true, vertical = false,
+                    childOffset = currentScrollOffset()):
+            var c = 0
+            while c < 10:
+              openElement(localIdWithIndex("hstrip.card", uint32(c)))
+              configureOpenElement(col(width = fixedPx(150), height = grow(),
+                  alignX = centerX, alignY = centerY, padding = padAll(10))
+                .bg(if hovered(): buttonHoverBg else: buttonBg)
+                .corner(8)
+                .border(1, panelBorder))
+              textElement("Card " & $c,
+                TextConfig(fontSize: 18, color: textColor))
+              closeElement()
+              inc c
+            scrollbar(hashId("hbar"), hashId("hstrip"))
 
     clay "footer", row(width = grow(), height = fit(), gap = 14,
                        alignY = centerY):

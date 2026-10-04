@@ -2,7 +2,8 @@
 ##
 ## Port of Clay's `Clay_SetPointerState` (including the inline hover-detection
 ## DFS), the pointer state machine, `Clay_UpdateScrollContainers` (wheel /
-## drag / momentum scrolling) and the id-keyed query surface
+## drag / momentum scrolling with a spring-damped position follower and
+## rubber-banded bounds) and the id-keyed query surface
 ## (`elementData`, `pointerOver`, `scrollContainerData`).
 ## These queries read the *previous* frame's published geometry: call them
 ## between `endLayout` and the next `beginLayout`, like Clay's examples do.
@@ -111,6 +112,28 @@ func pointerOverIds*(ctx: Context): seq[ElementId] =
 
 ## --- scroll containers -------------------------------------------------------------
 
+const
+  springK* = 420.0'f32   ## spring stiffness of the position->target follower
+  springC* = 34.0'f32    ## damping: slightly underdamped -> springy landings
+  rubberResist* = 0.35'f32  ## how much of a drag past an edge reaches the target
+
+func springStep(pos, vel, target, dt: float32): (float32, float32) =
+  ## One explicit-Euler step of a damped spring pulling `pos` toward `target`.
+  ## Snaps to rest when the residual motion is sub-pixel.
+  let d = target - pos
+  if d > -0.05'f32 and d < 0.05'f32 and vel > -0.5'f32 and vel < 0.5'f32:
+    return (target, 0.0)
+  let acc = d * springK - vel * springC
+  let v = vel + acc * dt
+  (pos + v * dt, v)
+
+func rubber(v, lo, hi: float32): float32 =
+  ## Soft-clamp: motion past an edge is resisted, so a held drag inflates the
+  ## target a little; releasing lets the spring snap it back -- the bounce.
+  if v > hi: hi + (v - hi) * rubberResist
+  elif v < lo: lo + (v - lo) * rubberResist
+  else: v
+
 proc currentScrollOffset*(ctx: Context): Vec2 =
   ## The scroll position of the enclosing scroll container, read *during*
   ## declaration to feed `clip(..., childOffset = currentScrollOffset())`.
@@ -126,10 +149,16 @@ proc currentScrollOffset*(ctx: Context): Vec2 =
 proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
                              scrollDelta: Vec2; deltaTime: float32) =
   ## Advance every scroll container: wheel deltas, pointer drag, momentum and
-  ## clamping. Call once per frame with the accumulated wheel/touch delta.
+  ## springy bounds. Call once per frame with the accumulated wheel/touch
+  ## delta. `target` takes the raw input (drag inflates past the edges with
+  ## rubber resistance); `position` -- what `currentScrollOffset` publishes
+  ## to layout -- trails it on a damped spring, which supplies the glide,
+  ## the deceleration and the small overshoot-and-settle at the edges.
   let pointerActive = dragScrolling and
     (ctx.pointer.state == pressed or ctx.pointer.state == pressedThisFrame)
 
+  # --- pass 1: cull dead containers, retire released drags into momentum,
+  # and find the container that owns this frame's scroll input.
   var bestIdx = -1
   var bestPriority = -1
 
@@ -146,15 +175,13 @@ proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
       ctx.scrollDatas.setLen(ctx.scrollDatas.len - 1)
     else:
       sd.openThisFrame = false
-      let el = ctx.elements[sd.elementIndex]
-      let content = sd.contentSize
 
       # Drag released: convert the recent drag gesture into momentum. NOTE:
       # Clay divides by `momentumTime * 25` unguarded (0 -> inf); a
       # stationary release simply produces no momentum here.
       if not pointerActive and sd.pointerScrollActive:
-        let dx = sd.position.x - sd.scrollOrigin.x
-        let dy = sd.position.y - sd.scrollOrigin.y
+        let dx = sd.target.x - sd.scrollOrigin.x
+        let dy = sd.target.y - sd.scrollOrigin.y
         if (dx < -10 or dx > 10) and sd.momentumTime > 0:
           sd.momentum.x = dx / (sd.momentumTime * 25)
         if (dy < -10 or dy > 10) and sd.momentumTime > 0:
@@ -163,22 +190,6 @@ proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
         sd.pointerOrigin = Vec2()
         sd.scrollOrigin = Vec2()
         sd.momentumTime = 0
-
-      let scrolled = scrollDelta.x != 0 or scrollDelta.y != 0
-
-      sd.position.x += sd.momentum.x
-      sd.momentum.x *= 0.95'f32
-      if (sd.momentum.x > -0.1'f32 and sd.momentum.x < 0.1'f32) or scrolled:
-        sd.momentum.x = 0
-      sd.position.x = min(max(sd.position.x,
-        -max(content.width - el.dims.width, 0)), 0)
-
-      sd.position.y += sd.momentum.y
-      sd.momentum.y *= 0.95'f32
-      if (sd.momentum.y > -0.1'f32 and sd.momentum.y < 0.1'f32) or scrolled:
-        sd.momentum.y = 0
-      sd.position.y = min(max(sd.position.y,
-        -max(content.height - el.dims.height, 0)), 0)
 
       # Deepest hovered container wins the scroll input (pointerOver ids
       # are ordered ancestor-first).
@@ -191,61 +202,91 @@ proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
       ctx.scrollDatas[i] = sd
       inc i
 
-  if bestIdx < 0:
-    return
-  var sd = ctx.scrollDatas[bestIdx]
-  let el = ctx.elements[sd.elementIndex]
-  let clip = el.decl.clip
-  let canX = clip.horizontal and sd.contentSize.width > el.dims.width
-  let canY = clip.vertical and sd.contentSize.height > el.dims.height
+  # --- pass 2: apply input to the focused container, then integrate.
+  let scrolled = scrollDelta.x != 0 or scrollDelta.y != 0
+  for k in 0 ..< ctx.scrollDatas.len:
+    var sd = ctx.scrollDatas[k]
+    let el = ctx.elements[sd.elementIndex]
+    let content = sd.contentSize
+    let canX = el.decl.clip.horizontal and content.width > el.dims.width
+    let canY = el.decl.clip.vertical and content.height > el.dims.height
+    let loX = -max(content.width - el.dims.width, 0)
+    let loY = -max(content.height - el.dims.height, 0)
 
-  # Wheel / trackpad: Clay scales raw deltas by 10.
-  if canY:
-    sd.position.y = sd.position.y + scrollDelta.y * 10
-  if canX:
-    sd.position.x = sd.position.x + scrollDelta.x * 10
+    if k == bestIdx:
+      # Wheel / trackpad: Clay scales raw deltas by 10.
+      if canY and scrolled:
+        sd.target.y += scrollDelta.y * 10
+        sd.momentum.y = 0
+      if canX and scrolled:
+        sd.target.x += scrollDelta.x * 10
+        sd.momentum.x = 0
 
-  if pointerActive:
-    sd.momentum = Vec2()
-    if not sd.pointerScrollActive:
-      sd.pointerOrigin = ctx.pointer.position
-      sd.scrollOrigin = sd.position
-      sd.pointerScrollActive = true
+      if pointerActive:
+        if not sd.pointerScrollActive:
+          sd.pointerOrigin = ctx.pointer.position
+          sd.scrollOrigin = sd.target
+          sd.pointerScrollActive = true
+        else:
+          var dx: float32 = 0
+          var dy: float32 = 0
+          if canX:
+            let old = sd.target.x
+            sd.target.x = rubber(sd.scrollOrigin.x +
+              (ctx.pointer.position.x - sd.pointerOrigin.x), loX, 0)
+            dx = sd.target.x - old
+          if canY:
+            let old = sd.target.y
+            sd.target.y = rubber(sd.scrollOrigin.y +
+              (ctx.pointer.position.y - sd.pointerOrigin.y), loY, 0)
+            dy = sd.target.y - old
+          # A held-still pointer restarts the gesture baseline so momentum
+          # after release reflects the flick, not the pause.
+          if dx > -0.1'f32 and dx < 0.1'f32 and dy > -0.1'f32 and dy < 0.1'f32 and
+              sd.momentumTime > 0.15'f32:
+            sd.momentumTime = 0
+            sd.pointerOrigin = ctx.pointer.position
+            sd.scrollOrigin = sd.target
+          else:
+            sd.momentumTime += deltaTime
+
+    # Flick momentum keeps driving the target until it comes to rest.
+    sd.target.x += sd.momentum.x
+    sd.momentum.x *= 0.95'f32
+    if sd.momentum.x > -0.1'f32 and sd.momentum.x < 0.1'f32:
+      sd.momentum.x = 0
+    sd.target.y += sd.momentum.y
+    sd.momentum.y *= 0.95'f32
+    if sd.momentum.y > -0.1'f32 and sd.momentum.y < 0.1'f32:
+      sd.momentum.y = 0
+
+    # The target itself only leaves the track during a live rubber drag;
+    # every other path snaps it back to the hard edge, and the spring makes
+    # the visible position bounce on the way home.
+    let rubberHeld = k == bestIdx and pointerActive and sd.pointerScrollActive
+    if canY:
+      if not rubberHeld:
+        sd.target.y = min(max(sd.target.y, loY), 0)
     else:
-      var deltaX: float32 = 0
-      var deltaY: float32 = 0
-      if canX:
-        let old = sd.position.x
-        sd.position.x = sd.scrollOrigin.x +
-          (ctx.pointer.position.x - sd.pointerOrigin.x)
-        sd.position.x = max(min(sd.position.x, 0),
-          -(sd.contentSize.width - sd.box.width))
-        deltaX = sd.position.x - old
-      if canY:
-        let old = sd.position.y
-        sd.position.y = sd.scrollOrigin.y +
-          (ctx.pointer.position.y - sd.pointerOrigin.y)
-        sd.position.y = max(min(sd.position.y, 0),
-          -(sd.contentSize.height - sd.box.height))
-        deltaY = sd.position.y - old
-      # A held-still pointer restarts the gesture baseline so momentum after
-      # release reflects the flick, not the pause.
-      if deltaX > -0.1'f32 and deltaX < 0.1'f32 and deltaY > -0.1'f32 and deltaY < 0.1'f32 and
-          sd.momentumTime > 0.15'f32:
-        sd.momentumTime = 0
-        sd.pointerOrigin = ctx.pointer.position
-        sd.scrollOrigin = sd.position
-      else:
-        sd.momentumTime += deltaTime
+      sd.target.y = 0
+    if canX:
+      if not rubberHeld:
+        sd.target.x = min(max(sd.target.x, loX), 0)
+    else:
+      sd.target.x = 0
 
-  if canY:
-    sd.position.y = max(min(sd.position.y, 0),
-      -(sd.contentSize.height - el.dims.height))
-  if canX:
-    sd.position.x = max(min(sd.position.x, 0),
-      -(sd.contentSize.width - el.dims.width))
+    # Position rides the spring toward the target: this is the deceleration
+    # of a flick and the overshoot-and-settle at the ends.
+    let (ny, vys) = springStep(sd.position.y, sd.springVel.y, sd.target.y,
+                               deltaTime)
+    sd.position.y = ny
+    sd.springVel.y = vys
+    let (nx, vxs) = springStep(sd.position.x, sd.springVel.x, sd.target.x,
+                               deltaTime)
+    sd.position.x = nx
+    sd.springVel.x = vxs
 
-  ctx.scrollDatas[bestIdx] = sd
+    ctx.scrollDatas[k] = sd
 
 proc scrollContainerData*(ctx: Context; id: ElementId): ScrollContainerData =
   ## Query a scroll container by id. `position` mirrors the engine's state;
@@ -268,7 +309,9 @@ proc scrollContainerData*(ctx: Context; id: ElementId): ScrollContainerData =
 
 proc setScrollPosition*(ctx: Context; id: ElementId; position: Vec2) =
   ## Externally drive a scroll container's position (scrollbars, auto-scroll
-  ## to a focused item). Clamped against last frame's content size.
+  ## to a focused item). Direct: both the spring target and the visible
+  ## position snap, so a held scrollbar drag tracks the pointer 1:1.
+  ## Clamped against last frame's content size.
   for i in 0 ..< ctx.scrollDatas.len:
     let sd = ctx.scrollDatas[i]
     if sd.elementId == id.id:
@@ -283,7 +326,11 @@ proc setScrollPosition*(ctx: Context; id: ElementId; position: Vec2) =
       else:
         p.x = 0
       ctx.scrollDatas[i].position = p
+      ctx.scrollDatas[i].target = p
+      ctx.scrollDatas[i].springVel = Vec2()
       ctx.scrollDatas[i].momentum = Vec2()
+      ctx.scrollDatas[i].pointerScrollActive = false
+      ctx.scrollDatas[i].momentumTime = 0
       break
 
 ## --- element queries ---------------------------------------------------------------

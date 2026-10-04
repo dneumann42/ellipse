@@ -1,4 +1,4 @@
-import std/[syncio]
+import std/[syncio, math]
 
 import clay
 export clay
@@ -16,16 +16,58 @@ const
   buttonHoverBg* = rgb(84, 90, 116)
   textColor* = rgb(230, 232, 238)
 
+## --- wheel feel ----------------------------------------------------------------
+##
+## Scroll feel borrowed from the gothivania HUD (`src/hud/gui.cpp`): a fast
+## wheel spin accumulates velocity and each notch moves progressively
+## farther (acceleration, capped), and the accumulated notch count bleeds
+## into the engine over an exponential ease (deceleration / glide). The
+## clay-side spring on top of that adds the overshoot-and-settle at the
+## ends. Fixed 60 Hz update ticks, so `dt` is a constant.
+
+const
+  frameDt* = 1.0'f32 / 60.0'f32
+  wheelBaseScale = 3.0'f32    ## pixels per notch at rest (x the engine's 10)
+  wheelAccelGain = 1.4'f32    ## extra scale per accumulated notch velocity
+  wheelAccelMax = 6.0'f32     ## cap of the velocity-driven scale
+  wheelAccelDecay = 5.0'f32   ## how fast the spin velocity dies out
+  wheelEaseRate = 16.0'f32    ## how fast pending notches bleed into motion
+
+var
+  wheelPending = 0.0'f32
+  wheelVelocity = 0.0'f32
+
+proc smoothedWheel*(rawY: float32, dt: float32): float32 =
+  ## One frame of the gothivania wheel filter: velocity-scaled accumulation
+  ## plus exponential release of the pending travel. Returns the engine-
+  ## scale wheel delta to feed `updateScrollContainers` this frame.
+  wheelVelocity *= exp(-dt * wheelAccelDecay)
+  if rawY != 0.0:
+    wheelVelocity += abs(rawY)
+    let accel = min(wheelBaseScale + wheelVelocity * wheelAccelGain,
+      wheelAccelMax)
+    wheelPending += rawY * accel
+  result = 0.0
+  if wheelPending != 0.0:
+    result = wheelPending * (1.0 - exp(-dt * wheelEaseRate))
+    wheelPending -= result
+    if abs(wheelPending) < 0.02:
+      result += wheelPending
+      wheelPending = 0.0
+
 proc updateUI*() =
   beginInputFrame()
 
   let pointer = pointerState()
   setPointerState(vec2(pointer.x, pointer.y), pointer.down)
 
-  # Wheel-driven scrolling for the widget set's clip containers (dropdown
-  # lists etc). Drag-scrolling stays off: widgets claim press themselves.
+  # Wheel-driven scrolling for the widget set's clip containers (page and
+  # panels, dropdown lists etc), through the accel/glide filter above.
+  # Drag-scrolling stays off: widgets claim press themselves, and the
+  # scrollbars drive containers directly via `setScrollPosition`.
   let wheel = wheelDelta()
-  updateScrollContainers(false, vec2(wheel.x, wheel.y), 0.016'f32)
+  updateScrollContainers(false,
+    vec2(wheel.x, smoothedWheel(wheel.y, frameDt)), frameDt)
 
   let (w, h) = windowPixelSize()
   let dims = layoutDimensions()
