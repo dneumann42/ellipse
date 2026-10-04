@@ -10,7 +10,13 @@
 ##   module         provides
 ##   -------------+----------------------------------------------------------
 ##   theme          `Theme` tokens + `activeTheme`, push/pop/`withTheme`
-##   common         click edges, the focus/caret edit engine, `widget Labeled`
+##   common         click edges, the focus/caret edit engine, the shared
+##                  scaffold layer -- `container`/`item` brackets,
+##                  `spacer`/`chevron`/`tickBox`/`textLine` parts,
+##                  `fieldDecl`/`shadeDecl`/`toggleRowDecl`/`optionRowDecl`
+##                  builders, the dropdown plumbing
+##                  (`toggleDropdown`/`dropdownField`/`dropdownPanel`/
+##                  `optionRow`) -- and `widget Labeled`
 ##   checkboxes     `checkbox`, `switch`
 ##   comboboxes     `comboBox` -- a single-choice dropdown
 ##   multiselects   `multiSelect` -- a checkable list over a bitmask
@@ -29,7 +35,8 @@
 ## Immediate-mode contract: pass the current value in, store the return
 ## value back -- `checked = checkbox(id, "Wifi", checked)`. Transient state
 ## (which field has the caret, which dropdown is open) lives in the widget
-## modules, keyed by element id, like `ui.menu` already does.
+## modules -- the dropdown slot in `common` -- keyed by element id, like
+## `ui.menu` already does.
 
 import ./widgets/[common, checkboxes, comboboxes, multiselects, textfields,
                   numberfields, headings, texts, tabs, cards, scrollbars]

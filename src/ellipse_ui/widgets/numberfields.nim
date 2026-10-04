@@ -5,6 +5,10 @@
 ## a `0-9 . -` filter). Enter commits the parse + clamp, Escape discards the
 ## buffer, and a click outside commits too. Up/Down arrows and the hover
 ## steppers add/subtract `step` immediately.
+##
+## The field box is `ui.item` over `common.fieldDecl`; the steppers are
+## plain items over `shadeDecl`, so they share the small-button look with
+## the multiselect footer.
 
 import clay
 import ../ui
@@ -92,12 +96,26 @@ proc sanitizeNum(buf: string, allowNeg: bool): string =
       discard
     inc i
 
+proc stepper(id: ElementId, glyph: string) =
+  ## One +/- square: `shadeDecl` surface, centred control-size glyph. The
+  ## click is folded in by the caller *before* drawing, so the adjusted
+  ## value shows in the field's text the same frame.
+  let t = activeTheme
+  item(id, shadeDecl(id, fixedPx(t.metrics.stepperSize),
+      fixedPx(t.metrics.stepperSize), dir = topToBottom,
+      alignX = centerX, alignY = centerY)):
+    textElement(glyph, TextConfig(fontSize: t.text.control,
+      color: t.palette.textColor))
+
 proc numberField*(id: ElementId, value: float, step = 1.0,
                   minVal = -1.0e9, maxVal = 1.0e9, whole = false,
                   width = grow(),
                   height = fixedPx(activeTheme.metrics.controlHeight)): float =
   result = value
   let wasFocused = focused(id)
+
+  let decId = localId("num.dec", id.id)
+  let incId = localId("num.inc", id.id)
 
   if clickedIn(id):
     if not wasFocused:
@@ -135,8 +153,6 @@ proc numberField*(id: ElementId, value: float, step = 1.0,
 
   # steppers: children of the field box, so a click on them is also a click
   # inside (handled above) -- they adjust whether or not the field is open.
-  let decId = localId("num.dec", id.id)
-  let incId = localId("num.inc", id.id)
   if pressedNow():
     if pointerOver(decId):
       result = clampTo(result - step, minVal, maxVal)
@@ -148,43 +164,18 @@ proc numberField*(id: ElementId, value: float, step = 1.0,
         numBuffer = fmtVal(result, whole)
 
   let t = activeTheme
-  openElement(id)
-  configureOpenElement(row(width = width, height = height, gap = t.metrics.gapTight,
+  item(id, fieldDecl(id, width, height, gap = t.metrics.gapTight,
+      alignY = centerY,
       padding = Padding(left: t.metrics.padFieldX, right: t.metrics.padFieldY,
-                        top: t.metrics.padFieldY, bottom: t.metrics.padFieldY),
-      alignY = centerY)
-    .bg(t.palette.fieldBg)
-    .corner(t.radii.field)
-    .border(t.metrics.borderHairline, fieldBorder(id)))
-
-  openElement()
-  configureOpenElement(row(width = grow(), height = fit(), alignX = right))
-  let cfg = TextConfig(fontSize: t.text.control, color: t.palette.textColor,
-    wrap: noWrap, justify: justifyRight)
-  textElement(if focused(id): numBuffer else: fmtVal(result, whole), cfg)
-  if focused(id):
-    caretOverlay(textChildId(textChildId(id.id)), numBuffer, cfg)
-  closeElement()
-
-  openElement(decId)
-  configureOpenElement(col(width = fixedPx(t.metrics.stepperSize),
-      height = fixedPx(t.metrics.stepperSize),
-      alignX = centerX, alignY = centerY)
-    .bg(shade(pointerOver(decId)))
-    .corner(t.radii.inner))
-  textElement("-", TextConfig(fontSize: t.text.control, color: t.palette.textColor))
-  closeElement()
-
-  openElement(incId)
-  configureOpenElement(col(width = fixedPx(t.metrics.stepperSize),
-      height = fixedPx(t.metrics.stepperSize),
-      alignX = centerX, alignY = centerY)
-    .bg(shade(pointerOver(incId)))
-    .corner(t.radii.inner))
-  textElement("+", TextConfig(fontSize: t.text.control, color: t.palette.textColor))
-  closeElement()
-
-  closeElement()
+                        top: t.metrics.padFieldY, bottom: t.metrics.padFieldY))):
+    container(row(width = grow(), height = fit(), alignX = right)):
+      let cfg = TextConfig(fontSize: t.text.control, color: t.palette.textColor,
+        wrap: noWrap, justify: justifyRight)
+      textElement(if focused(id): numBuffer else: fmtVal(result, whole), cfg)
+      if focused(id):
+        caretOverlay(textChildId(textChildId(id.id)), numBuffer, cfg)
+    stepper(decId, "-")
+    stepper(incId, "+")
 
 proc intNumberField*(id: ElementId, value: int, step = 1,
                      minVal = -1000000000, maxVal = 1000000000,

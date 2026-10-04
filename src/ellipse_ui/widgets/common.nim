@@ -11,6 +11,21 @@
 ##     has the caret, which dropdown is open -- keyed by element id, exactly
 ##     like `menu`'s `openMenuId`.
 ##
+## On top of the edit engine this module is the widget set's *scaffold
+## layer*: the element brackets (`container`, plus `ui.item` for explicit
+## ids), the repeated declaration shapes (`fieldDecl`, `shadeDecl`,
+## `toggleRowDecl`, `optionRowDecl`), the shared parts (`spacer`,
+## `chevron`, `tickBox`, `textLine`) and the whole dropdown plumbing
+## (`toggleDropdown`, `dropdownField`, `dropdownPanel`, `optionRow`) that
+## the widgets under `widgets/` are defined from. A tiny widget is the
+## goal:
+##
+##   proc checkbox*(id, label, checked): bool =
+##     item(id, toggleRowDecl(pointerOver(id))):
+##       tickBox(checked)
+##       textElement(label, ...)
+##     result = if clickedIn(id): not checked else: checked
+##
 ## Keyboard and wheel input arrives through `ellipse/platform/platform`'s
 ## per-frame event queues; `updateUI` advances them, and `editStep` applies
 ## one frame's events to the focused field.
@@ -429,6 +444,255 @@ proc caretOverlay*(textElId: uint32, text: string, cfg: TextConfig,
                                     parent: pointLeftTop),
               capture = passThroughPointer))
   closeElement()
+
+## --- element brackets ----------------------------------------------------------
+##
+## The low-level clay rhythm -- open, configure, children, close -- spelled
+## out per widget is what this layer replaces. `container` brackets an
+## auto-id element (repeatable inside any parent, no id bookkeeping);
+## `ui.item` is the explicit-id sibling. Nimony templates are hygienic, so
+## a bracket's `body` cannot see locals the template computes -- instead it
+## runs *while the element is open*, exactly where `hovered()` and
+## `pressedNow()` are valid. Fold a click edge in wherever the body likes:
+##
+##   container(row(width = grow(), height = fit(), gap = 8)):
+##     textElement("one", cfg)
+##   item(agreeId, toggleRowDecl(pointerOver(agreeId))):
+##     tickBox(checked)
+##     if pressedNow() and hovered():   # or `clickedIn(agreeId)` outside
+##       checked = not checked
+
+template container*(decl: untyped, body: untyped): untyped =
+  openElement()
+  configureOpenElement(decl)
+  body
+  closeElement()
+
+## --- shared parts ----------------------------------------------------------------
+##
+## The small repeated elements every composite builds by hand: the grow
+## spacer that pushes siblings apart, the dropdown chevron, the tick square,
+## a static text line.
+
+proc spacer*(vertical = false) =
+  ## Fill the leftover space in an open row (or column): pushes the next
+  ## sibling to the far edge.
+  let w = if vertical: fit() else: grow()
+  let h = if vertical: grow() else: fit()
+  openElement()
+  configureOpenElement(row(width = w, height = h))
+  closeElement()
+
+proc chevron*(isOpen: bool) =
+  ## The dropdown caret glyph: "v" closed, "^" open, on the theme's chevron
+  ## size and dim colour.
+  let t = activeTheme
+  textElement(if isOpen: "^" else: "v",
+    TextConfig(fontSize: t.text.chevron, color: t.palette.dimColor))
+
+proc textLine*(text: string, cfg: TextConfig, width: SizingAxis = grow(),
+               height: SizingAxis = fit()) =
+  ## Static text in an auto-id row -- the bracket the named text styles
+  ## (`label`, `caption`, ...) are one-liners over.
+  container(row(width = width, height = height)):
+    textElement(text, cfg)
+
+proc tickBox*(checked: bool, box: float32 = activeTheme.metrics.checkSize,
+              tick: float32 = activeTheme.metrics.tickSize) =
+  ## The square tick indicator shared by `checkbox` and `multiSelect`: a
+  ## sunken box with an accent hairline when `checked`, filled by an accent
+  ## square of `tick` pixels. The filled square stands in for a `✓` glyph --
+  ## the renderer only promises rectangles and the UI font.
+  let t = activeTheme
+  container(col(width = fixedPx(box), height = fixedPx(box),
+      alignX = centerX, alignY = centerY)
+    .bg(t.palette.fieldBg)
+    .corner(t.radii.check)
+    .border(t.metrics.borderHairline,
+      if checked: t.palette.accent else: t.palette.panelBorder)):
+    if checked:
+      openElement()
+      configureOpenElement(col(width = fixedPx(tick), height = fixedPx(tick))
+        .bg(t.palette.accent).corner(t.radii.tick))
+      closeElement()
+
+proc fieldText*(text, placeholder: string, isFocused: bool): (string, Color) =
+  ## What a field shows: its text, or the placeholder in the dim colour
+  ## while empty and unfocused.
+  if not isFocused and text.len == 0:
+    return (placeholder, dimColor)
+  return (text, textColor)
+
+proc fieldFocus*(id: ElementId, text: string): bool =
+  ## The click side of the edit engine for one field: a click inside
+  ## focuses it (seeding `text` as the Escape snapshot), a click anywhere
+  ## else while it holds focus blurs it. Returns whether the field is
+  ## focused *after* this frame's click.
+  let was = focused(id)
+  if clickedIn(id):
+    if not was:
+      focus(id, text)
+  elif was and clickedOut(id):
+    blur()
+  focused(id)
+
+## --- declaration builders ----------------------------------------------------------
+##
+## The theme-resolved `ElementDeclaration`s the widgets keep re-deriving by
+## hand. Each takes the sizing/padding knobs its call sites actually vary.
+
+proc toggleRowDecl*(over: bool, showBg = true): ElementDeclaration =
+  ## The labelled row a `checkbox`/`switch` lives in: fit content, centred,
+  ## `padCheckRow` padding, 10px gap before the label; with `showBg` a
+  ## button fill lights it while hovered.
+  let t = activeTheme
+  result = row(gap = 10, width = fit(), height = fit(), alignY = centerY,
+    padding = padAll(t.metrics.padCheckRow))
+  if showBg:
+    result = result.bg(if over: t.palette.buttonBg else: Color())
+      .corner(t.radii.button)
+
+proc fieldPad*(): Padding =
+  ## A field's standard inset: `padFieldX` across, `padFieldY` down.
+  let m = activeTheme.metrics
+  Padding(left: m.padFieldX, right: m.padFieldX,
+          top: m.padFieldY, bottom: m.padFieldY)
+
+proc fieldDecl*(id: ElementId, width: SizingAxis, height: SizingAxis,
+                dir: Direction = leftToRight, gap: int = 0,
+                alignY: AlignY = top,
+                padding: Padding = fieldPad()): ElementDeclaration =
+  ## The sunken entry-field chrome shared by text, multiline and number
+  ## fields: `fieldBg`, `field` corners, the focus/hover hairline ring of
+  ## `fieldBorder`.
+  let t = activeTheme
+  result = if dir == leftToRight:
+    row(gap = gap, padding = padding, width = width, height = height,
+        alignY = alignY)
+  else:
+    col(gap = gap, padding = padding, width = width, height = height,
+        alignY = alignY)
+  result = result.bg(t.palette.fieldBg).corner(t.radii.field)
+    .border(t.metrics.borderHairline, fieldBorder(id))
+
+proc shadeDecl*(id: ElementId, width: SizingAxis, height: SizingAxis,
+                dir: Direction = leftToRight, padding: Padding = Padding(),
+                alignX: AlignX = left, alignY: AlignY = top): ElementDeclaration =
+  ## A small button surface that just lights up under the pointer --
+  ## number-field steppers, dropdown footer buttons: `shade(pointerOver(id))`
+  ## over `inner` corners.
+  let t = activeTheme
+  result = if dir == leftToRight:
+    row(width = width, height = height, padding = padding,
+        alignX = alignX, alignY = alignY)
+  else:
+    col(width = width, height = height, padding = padding,
+        alignX = alignX, alignY = alignY)
+  result = result.bg(shade(pointerOver(id))).corner(t.radii.inner)
+
+proc optionRowDecl*(over, selected: bool, gap: int = 0,
+                    alignY: AlignY = top): ElementDeclaration =
+  ## A dropdown option row: grows to the panel width, `padOption` inset,
+  ## `inner` corners, the selected fill or the hover fill, in that order.
+  let t = activeTheme
+  result = row(width = grow(), height = fit(), gap = gap,
+      padding = padAll(t.metrics.padOption), alignY = alignY)
+  if selected:
+    result.background = t.palette.selectedBg
+  elif over:
+    result.background = t.palette.buttonHoverBg
+  result.corner = allCorners(t.radii.inner)
+
+## --- dropdowns -----------------------------------------------------------------------
+##
+## The single-choice combo and the multi-select share everything except the
+## rows inside their popovers: the open/closed bookkeeping, the summary
+## field, the floating clipped panel, the option-row chrome. One dropdown
+## may be open at a time across the set -- `toggleDropdown` owns that slot.
+
+var openDropdownId = 0'u32
+
+proc toggleDropdown*(id, popId: ElementId): bool =
+  ## Fold this frame's click into the open-dropdown slot: a click on the
+  ## field toggles it, a click off both the field and its popover dismisses.
+  ## Returns whether `id`'s dropdown is open *after* the click.
+  if pressedNow():
+    if pointerOver(id):
+      openDropdownId = if openDropdownId == id.id: 0'u32 else: id.id
+    elif openDropdownId == id.id and not pointerOver(popId):
+      openDropdownId = 0'u32
+  openDropdownId == id.id
+
+proc closeDropdown*() =
+  ## Dismiss the open dropdown (an option click usually does this).
+  openDropdownId = 0'u32
+
+proc dropdownField*(id: ElementId, isOpen: bool, shown: string,
+                    shownColor: Color, width: SizingAxis, height: SizingAxis) =
+  ## The combo-style summary field: a raised `padButton` row ringed in
+  ## accent while open, holding `shown`, a `spacer`, and the `chevron`.
+  let t = activeTheme
+  openElement(id)
+  configureOpenElement(row(width = width, height = height, gap = 8,
+    padding = padAll(t.metrics.padButton), alignY = centerY)
+    .bg(shade(pointerOver(id) or isOpen))
+    .corner(t.radii.field)
+    .border(t.metrics.borderHairline,
+      if isOpen: t.palette.accent else: t.palette.panelBorder))
+  textElement(shown, TextConfig(fontSize: t.text.control,
+    color: shownColor, wrap: noWrap))
+  spacer()
+  chevron(isOpen)
+  closeElement()
+
+proc dropdownPanelDecl*(anchor: ElementId, maxHeight: float32):
+    ElementDeclaration =
+  ## The floating option-panel declaration `dropdownPanel` configures:
+  ## a `padList` column capped at `maxHeight`, clipped and scrolled
+  ## vertically, attached under `anchor`'s bottom edge at dropdown z-level.
+  let t = activeTheme
+  col(gap = t.metrics.gapList,
+      padding = padAll(t.metrics.padList),
+      width = pct(1.0), height = fit(max = maxHeight))
+    .bg(t.palette.panelBg)
+    .border(t.metrics.borderHairline, t.palette.panelBorder)
+    .corner(t.radii.popover)
+    .floating(attachElementId,
+      offset = vec2(0.0, t.metrics.popoverOffset), zIndex = 200,
+      points = AttachPoints(element: pointLeftTop,
+                            parent: pointLeftBottom),
+      parentId = anchor.id)
+    .clip(horizontal = false, vertical = true,
+          childOffset = currentScrollOffset())
+
+template dropdownPanel*(popId: untyped, anchor: untyped, maxHeight: untyped,
+                        body: untyped): untyped =
+  ## The floating option panel hanging under a dropdown field: `popId`'s
+  ## clip/scroll column, `maxHeight` tall at most, attached to `anchor`'s
+  ## bottom edge; `body` declares the rows. Call `scrollbar(popId, popId)`
+  ## at the end of `body` to attach the bar (popovers scroll themselves).
+  block:
+    openElement(popId)
+    configureOpenElement(dropdownPanelDecl(anchor, maxHeight))
+    body
+    closeElement()
+
+template optionRow*(id: untyped, selected: untyped, gap: untyped,
+                    alignY: untyped, body: untyped): untyped =
+  ## A themed dropdown option row with an explicit `id`: `body` declares
+  ## the row's content *while the row is open*, so it can fold this
+  ## frame's pick in with `pressedNow() and hovered()` -- a tick can flip
+  ## in the very frame it is hit. `gap`/`alignY` are the row layout knobs
+  ## content-heavy rows vary.
+  block:
+    openElement(id)
+    configureOpenElement(optionRowDecl(hovered(), selected, gap, alignY))
+    body
+    closeElement()
+
+template optionRow*(id: untyped, selected: untyped, body: untyped): untyped =
+  ## `optionRow` with the default row layout.
+  optionRow(id, selected, 0, top, body)
 
 ## --- composite widgets -----------------------------------------------------------
 

@@ -36,6 +36,22 @@ proc setActiveTab*(id: ElementId, index: int) =
   ## Move `id`'s selection; the view picks it up on the next frame.
   tabState[id.id] = max(index, 0)
 
+proc tabButtonDecl*(th: Theme, over: bool, selected: bool): ElementDeclaration =
+  ## One tab's shape: fit content, top corners only, the panel fill plus
+  ## accent underline when selected, the plain button fill on hover.
+  var d = col(width = fit(), height = fit(), alignX = centerX,
+      padding = Padding(left: th.metrics.padTabX, right: th.metrics.padTabX,
+                        top: th.metrics.padTabTop, bottom: th.metrics.padTabBottom))
+  d.corner = CornerRadius(topLeft: th.radii.tab, topRight: th.radii.tab,
+                          bottomLeft: 0, bottomRight: 0)
+  if selected:
+    d.background = th.palette.panelBg
+    d.border = BorderConfig(color: th.palette.accent,
+      width: BorderWidth(bottom: th.metrics.borderTab))
+  elif over:
+    d.background = th.palette.buttonBg
+  result = d
+
 proc tabStrip*(id: ElementId, labels: seq[string], selected: int): int =
   ## Draw a tab strip as a child of `id`'s element and return the index
   ## of a tab clicked this frame, else `selected`. The strip and its
@@ -43,35 +59,23 @@ proc tabStrip*(id: ElementId, labels: seq[string], selected: int): int =
   ## screen.
   result = selected
   let th = activeTheme
-  openElement(localId("tabs.strip", id.id))
   var d = row(width = grow(), height = fit(), gap = th.metrics.padToolbar,
       padding = Padding(left: th.metrics.padToolbar, right: th.metrics.padToolbar,
                         top: th.metrics.padToolbar, bottom: 0))
   d.border = BorderConfig(color: th.palette.panelBorder,
     width: BorderWidth(bottom: th.metrics.borderHairline))
+  openElement(localId("tabs.strip", id.id))
   configureOpenElement(d)
   var i = 0
   while i < labels.len:
     let tabId = localIdWithIndex("tabs.tab", uint32(i), id.id)
     let over = pointerOver(tabId)
-    openElement(tabId)
-    var t = col(width = fit(), height = fit(), alignX = centerX,
-        padding = Padding(left: th.metrics.padTabX, right: th.metrics.padTabX,
-                          top: th.metrics.padTabTop, bottom: th.metrics.padTabBottom))
-    t.corner = CornerRadius(topLeft: th.radii.tab, topRight: th.radii.tab,
-                            bottomLeft: 0, bottomRight: 0)
-    if i == selected:
-      t.background = th.palette.panelBg
-      t.border = BorderConfig(color: th.palette.accent,
-        width: BorderWidth(bottom: th.metrics.borderTab))
-    elif over:
-      t.background = th.palette.buttonBg
-    configureOpenElement(t)
-    textElement(labels[i], TextConfig(fontSize: th.text.option,
-      color: if i == selected or over: th.palette.textColor
-             else: th.palette.dimColor))
-    closeElement()
-    if clickedIn(tabId):
+    let clicked = clickedIn(tabId)
+    item(tabId, tabButtonDecl(th, over, i == selected)):
+      textElement(labels[i], TextConfig(fontSize: th.text.option,
+        color: if i == selected or over: th.palette.textColor
+               else: th.palette.dimColor))
+    if clicked:
       result = i
     inc i
   closeElement()
@@ -90,13 +94,11 @@ widget TabbedView(id: ElementId, tabs: seq[string], body: proc(): void):
   let picked = tabStrip(id, tabs, sel)
   if picked != sel:
     setActiveTab(id, picked)
-  openElement(localId("tabs.panel", id.id))
-  configureOpenElement(col(width = grow(), height = grow(), gap = 8,
-      padding = padAll(activeTheme.metrics.padPanel))
+  item(localId("tabs.panel", id.id), col(width = grow(), height = grow(),
+      gap = 8, padding = padAll(activeTheme.metrics.padPanel))
     .bg(panelBg)
     .border(activeTheme.metrics.borderHairline, panelBorder)
     .corner(0, activeTheme.radii.tabPanel, activeTheme.radii.tabPanel,
-            activeTheme.radii.tabPanel))
-  body()
-  closeElement()
+            activeTheme.radii.tabPanel)):
+    body()
   closeElement()

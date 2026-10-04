@@ -31,7 +31,6 @@ proc heading*(text: string, level: int = 1) =
   ## One heading line. Elements use clay's auto ids, so any number of
   ## headings can repeat inside one parent without id collisions.
   let t = activeTheme
-  openElement()
   var d = row(width = grow(), height = fit(),
       padding = Padding(left: 0, right: 0,
                         top: headingTopPad(level),
@@ -39,10 +38,9 @@ proc heading*(text: string, level: int = 1) =
   if level <= 2:
     d.border = BorderConfig(color: t.palette.panelBorder,
       width: BorderWidth(bottom: t.metrics.borderHairline))
-  configureOpenElement(d)
-  let fg = if level <= 4: t.palette.textColor else: t.palette.dimColor
-  textElement(text, TextConfig(fontSize: headingFontSize(level), color: fg))
-  closeElement()
+  container(d):
+    let fg = if level <= 4: t.palette.textColor else: t.palette.dimColor
+    textElement(text, TextConfig(fontSize: headingFontSize(level), color: fg))
 
 proc h1*(text: string) =
   heading(text, 1)
@@ -67,11 +65,7 @@ widget Section(title: string, body: proc(): void):
   ##
   ##   Section(title = "Audio"):
   ##     volume = textField(hashId("vol"), volume)
-  openElement()
-  configureOpenElement(col(width = grow(), gap = activeTheme.metrics.gapCard))
-  heading(title, 2)
-  openElement()
-  configureOpenElement(col(width = grow(), gap = activeTheme.metrics.gapTight))
-  body()
-  closeElement()
-  closeElement()
+  container(col(width = grow(), gap = activeTheme.metrics.gapCard)):
+    heading(title, 2)
+    container(col(width = grow(), gap = activeTheme.metrics.gapTight)):
+      body()
