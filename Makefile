@@ -29,6 +29,8 @@ test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/modules_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/clay_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/clay_dsl_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/widget_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/widgets_test.nim
 
 setup: build/nimony/bin/nimony
 	@echo "Nimony is ready"

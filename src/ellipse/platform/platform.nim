@@ -50,6 +50,22 @@ const
   ButtonLeft = 1'u8          ## SDL_BUTTON_LEFT
   ButtonLeftMask = 1'u32     ## SDL_BUTTON_LMASK, the `state` bit for it
 
+const
+  ## SDL3 scancodes for the keys the UI edits with (USB HID usage page 0x07).
+  ScanEnter = 40'i32
+  ScanEscape = 41'i32
+  ScanBackspace = 42'i32
+  ScanDelete = 76'i32
+  ScanHome = 74'i32
+  ScanEnd = 77'i32
+  ScanRight = 79'i32
+  ScanLeft = 80'i32
+  ScanDown = 81'i32
+  ScanUp = 82'i32
+  ## SDL3 keymods: Shift = LSHIFT | RSHIFT, Ctrl = LCTRL | RCTRL.
+  ModShift = 0x00000003'i32
+  ModCtrl = 0x000000C0'i32
+
 type
   SDL_Window {.importc: "SDL_Window", header: "<SDL3/SDL.h>".} = object
   SDL_Renderer* {.importc: "SDL_Renderer", header: "<SDL3/SDL.h>".} = object
@@ -172,12 +188,31 @@ type
     down*: bool
 
 type
+  KeyEventKind* = enum
+    ## What a `KeyEvent` carries. Printable input arrives as `kevText`
+    ## (SDL text events, keyboard-layout independent); the rest are the
+    ## navigation keys the UI widgets edit with. `kevNone` marks ignored
+    ## keys and never enters the queue.
+    kevNone, kevText, kevBackspace, kevDelete, kevLeft, kevRight, kevUp,
+    kevDown, kevHome, kevEnd, kevEnter, kevEscape
+
+  KeyEvent* = object
+    kind*: KeyEventKind
+    shift*: bool
+    ctrl*: bool
+    text*: string        ## kevText only: the composed string of one keypress
+
+type
   PlatformApplication* = object
     window: Window
     renderer: Renderer
     pointer: PointerState
     width, height: float32
     running: bool
+    keyPending: seq[KeyEvent]   ## events pumped since the last input frame
+    keyFrame: seq[KeyEvent]     ## the events `keyEvents()` hands to widgets
+    wheelPending: tuple[x, y: float32]
+    wheelFrame: tuple[x, y: float32]
 
 proc `=destroy`(app: var PlatformApplication) =
   `=destroy`(app.renderer)
@@ -247,6 +282,24 @@ proc beginFrame(engine: var GameEngine) =
   waitUntil(tickDeadline(engine.epoch, engine.renderFrame))
   engine.requiredTicks = currentTick(engine)
 
+proc keyEventFor(scancode, modifiers: int32): KeyEvent =
+  ## Maps a navigation scancode to a `KeyEvent`; unknown keys yield `kevNone`.
+  result = KeyEvent(kind: kevNone,
+    shift: (modifiers and ModShift) != 0,
+    ctrl: (modifiers and ModCtrl) != 0)
+  case scancode
+  of ScanEnter: result.kind = kevEnter
+  of ScanEscape: result.kind = kevEscape
+  of ScanBackspace: result.kind = kevBackspace
+  of ScanDelete: result.kind = kevDelete
+  of ScanHome: result.kind = kevHome
+  of ScanEnd: result.kind = kevEnd
+  of ScanRight: result.kind = kevRight
+  of ScanLeft: result.kind = kevLeft
+  of ScanDown: result.kind = kevDown
+  of ScanUp: result.kind = kevUp
+  else: discard
+
 proc pumpEvents(app: var PlatformApplication) =
   var event = default(SDL_Event)
   while SDL_PollEvent(addr event):
@@ -274,6 +327,20 @@ proc pumpEvents(app: var PlatformApplication) =
       let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
       if e.button == ButtonLeft:
         app.pointer.down = false
+    elif kind == EventKeyDown:
+      let e = cast[ptr SDL_KeyboardEvent](addr event)[]
+      if e.down:   # SDL delivers autorepeat as repeated downs: forward them
+        let ev = keyEventFor(e.scancode, e.modifiers)
+        if ev.kind != kevNone:
+          app.keyPending.add ev
+    elif kind == EventTextInput:
+      let e = cast[ptr SDL_TextInputEvent](addr event)[]
+      if not e.text.isNil:   # printable input, already keyboard-layout applied
+        app.keyPending.add KeyEvent(kind: kevText, text: fromCString(e.text))
+    elif kind == EventMouseWheel:
+      let e = cast[ptr SDL_MouseWheelEvent](addr event)[]
+      app.wheelPending.x += e.x
+      app.wheelPending.y += e.y
 
 proc pointerState*(): PointerState =
   ## The pointer as of the most recent event pump; feed it to
@@ -285,6 +352,33 @@ proc windowPixelSize*(): tuple[width, height: float32] =
   ## event pump. Feed it to `clay.setLayoutDimensions` each update tick so
   ## the layout tracks live window resizes.
   (activeApp.width, activeApp.height)
+
+proc beginInputFrame*() =
+  ## Publish the events pumped so far as *this* input frame's data: what
+  ## `keyEvents` and `wheelDelta` report until the next call. The game loop
+  ## pumps events once per main-loop iteration while `tick` may run several
+  ## updates; only the first update of a batch consumes the events, the rest
+  ## see empty frames. UI code calls this once per update, before laying out.
+  activeApp.keyFrame.setLen(0)
+  for ev in activeApp.keyPending:
+    activeApp.keyFrame.add ev
+  activeApp.keyPending.setLen(0)
+  activeApp.wheelFrame = activeApp.wheelPending
+  activeApp.wheelPending = (float32(0.0), float32(0.0))
+
+proc keyEvents*(): seq[KeyEvent] =
+  ## Keyboard/text events collected since the last `beginInputFrame`.
+  activeApp.keyFrame
+
+proc wheelDelta*(): tuple[x, y: float32] =
+  ## Accumulated scroll-wheel movement since the last `beginInputFrame`,
+  ## in SDL's units: positive y scrolls up/away from the user.
+  activeApp.wheelFrame
+
+proc pushKeyEvent*(ev: KeyEvent) =
+  ## Feed a synthetic event into the queue -- the seam for tests, on-screen
+  ## keyboards and gamepad text input.
+  activeApp.keyPending.add ev
 
 proc drawFrame(app: var PlatformApplication; render: FrameFn) {.raises.} =
   sdlHandle(SDL_SetRenderDrawColor(app.renderer.raw, 0, 0, 0, 255), "SDL_SetRenderDrawColor()")

@@ -1,0 +1,32 @@
+## The standard widget set for the new (clay-based) UI system.
+##
+## Import this module for the whole set, or the individual fragments:
+##
+##   import ellipse_ui/widgets          ## everything
+##   import ellipse_ui/widgets/checkboxes
+##
+## The pieces:
+##
+##   module         provides
+##   -------------+----------------------------------------------------------
+##   common         shared colours, click edges, the focus/caret edit engine,
+##                  `widget Labeled`
+##   checkboxes     `checkbox`, `switch`
+##   comboboxes     `comboBox` -- a single-choice dropdown
+##   multiselects   `multiSelect` -- a checkable list over a bitmask
+##   textfields     `textField`, `multilineField`
+##   numberfields   `numberField`, `intNumberField`
+##   headings       `heading`/`h1`..`h6`, `widget Section`
+##   texts          `label`, `bodyText`, `caption`, `overline`, `badge`,
+##                  `textLink`, `widget Prose`
+##
+## Immediate-mode contract: pass the current value in, store the return
+## value back -- `checked = checkbox(id, "Wifi", checked)`. Transient state
+## (which field has the caret, which dropdown is open) lives in the widget
+## modules, keyed by element id, like `ui.menu` already does.
+
+import ./widgets/[common, checkboxes, comboboxes, multiselects, textfields,
+                  numberfields, headings, texts]
+
+export common, checkboxes, comboboxes, multiselects, textfields,
+       numberfields, headings, texts

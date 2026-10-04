@@ -2,5 +2,22 @@
 
 #+begin_src nim
 
+  widget Container(body: proc(): void):
+    clay "app", col(width = grow(), height = grow(), alignX = centerX):
+      body()
+
+  widget PageWrapper(title: string, rightAction: proc(): void, body: proc(): void):
+    clay "app", col(width = grow(), height = grow(), alignX = centerX)
+      .bg(bgColor):
+      toolbar("toolbar") do():
+        textElement(title, TextConfig(fontSize: fontSize, color: fontColor))
+        rowSpacer()
+        rightAction()
+      Container:
+        body()
+
+  PageWrapper(rightAction: proc() = button()):
+    textElement("This is the body")  
+
 #+end_src
 

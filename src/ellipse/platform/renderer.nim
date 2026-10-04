@@ -2,20 +2,21 @@
 ##
 ## Draws the commands produced by a clay layout pass using SDL3's 2D
 ## renderer: filled rectangles (rounded corners as triangle fans through
-## `SDL_RenderGeometry`), borders as fill strips, clip regions via
+## `SDL_RenderGeometry`), borders as rounded contour rings (with cheap
+## feathered edge smoothing), clip regions via
 ## `SDL_SetRenderClipRect`, and text through the SDL3_ttf renderer text
 ## engine (glyph atlas drawn on the same renderer). `measureText` feeds the
 ## very same fonts to clay's layout, so text boxes and glyphs agree.
 ##
 ## Primitives the built-in UI does not use yet -- images, custom commands,
-## overlays, border corner radii, `letterSpacing` -- are skipped.
+## overlays, `letterSpacing` -- are skipped.
 ##
 ## Requires `initialize()` (the platform window/renderer) to have run first;
 ## links against SDL3_ttf, which is part of the SDL3 ecosystem setup.
 
 {.passL: "-lSDL3_ttf".}
 
-import std/[tables, strutils]
+import std/[math, tables, strutils]
 
 import clay
 import ./platform
@@ -136,42 +137,150 @@ proc fillRect(ren: ptr SDL_Renderer; r: Rect; col: Color) =
   setColor(ren, col)
   discard SDL_RenderFillRect(ren, addr fr)
 
-# Unit circle sampled every 22.5 degrees (16 steps), so rounded corners need
-# no float math module: index = round(angle / 22.5) mod 16.
-const
-  CosSteps = [1.0'f32, 0.9238795'f32, 0.7071068'f32, 0.3826834'f32, 0.0'f32,
-              -0.3826834'f32, -0.7071068'f32, -0.9238795'f32, -1.0'f32,
-              -0.9238795'f32, -0.7071068'f32, -0.3826834'f32, 0.0'f32,
-              0.3826834'f32, 0.7071068'f32, 0.9238795'f32]
-  SinSteps = [0.0'f32, 0.3826834'f32, 0.7071068'f32, 0.9238795'f32, 1.0'f32,
-              0.9238795'f32, 0.7071068'f32, 0.3826834'f32, 0.0'f32,
-              -0.3826834'f32, -0.7071068'f32, -0.9238795'f32, -1.0'f32,
-              -0.9238795'f32, -0.7071068'f32, -0.3826834'f32]
+## --- rounded-rectangle geometry -------------------------------------------------
+##
+## Fills and borders share one contour generator, `roundedContour`: the clockwise
+## boundary of a rounded rectangle as 4 quarter arcs of `seg` chords each plus the
+## straight edges between them (radius 0 => the arc collapses to the corner point).
+## Outer/inner/expanded contours of one shape use the same `seg`, so their points
+## pair up by index -- which is what lets a border triangulate as a ring between
+## two contours and lets the smoothing bands tile without overlapping.
+##
+## SDL3's 2D geometry has no antialiasing, so rounded shapes get two thin
+## translucent outline bands hugging their edges (and, for border rings, hugging
+## the hole) as cheap coverage smoothing: the 0..0.5px band carries 3/4 of the
+## colour's alpha, the 0.5..1px band 1/4, approximating the ideal coverage ramp.
 
-proc addArc(pts: var seq[SDL_FPoint]; cx, cy, rad: float32; base: int) =
-  ## Five points (both endpoints inclusive) around the corner center
-  ## `(cx, cy)`, starting at circle step `base` and sweeping a quarter turn.
+func arcSegments(radius: float32): int =
+  ## Chords of the quarter arc deviate from the true circle by
+  ## `radius * (1 - cos(pi/2 / seg))`; solve for the smallest `seg` keeping that
+  ## under ~0.08px (sub-pixel, so large radii stop looking like polygons),
+  ## clamped to 1..20.
+  if radius <= 0.0:
+    return 1
+  let keep = 1.0 - 0.08 / radius
+  if keep < 0.36:   # arccos(1 - 0.08/r) below pi/8: just use the cap
+    return 20
+  result = ceil((PI / 2.0) / arccos(keep)).int
+  if result < 1:
+    result = 1
+  elif result > 20:
+    result = 20
+
+func clampCorners(r: Rect; c: CornerRadius): CornerRadius =
+  ## Radii clamped into the shape: non-negative, never past half the box's
+  ## smaller side (two opposite corners can meet, never cross).
+  let lim = min(r.width, r.height) / 2.0
+  CornerRadius(
+    topLeft: min(max(c.topLeft, 0.0), lim),
+    topRight: min(max(c.topRight, 0.0), lim),
+    bottomLeft: min(max(c.bottomLeft, 0.0), lim),
+    bottomRight: min(max(c.bottomRight, 0.0), lim))
+
+func cornerSize(c: CornerRadius): float32 =
+  max(max(c.topLeft, c.topRight), max(c.bottomLeft, c.bottomRight))
+
+func isRounded(c: CornerRadius): bool =
+  c.topLeft > 0.0 or c.topRight > 0.0 or c.bottomLeft > 0.0 or c.bottomRight > 0.0
+
+func grow(r: Rect; d: float32): Rect =
+  ## Expand (`d` > 0) or shrink (`d` < 0) a rounded rectangle's straight edges.
+  ## The outward parallel curve of a rounded rect is exactly the rounded rect
+  ## grown by `d` with its radii grown too -- see the `grow` for CornerRadius.
+  Rect(x: r.x - d, y: r.y - d, width: r.width + 2.0 * d, height: r.height + 2.0 * d)
+
+func grow(c: CornerRadius; d: float32): CornerRadius =
+  CornerRadius(topLeft: c.topLeft + d, topRight: c.topRight + d,
+               bottomLeft: c.bottomLeft + d, bottomRight: c.bottomRight + d)
+
+const
+  QuarterTurn = float32(PI / 2.0)
+  BandInner = 0.75'f32   # alpha of the edge-adjacent smoothing band
+  BandOuter = 0.25'f32   # ... and of the far half-pixel band
+
+proc addArc(pts: var seq[SDL_FPoint]; cx, cy, rad, startAngle, step: float32;
+            seg: int) =
+  ## `seg` + 1 points sweeping a quarter turn around `(cx, cy)` from
+  ## `startAngle` (radians, screen space: x right, y down, angles clockwise).
   var k = 0
-  while k <= 4:
-    let idx = (base + k) mod 16
-    pts.add(SDL_FPoint(x: cx + rad * CosSteps[idx], y: cy + rad * SinSteps[idx]))
+  while k <= seg:
+    let a = startAngle + step * float32(k)
+    pts.add(SDL_FPoint(x: cx + rad * cos(a), y: cy + rad * sin(a)))
     inc k
 
-proc fillRounded(ren: ptr SDL_Renderer; r: Rect; corner: CornerRadius; col: Color) =
-  ## Rounded rectangle as a center fan: one triangle per consecutive pair of
-  ## boundary points (arcs at each corner, straight edges in between).
-  let lim = min(r.width, r.height) / 2.0
-  let tl = min(max(corner.topLeft, 0.0), lim)
-  let tr = min(max(corner.topRight, 0.0), lim)
-  let br = min(max(corner.bottomRight, 0.0), lim)
-  let bl = min(max(corner.bottomLeft, 0.0), lim)
-
+proc roundedContour(r: Rect; c: CornerRadius; seg: int): seq[SDL_FPoint] =
+  ## Clockwise boundary starting on the left end of the top edge. Each corner
+  ## contributes `seg` + 1 points; a 0-radius corner collapses to its tip.
+  let step = QuarterTurn / float32(seg)
   var pts: seq[SDL_FPoint] = @[]
-  addArc(pts, r.x + tl, r.y + tl, tl, 8)                        # top-left
-  addArc(pts, r.x + r.width - tr, r.y + tr, tr, 12)             # top-right
-  addArc(pts, r.x + r.width - br, r.y + r.height - br, br, 16)  # bottom-right
-  addArc(pts, r.x + bl, r.y + r.height - bl, bl, 20)            # bottom-left
+  addArc(pts, r.x + c.topLeft, r.y + c.topLeft, c.topLeft,
+         2.0'f32 * QuarterTurn, step, seg)   # left edge -> top edge (180..270)
+  addArc(pts, r.x + r.width - c.topRight, r.y + c.topRight, c.topRight,
+         3.0'f32 * QuarterTurn, step, seg)   # top edge -> right edge (270..360)
+  addArc(pts, r.x + r.width - c.bottomRight, r.y + r.height - c.bottomRight,
+         c.bottomRight, 4.0'f32 * QuarterTurn, step, seg)  # right -> bottom
+  addArc(pts, r.x + c.bottomLeft, r.y + r.height - c.bottomLeft, c.bottomLeft,
+         5.0'f32 * QuarterTurn, step, seg)   # bottom -> left (90..180)
+  return pts
 
+## A band is a ring of quads between two same-length contours. All triangles of
+## one shape (core fan, ring, smoothing bands) accumulate into a single vertex
+## list so the whole element ships in one `SDL_RenderGeometry` call.
+
+proc addBand(verts: var seq[SDL_Vertex]; a, b: seq[SDL_FPoint];
+             col: Color; alpha: float32) =
+  ## Ring between contours `a` and `b` (paired by index, same winding).
+  let vc = SDL_FColor(r: col.r / 255.0, g: col.g / 255.0, b: col.b / 255.0,
+                      a: col.a / 255.0 * alpha)
+  var i = 0
+  while i < a.len:
+    let j = (i + 1) mod a.len
+    verts.add(SDL_Vertex(position: a[i], color: vc, tex_coord: SDL_FPoint()))
+    verts.add(SDL_Vertex(position: a[j], color: vc, tex_coord: SDL_FPoint()))
+    verts.add(SDL_Vertex(position: b[j], color: vc, tex_coord: SDL_FPoint()))
+    verts.add(SDL_Vertex(position: a[i], color: vc, tex_coord: SDL_FPoint()))
+    verts.add(SDL_Vertex(position: b[j], color: vc, tex_coord: SDL_FPoint()))
+    verts.add(SDL_Vertex(position: b[i], color: vc, tex_coord: SDL_FPoint()))
+    inc i
+
+func insetRect(r: Rect; d: float32): Rect =
+  Rect(x: r.x + d, y: r.y + d, width: r.width - 2.0 * d, height: r.height - 2.0 * d)
+
+func insetCorners(c: CornerRadius; d: float32): CornerRadius =
+  CornerRadius(topLeft: max(0.0, c.topLeft - d), topRight: max(0.0, c.topRight - d),
+               bottomLeft: max(0.0, c.bottomLeft - d),
+               bottomRight: max(0.0, c.bottomRight - d))
+
+proc featherContour(r: Rect; c: CornerRadius; seg: int; d: float32;
+                    inside: bool): seq[SDL_FPoint] =
+  ## The contour offset `d` from `r`/`c`: growing outward, or shrinking into
+  ## the hole when `inside` marks a hole rim.
+  if inside:
+    let rr = insetRect(r, d)
+    roundedContour(rr, clampCorners(rr, insetCorners(c, d)), seg)
+  else:
+    roundedContour(grow(r, d), grow(c, d), seg)
+
+proc addFeathering(verts: var seq[SDL_Vertex]; r: Rect; c: CornerRadius;
+                   seg: int; col: Color; inside: bool) =
+  ## Two half-pixel smoothing bands hugging the contour: with `inside` false
+  ## they grow outward from the shape's edge; with `inside` true the contour
+  ## is a hole's rim and the bands shrink into the hole. The inward offset of
+  ## a rounded rect keeps straight edges exact and only loses a sub-pixel
+  ## sliver near corners whose radius is under the band width -- slivers blend
+  ## nothing twice, unlike the overlap the naive version would produce.
+  let base = featherContour(r, c, seg, 0.0, inside)
+  let mid = featherContour(r, c, seg, 0.5, inside)
+  let far = featherContour(r, c, seg, 1.0, inside)
+  addBand(verts, base, mid, col, BandInner)
+  addBand(verts, mid, far, col, BandOuter)
+
+proc fillRounded(ren: ptr SDL_Renderer; r: Rect; corner: CornerRadius; col: Color) =
+  ## Rounded rectangle as a center fan (the clamped shape is convex) plus two
+  ## outward smoothing bands.
+  let c = clampCorners(r, corner)
+  let seg = arcSegments(cornerSize(c))
+  let pts = roundedContour(r, c, seg)
   let vc = SDL_FColor(r: col.r / 255.0, g: col.g / 255.0, b: col.b / 255.0,
                       a: col.a / 255.0)
   let center = SDL_FPoint(x: r.x + r.width / 2.0, y: r.y + r.height / 2.0)
@@ -183,7 +292,41 @@ proc fillRounded(ren: ptr SDL_Renderer; r: Rect; corner: CornerRadius; col: Colo
     verts.add(SDL_Vertex(position: pts[i], color: vc, tex_coord: SDL_FPoint()))
     verts.add(SDL_Vertex(position: pts[j], color: vc, tex_coord: SDL_FPoint()))
     inc i
-  discard SDL_RenderGeometry(ren, nil, addr verts[0], int32(verts.len), nil, 0)
+  addFeathering(verts, r, c, seg, col, inside = false)
+  if verts.len > 0:
+    discard SDL_RenderGeometry(ren, nil, addr verts[0], int32(verts.len), nil, 0)
+
+proc strokeRounded(ren: ptr SDL_Renderer; r: Rect; bw: BorderWidth;
+                   corner: CornerRadius; col: Color) =
+  ## A border with rounded corners: the ring between the outer rounded rect and
+  ## its inner offset -- the per-side border widths inset the inner edge, and
+  ## each inner corner keeps `outerRadius - adjacentBorderWidth` so the band
+  ## stays visually uniform through the curve. Smoothing bands hug both edges.
+  let c = clampCorners(r, corner)
+  let l = float32(bw.left)
+  let t = float32(bw.top)
+  let rt = float32(bw.right)
+  let b = float32(bw.bottom)
+  let iw = r.width - l - rt
+  let ih = r.height - t - b
+  let seg = arcSegments(cornerSize(c))
+  if iw <= 0.0 or ih <= 0.0:
+    fillRounded(ren, r, c, col)
+    return
+  let inner = Rect(x: r.x + l, y: r.y + t, width: iw, height: ih)
+  let ci = clampCorners(inner, CornerRadius(
+    topLeft: max(0.0, c.topLeft - min(l, t)),
+    topRight: max(0.0, c.topRight - min(t, rt)),
+    bottomLeft: max(0.0, c.bottomLeft - min(l, b)),
+    bottomRight: max(0.0, c.bottomRight - min(rt, b))))
+  var verts: seq[SDL_Vertex] = @[]
+  addBand(verts, roundedContour(r, c, seg), roundedContour(inner, ci, seg),
+          col, 1.0)
+  addFeathering(verts, r, c, seg, col, inside = false)
+  if iw >= 2.0 and ih >= 2.0:
+    addFeathering(verts, inner, ci, seg, col, inside = true)
+  if verts.len > 0:
+    discard SDL_RenderGeometry(ren, nil, addr verts[0], int32(verts.len), nil, 0)
 
 proc fillStrip(ren: ptr SDL_Renderer; x, y, w, h: float32; col: Color) =
   if w <= 0.0 or h <= 0.0:
@@ -195,14 +338,6 @@ func packColor(col: Color): uint64 =
    uint64(col.b.toU8) shl 16 or uint64(col.a.toU8) shl 24)
 
 proc textFor(key: TextKey, col: Color): nil ptr TTF_Text =
-  ## One immutable `TTF_Text` per (string, size, color): the SDL3_ttf
-  ## renderer text engine caches glyph atlas refs inside the text's layout,
-  ## and mutating a text after it has been drawn (string/font swaps on a
-  ## shared object) leaves stale quads -- artifact slivers of other glyphs.
-  ## Creating texts once and never touching them again is the supported
-  ## immediate-mode pattern. Entries live for the process lifetime (they are
-  ## few for a menu-driven UI); a text-heavy app would want an LRU with
-  ## TTF_DestroyText eviction.
   let cached = texts.getOrDefault(key)
   if cached != nil:
     return cached
@@ -267,18 +402,22 @@ proc drawCommands*() {.raises.} =
       else:
         fillRect(ren, cmd.box, cmd.fill)
     of renderBorder:
-      let bw = cmd.borderWidth
-      fillStrip(ren, cmd.box.x, cmd.box.y, cmd.box.width, float32(bw.top),
-                cmd.borderColor)
-      fillStrip(ren, cmd.box.x, cmd.box.y + cmd.box.height - float32(bw.bottom),
-                cmd.box.width, float32(bw.bottom), cmd.borderColor)
-      fillStrip(ren, cmd.box.x, cmd.box.y + float32(bw.top), float32(bw.left),
-                cmd.box.height - float32(bw.top) - float32(bw.bottom),
-                cmd.borderColor)
-      fillStrip(ren, cmd.box.x + cmd.box.width - float32(bw.right),
-                cmd.box.y + float32(bw.top), float32(bw.right),
-                cmd.box.height - float32(bw.top) - float32(bw.bottom),
-                cmd.borderColor)
+      if cmd.borderCorner.isRounded:
+        strokeRounded(ren, cmd.box, cmd.borderWidth, cmd.borderCorner,
+                      cmd.borderColor)
+      else:
+        let bw = cmd.borderWidth
+        fillStrip(ren, cmd.box.x, cmd.box.y, cmd.box.width, float32(bw.top),
+                  cmd.borderColor)
+        fillStrip(ren, cmd.box.x, cmd.box.y + cmd.box.height - float32(bw.bottom),
+                  cmd.box.width, float32(bw.bottom), cmd.borderColor)
+        fillStrip(ren, cmd.box.x, cmd.box.y + float32(bw.top), float32(bw.left),
+                  cmd.box.height - float32(bw.top) - float32(bw.bottom),
+                  cmd.borderColor)
+        fillStrip(ren, cmd.box.x + cmd.box.width - float32(bw.right),
+                  cmd.box.y + float32(bw.top), float32(bw.right),
+                  cmd.box.height - float32(bw.top) - float32(bw.bottom),
+                  cmd.borderColor)
     of renderText:
       drawTextCmd(lineText(cmd), cmd.box.x, cmd.box.y, cmd.textColor,
                   cmd.fontSize.int)
