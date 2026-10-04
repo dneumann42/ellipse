@@ -1,7 +1,8 @@
 ## Text entry fields. `textField` edits a caller-owned string through the
 ## shared caret/selection engine in `common`: click focuses, typing mutates,
 ## Enter commits (leaves the field), Escape reverts to the value the field
-## was focused with.
+## was focused with. Editing keys follow the Emacs/readline default map --
+## C-a/C-e, C-b/C-f, M-b/M-f, C-k/C-u/C-w/C-y, C-g -- see `common`.
 ##
 ## The returned string is what the caller stores back every frame --
 ## intermediate edits are already visible in it; commit only moves focus.
@@ -44,13 +45,13 @@ proc textField*(id: ElementId, text: string, placeholder = "",
 
   var shown = edited
   var color = textColor
-  if focused(id):
-    shown = displayText(shown)
-  elif shown.len == 0:
+  if not focused(id) and shown.len == 0:
     shown = placeholder
     color = dimColor
-  textElement(shown, TextConfig(fontSize: fontSize, color: color,
-    wrap: noWrap))
+  let cfg = TextConfig(fontSize: fontSize, color: color, wrap: noWrap)
+  textElement(shown, cfg)
+  if focused(id):
+    caretOverlay(textChildId(id.id), edited, cfg)
   closeElement()
 
 proc multilineField*(id: ElementId, text: string, placeholder = "",
@@ -69,11 +70,13 @@ proc multilineField*(id: ElementId, text: string, placeholder = "",
 
   var edited = result
   if focused(id):
-    # Remap Enter to a newline so the shared engine treats it as text.
+    # Remap Enter (and C-m) to a newline so the shared engine treats it as
+    # text; everything else -- Emacs chords included -- flows through.
     var frame: seq[KeyEvent] = @[]
     let evs = keyEvents()
     for ev in evs:
-      if ev.kind == kevEnter:
+      if ev.kind == kevEnter or
+          (ev.kind == kevLetter and ev.ctrl and ev.ch == 'm'):
         frame.add KeyEvent(kind: kevText, text: "\n")
       else:
         frame.add ev
@@ -89,14 +92,11 @@ proc multilineField*(id: ElementId, text: string, placeholder = "",
     .bg(fieldBg)
     .corner(8)
     .border(1, fieldBorder(id)))
+  let cfg = TextConfig(fontSize: fontSize, color: textColor)
   if edited.len == 0 and not focused(id):
     textElement(placeholder, TextConfig(fontSize: fontSize, color: dimColor))
-  elif edited.len == 0:
-    textElement(displayText(""), TextConfig(fontSize: fontSize,
-      color: textColor))
   else:
-    var shown = edited
-    if focused(id):
-      shown = displayText(shown)
-    textElement(shown, TextConfig(fontSize: fontSize, color: textColor))
+    textElement(edited, cfg)
+  if focused(id):
+    caretOverlay(textChildId(id.id), edited, cfg)
   closeElement()

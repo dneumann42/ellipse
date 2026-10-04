@@ -1,6 +1,6 @@
 {.passL: "-lSDL3 -no-pie".}
 
-import std/[monotimes, strutils]
+import std/[monotimes, strutils, envvars]
 
 import ../logger
 
@@ -62,9 +62,15 @@ const
   ScanLeft = 80'i32
   ScanDown = 81'i32
   ScanUp = 82'i32
-  ## SDL3 keymods: Shift = LSHIFT | RSHIFT, Ctrl = LCTRL | RCTRL.
+  ## QWERTY home-row letters, as SDL3 scancodes: A..Z run 4..29, so a
+  ## scancode in this range maps to `chr('a' + scancode - 4)`.
+  ScanA = 4'i32
+  ScanZ = 29'i32
+  ## SDL3 keymods: Shift = LSHIFT | RSHIFT, Ctrl = LCTRL | RCTRL,
+  ## Alt = LALT | RALT.
   ModShift = 0x00000003'i32
   ModCtrl = 0x000000C0'i32
+  ModAlt = 0x00000300'i32
 
 type
   SDL_Window {.importc: "SDL_Window", header: "<SDL3/SDL.h>".} = object
@@ -92,10 +98,10 @@ type
     which: uint32
     scancode: int32
     key: int32
-    modifiers: int32
-    raw: uint16
-    down: bool
-    repeat: bool
+    modifiers: uint16   ## SDL3's SDL_Keymod is Uint16; `raw` is the *next*
+    raw: uint16         ## two-byte field, then the one-byte `down`/`repeat`
+    down: bool          ## flags. A wider `modifiers` would shift `down` past
+    repeat: bool        ## the struct, into union padding that is always 0.
 
   SDL_TextInputEvent = object
     typ: uint32
@@ -147,6 +153,11 @@ proc SDL_Init(flags: uint32): bool {.importc: "SDL_Init", header: "<SDL3/SDL.h>"
 proc SDL_GetError(): cstring {.importc: "SDL_GetError", header: "<SDL3/SDL.h>".}
 proc SDL_SetAppMetadata(appname, appversion, appidentifier: cstring): bool {.importc: "SDL_SetAppMetadata", header: "<SDL3/SDL.h>".}
 proc SDL_CreateWindowAndRenderer(title: cstring; width, height: int32; flags: uint32; window: ptr ptr SDL_Window; renderer: ptr ptr SDL_Renderer): bool {.importc: "SDL_CreateWindowAndRenderer", header: "<SDL3/SDL.h>".}
+proc SDL_StartTextInput(win: ptr SDL_Window): bool {.importc: "SDL_StartTextInput", header: "<SDL3/SDL.h>".}
+proc SDL_StopTextInput(win: ptr SDL_Window): bool {.importc: "SDL_StopTextInput", header: "<SDL3/SDL.h>".}
+proc SDL_GetCurrentVideoDriver(): cstring {.importc: "SDL_GetCurrentVideoDriver", header: "<SDL3/SDL.h>".}
+proc SDL_GetKeyFromScancode(scancode, modstate: int32; key_event: bool): int32 {.
+  importc: "SDL_GetKeyFromScancode", header: "<SDL3/SDL.h>".}
 proc SDL_DestroyWindow(win: ptr SDL_Window) {.importc: "SDL_DestroyWindow", header: "<SDL3/SDL.h>".}
 proc SDL_DestroyRenderer(ren: ptr SDL_Renderer) {.importc: "SDL_DestroyRenderer", header: "<SDL3/SDL.h>".}
 proc SDL_PollEvent(event: ptr SDL_Event): bool {.importc: "SDL_PollEvent", header: "<SDL3/SDL.h>".}
@@ -191,16 +202,19 @@ type
   KeyEventKind* = enum
     ## What a `KeyEvent` carries. Printable input arrives as `kevText`
     ## (SDL text events, keyboard-layout independent); the rest are the
-    ## navigation keys the UI widgets edit with. `kevNone` marks ignored
-    ## keys and never enters the queue.
-    kevNone, kevText, kevBackspace, kevDelete, kevLeft, kevRight, kevUp,
-    kevDown, kevHome, kevEnd, kevEnter, kevEscape
+    ## navigation keys the UI widgets edit with. Ctrl/Alt + a letter (the
+    ## Emacs-style editing chords) arrive as `kevLetter` with `ch` set.
+    ## `kevNone` marks ignored keys and never enters the queue.
+    kevNone, kevText, kevLetter, kevBackspace, kevDelete, kevLeft, kevRight,
+    kevUp, kevDown, kevHome, kevEnd, kevEnter, kevEscape
 
   KeyEvent* = object
     kind*: KeyEventKind
     shift*: bool
     ctrl*: bool
-    text*: string        ## kevText only: the composed string of one keypress
+    alt*: bool
+    ch*: char          ## kevLetter only: the lowered letter of the chord
+    text*: string      ## kevText only: the composed string of one keypress
 
 type
   PlatformApplication* = object
@@ -229,6 +243,10 @@ proc sdlHandle(ok: bool, id: string) {.raises.} =
 
 var activeApp: PlatformApplication
 
+var inputDebug = getEnv("ELLIPSE_INPUT_DEBUG") != ""
+  ## When set, pumpEvents logs every raw SDL event (type + key fields),
+  ## revealing exactly what the platform backend delivers.
+
 proc sdlRenderer*(): ptr SDL_Renderer =
   ## The live SDL_Renderer handle, for drawing modules (see
   ## `ellipse/platform/renderer`). Only valid inside the main loop.
@@ -247,8 +265,38 @@ proc initialize*() {.raises.} =
   sdlHandle(SDL_SetAppMetadata(an.toCString, av.toCString, aid.toCString), "SDL_SetAppMetadata()")
   sdlHandle(SDL_Init(Video or Audio), "SDL_Init()")
   sdlHandle(SDL_CreateWindowAndRenderer("ellipse/renderer", 1280, 720, WindowResizable, addr activeApp.window.raw, addr activeApp.renderer.raw), "SDL_CreateWindowAndRenderer()")
+  # NOTE: text input (SDL_StartTextInput / the IME path) is deliberately NOT
+  # started here. SDL >= 3.4 only emits SDL_EVENT_TEXT_INPUT once it is on --
+  # and while it is on, active input methods (X11/ibus, Wayland text-input-v3)
+  # may consume the raw key presses, killing Backspace/arrows/Enter. So the
+  # default mode derives printable characters from the keydown events'
+  # keycodes themselves (see keyEventFor); `setTextInputEnabled(true)` opts
+  # into the IME path when full international composition is wanted.
   activeApp.width = 1280.0
   activeApp.height = 720.0
+  if inputDebug:
+    discard info("sdl video driver: ", fromCString(SDL_GetCurrentVideoDriver()))
+
+var textImeActive = false
+
+proc setTextInputEnabled*(enabled: bool) =
+  ## Toggle the platform IME text-input path (SDL_StartTextInput/Stop).
+  ## Off by default: printable characters are then synthesized from keydown
+  ## events, which keeps Backspace/arrows/Enter deliverable on systems where
+  ## an active input method would otherwise swallow them. On, the IME owns
+  ## the keyboard and text arrives as `kevText` from TEXT_INPUT commits --
+  ## enabling international composition at the cost of raw editing keys.
+  if enabled == textImeActive:
+    return
+  textImeActive = enabled
+  if activeApp.window.raw != nil:
+    if enabled:
+      discard SDL_StartTextInput(activeApp.window.raw)
+    else:
+      discard SDL_StopTextInput(activeApp.window.raw)
+
+proc textInputEnabled*(): bool =
+  textImeActive
 
 const
   TicksPerSecond = 60'i64
@@ -282,11 +330,35 @@ proc beginFrame(engine: var GameEngine) =
   waitUntil(tickDeadline(engine.epoch, engine.renderFrame))
   engine.requiredTicks = currentTick(engine)
 
-proc keyEventFor(scancode, modifiers: int32): KeyEvent =
-  ## Maps a navigation scancode to a `KeyEvent`; unknown keys yield `kevNone`.
+proc utf8Of(cp: int32): string =
+  ## Encode one Unicode code point as UTF-8 (no std dependency).
+  result = ""
+  if cp < 0x80:
+    result.add char(cp)
+  elif cp < 0x800:
+    result.add char(0xC0 or (cp shr 6))
+    result.add char(0x80 or (cp and 0x3F))
+  elif cp < 0x10000:
+    result.add char(0xE0 or (cp shr 12))
+    result.add char(0x80 or ((cp shr 6) and 0x3F))
+    result.add char(0x80 or (cp and 0x3F))
+  else:
+    result.add char(0xF0 or (cp shr 18))
+    result.add char(0x80 or ((cp shr 12) and 0x3F))
+    result.add char(0x80 or ((cp shr 6) and 0x3F))
+    result.add char(0x80 or (cp and 0x3F))
+
+proc keyEventFor(scancode, key, modifiers: int32): KeyEvent =
+  ## Maps a keydown to a `KeyEvent`; unknown keys yield `kevNone`.
+  ## Ctrl/Alt + letter becomes a `kevLetter` chord. With the IME path off,
+  ## printable keys also synthesize a `kevText` from the event's keycode --
+  ## the platform keymap already resolved the layout, shift and dead keys
+  ## into it -- so text entry works without StartTextInput stealing raw
+  ## key presses from an input method.
   result = KeyEvent(kind: kevNone,
     shift: (modifiers and ModShift) != 0,
-    ctrl: (modifiers and ModCtrl) != 0)
+    ctrl: (modifiers and ModCtrl) != 0,
+    alt: (modifiers and ModAlt) != 0)
   case scancode
   of ScanEnter: result.kind = kevEnter
   of ScanEscape: result.kind = kevEscape
@@ -298,12 +370,28 @@ proc keyEventFor(scancode, modifiers: int32): KeyEvent =
   of ScanLeft: result.kind = kevLeft
   of ScanDown: result.kind = kevDown
   of ScanUp: result.kind = kevUp
-  else: discard
+  else:
+    if scancode >= ScanA and scancode <= ScanZ and (result.ctrl or result.alt):
+      result.kind = kevLetter
+      result.ch = char(ord('a') + int(scancode - ScanA))
+    elif not result.ctrl and not result.alt and not textImeActive:
+      var cp = key
+      if cp == 0:   # some backends leave `key` unset; consult the keymap
+        # key_event=false = full modifier translation (shift applies to all
+        # layers); with true, SDL only applies caps-lock to letters.
+        cp = SDL_GetKeyFromScancode(scancode, modifiers, false)
+      if cp >= 32 and cp != 127 and (cp and 0x40000000) == 0:
+        result.kind = kevText
+        result.text = utf8Of(cp)
 
 proc pumpEvents(app: var PlatformApplication) =
   var event = default(SDL_Event)
   while SDL_PollEvent(addr event):
     let kind = cast[ptr SDL_CommonEvent](addr event)[].typ
+    if inputDebug:
+      let kb = cast[ptr SDL_KeyboardEvent](addr event)[]
+      discard info("sdl-event ", $kind, " sc=", $kb.scancode, " key=",
+        $kb.key, " mod=", $kb.modifiers)
     if kind == EventQuit or kind == EventTerminating or kind == EventWindowCloseRequested:
       app.running = false
     elif kind == EventWindowPixelResized:
@@ -330,7 +418,7 @@ proc pumpEvents(app: var PlatformApplication) =
     elif kind == EventKeyDown:
       let e = cast[ptr SDL_KeyboardEvent](addr event)[]
       if e.down:   # SDL delivers autorepeat as repeated downs: forward them
-        let ev = keyEventFor(e.scancode, e.modifiers)
+        let ev = keyEventFor(e.scancode, e.key, e.modifiers.int32)
         if ev.kind != kevNone:
           app.keyPending.add ev
     elif kind == EventTextInput:

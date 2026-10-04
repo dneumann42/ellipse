@@ -32,6 +32,7 @@ var wifi = false
 var comboSel = 1
 var multiSel: Selection = 0'u64
 var nameText = "Ada"
+var noteText = "ab\ncd\nef"
 var qty = 3
 var noteClicked = false
 
@@ -50,6 +51,7 @@ let swId = hashId("sw")
 let comboId = hashId("combo")
 let multiId = hashId("multi")
 let tfId = hashId("tf")
+let mlId = hashId("ml")
 let nfId = hashId("qty")
 let noteId = hashId("note")
 
@@ -65,6 +67,7 @@ proc draw() =
     comboSel = comboBox(comboId, comboOpts, comboSel, "Pick one")
     multiSel = multiSelect(multiId, multiOpts, multiSel)
     nameText = textField(tfId, nameText, "Your name")
+    noteText = multilineField(mlId, noteText, "Notes", rows = 3)
     qty = intNumberField(nfId, qty, 1)
     if textLink(noteId, "Notes"):
       noteClicked = true
@@ -100,6 +103,12 @@ proc typeStr(s: string) =
 
 proc pressKey(kind: KeyEventKind, shift = false) =
   pushKeyEvent KeyEvent(kind: kind, shift: shift)
+  beginInputFrame()
+  frame()
+
+proc pressChord(ch: char, ctrl = true, alt = false, shift = false) =
+  pushKeyEvent KeyEvent(kind: kevLetter, ch: ch, ctrl: ctrl, alt: alt,
+    shift: shift)
   beginInputFrame()
   frame()
 
@@ -167,6 +176,38 @@ proc main() {.raises.} =
   pressKey(kevEscape)
   expect(nameText == "AdaLac", "textField: Escape reverts to the snapshot")
 
+  # --- Emacs-style editing chords ------------------------------------------------
+  click(tfId)                      # "AdaLac", caret at the end; snapshot "AdaLac"
+  pressChord('a')                  # C-a: beginning of line
+  typeStr("say ")                  # "say AdaLac", caret after the space
+  pressChord('f', ctrl = false, alt = true)   # M-f: over "AdaLac"
+  pressChord('b', ctrl = false, alt = true)   # M-b: back to its start
+  pressChord('k')                  # C-k: kill "AdaLac"
+  expect(nameText == "say ", "emacs: C-k kills to end of line, got " & $nameText)
+  pressChord('a')                  # C-a
+  pressChord('e')                  # C-e: end of the "say " line
+  typeStr("hello ")                # "say hello "
+  pressChord('y')                  # C-y: yank the kill back
+  expect(nameText == "say hello AdaLac",
+    "emacs: C-y reinserts the kill buffer, got " & $nameText)
+  pressChord('w')                  # C-w: rub out the previous word
+  expect(nameText == "say hello ",
+    "emacs: C-w kills a word backward, got " & $nameText)
+  pressChord('d', ctrl = false, alt = true)   # M-d at the edge: no-op
+  pressChord('a')                  # C-a
+  pressChord('f')                  # C-f: one char
+  pressChord('d')                  # C-d: delete forward the 'a'
+  expect(nameText == "sy hello ",
+    "emacs: C-f moves a char, C-d deletes it, got " & $nameText)
+  pressChord('h')                  # C-h: backspace the 's'
+  expect(nameText == "y hello ", "emacs: C-h deletes backward, got " & $nameText)
+  pressChord('e')                  # C-e: end of line
+  pressChord('u')                  # C-u: kill to the line's start
+  expect(nameText == "", "emacs: C-u kills to start of line, got " & $nameText)
+  typeStr("keep")
+  pressChord('g')                  # C-g: cancel -> revert to the snapshot
+  expect(nameText == "AdaLac", "emacs: C-g cancels like Escape, got " & $nameText)
+
   # --- number field ---------------------------------------------------------------------
   click(tfId)
   pressKey(kevEnter)                     # leave the text field behind
@@ -186,6 +227,28 @@ proc main() {.raises.} =
   pressKey(kevDown)
   expect(qty == 3, "numberField: Down arrow steps down")
   click(tfId)                            # click elsewhere: commit
+
+  # --- multiline field: Enter is text, line motions cross newlines --------------
+  pressKey(kevEnter)                     # leave the text field behind
+  click(mlId)                            # "ab\ncd\nef", caret at the end
+  pressKey(kevUp)                        # to the end of line two
+  pressChord('a')                        # C-a: start of "cd"
+  typeStr("X")                           # "ab\nXcd\nef"
+  pressKey(kevEnter)                     # a plain newline, not a commit
+  expect(noteText == "ab\nX\ncd\nef",
+    "multilineField: Enter inserts a newline, got " & $noteText)
+  pressKey(kevUp)                        # back to the "X" line
+  pressChord('e')                        # C-e: end of that line
+  typeStr("!")                           # "ab\nX!\ncd\nef"
+  pressChord('d', ctrl = false, alt = true)  # M-d must not cross the line edge
+  expect(noteText == "ab\nX!\ncd\nef",
+    "multilineField: line motions stay on their line, got " & $noteText)
+  pressKey(kevDown)                      # caret down to line "cd"
+  pressChord('b')                        # C-b: one left, off the line edge
+  pressChord('k')                        # C-k: kill the rest of that line
+  expect(noteText == "ab\nX!\nc\nef",
+    "multilineField: C-k kills to line end, got " & $noteText)
+  click(tfId)                            # blur commits the buffer
 
   # --- text link ---------------------------------------------------------------------
   click(noteId)

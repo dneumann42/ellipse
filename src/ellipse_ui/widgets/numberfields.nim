@@ -156,9 +156,11 @@ proc numberField*(id: ElementId, value: float, step = 1.0,
 
   openElement()
   configureOpenElement(row(width = grow(), height = fit(), alignX = right))
-  let shown = if focused(id): displayText(numBuffer) else: fmtVal(result, whole)
-  textElement(shown, TextConfig(fontSize: 18, color: textColor,
-    wrap: noWrap, justify: justifyRight))
+  let cfg = TextConfig(fontSize: 18, color: textColor,
+    wrap: noWrap, justify: justifyRight)
+  textElement(if focused(id): numBuffer else: fmtVal(result, whole), cfg)
+  if focused(id):
+    caretOverlay(textChildId(textChildId(id.id)), numBuffer, cfg)
   closeElement()
 
   openElement(decId)

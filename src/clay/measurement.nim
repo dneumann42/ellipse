@@ -122,19 +122,21 @@ proc evictStaleMeasurements(ctx: Context) =
   for k in dead:
     ctx.textCache.del(k)
 
-proc wrapTextElement*(ctx: Context; el: var LayoutElement) =
-  ## Break `el`'s text into lines that fit `el.dims.width`, filling
-  ## `el.lines` and updating `el.dims.height`. Clay runs this once per text
-  ## element between the horizontal and vertical sizing passes; so do we.
-  el.lines = @[]
-  let m = measureTextCached(ctx, el.text, el.textCfg)
-  let cfg = el.textCfg
+proc wrappedLines*(ctx: Context; text: string; cfg: TextConfig;
+                   maxWidth: float32): seq[TextLine] =
+  ## Break `text` into the lines Clay would lay out for it in a box of
+  ## `maxWidth`: the engine's wrapping pass, exposed so text editors can
+  ## place a caret on the very same line grid the renderer draws.
+  ## `TextLine.dims.height` is uniform: the line pitch.
+  result = @[]
+  let m = measureTextCached(ctx, text, cfg)
   let lineHeight =
     if cfg.lineHeight > 0: float32(cfg.lineHeight) else: m.unwrapped.height
 
-  if not m.containsNewlines and m.unwrapped.width <= el.dims.width:
+  if not m.containsNewlines and m.unwrapped.width <= maxWidth:
     # Fast path: the whole string is one line, sized to the container box.
-    el.lines.add TextLine(start: 0, length: int32(el.text.len), dims: el.dims)
+    result.add TextLine(start: 0, length: int32(text.len),
+                        dims: Size(width: maxWidth, height: lineHeight))
     return
 
   let space = spaceWidth(ctx, cfg)
@@ -145,23 +147,23 @@ proc wrapTextElement*(ctx: Context; el: var LayoutElement) =
 
   while wi < m.words.len:
     let w = m.words[wi]
-    if lineLength == 0 and lineWidth + w.width > el.dims.width:
+    if lineLength == 0 and lineWidth + w.width > maxWidth:
       # A single word wider than the line: emit it overflowing, consume it.
-      el.lines.add TextLine(
+      result.add TextLine(
         start: w.start, length: w.length,
         dims: Size(width: w.width, height: lineHeight))
       lineStart = w.start + w.length
       inc wi
-    elif w.length == 0 or lineWidth + w.width > el.dims.width:
+    elif w.length == 0 or lineWidth + w.width > maxWidth:
       # Line full (or explicit newline): flush what we have.
       var dims = Size(width: lineWidth, height: lineHeight)
       var length = lineLength
       let lastIdx = max(lineStart + lineLength - 1, 0)
-      if lineLength > 0 and el.text[lastIdx] == ' ':
+      if lineLength > 0 and text[lastIdx] == ' ':
         # Trailing spaces are not part of the visual line width.
         dims.width -= space
         length -= 1
-      el.lines.add TextLine(start: lineStart, length: length, dims: dims)
+      result.add TextLine(start: lineStart, length: length, dims: dims)
       if lineLength == 0 or w.length == 0:
         inc wi ## consume the newline marker; an oversized word that merely
                ## did not fit becomes the first word of the next line instead
@@ -174,8 +176,17 @@ proc wrapTextElement*(ctx: Context; el: var LayoutElement) =
       inc wi
 
   if lineLength > 0:
-    el.lines.add TextLine(
+    result.add TextLine(
       start: lineStart, length: lineLength,
       dims: Size(width: lineWidth - float32(cfg.letterSpacing), height: lineHeight))
 
+proc wrapTextElement*(ctx: Context; el: var LayoutElement) =
+  ## Break `el`'s text into lines that fit `el.dims.width`, filling
+  ## `el.lines` and updating `el.dims.height`. Clay runs this once per text
+  ## element between the horizontal and vertical sizing passes; so do we.
+  el.lines = wrappedLines(ctx, el.text, el.textCfg, el.dims.width)
+  let m = measureTextCached(ctx, el.text, el.textCfg)
+  let lineHeight =
+    if el.textCfg.lineHeight > 0: float32(el.textCfg.lineHeight)
+    else: m.unwrapped.height
   el.dims.height = lineHeight * float32(el.lines.len)

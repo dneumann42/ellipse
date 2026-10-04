@@ -9,13 +9,13 @@
 ##     and passes it in; the widget returns the value to store back;
 ##   - the *widget modules* own transient interaction state -- which field
 ##     has the caret, which dropdown is open -- keyed by element id, exactly
-##    like `menu`'s `openMenuId`.
+##     like `menu`'s `openMenuId`.
 ##
 ## Keyboard and wheel input arrives through `ellipse/platform/platform`'s
 ## per-frame event queues; `updateUI` advances them, and `editStep` applies
 ## one frame's events to the focused field.
 
-import std/[monotimes]
+import std/[monotimes, strutils]
 
 import clay
 import ../ui
@@ -45,8 +45,16 @@ proc clickedOut*(id: ElementId): bool =
 ##
 ## Caret, selection and focus live here so `textfields` and `numberfields`
 ## share one edit engine. Selection is tracked (shift-arrows, backspace
-## deletes it) but not painted: the renderer draws one colour per text
-## element, so the caret glyph is a `|` spliced into the string.
+## deletes it) but not painted; the caret is `caretOverlay`: a 2px bar
+## floated over the field's text element at the caret's measured line and
+## column, so it renders *on top* of the text without displacing glyphs.
+##
+## Keys follow the Emacs/readline default map: C-a/C-e line edges, C-b/C-f
+## and arrows characters (M-b/M-f, M-Left/M-Right words), C-p/C-n and
+## Up/Down lines, C-d/C-h and Delete/Backspace deletion, C-k/C-u/C-w/M-d
+## kills into a yank-able kill buffer (C-y), Enter/C-m commit and
+## Escape/C-g cancel. Single-line fields never contain `\n`, so their
+## "line" motions degenerate to buffer edges automatically.
 
 type
   EditOutcome* = enum
@@ -136,10 +144,137 @@ proc moveCaret(s: string, dir: int, extend: bool) =
   if not extend:
     selAnchor = pos
 
+## --- line & word geometry ------------------------------------------------------
+##
+## Fields hold plain text where `\n` splits display lines; single-line text
+## never has one, so every "line" motion degenerates to buffer edges there --
+## C-a/C-e mean field start/end as expected.
+
+proc bolOf(s: string, pos: int): int =
+  result = pos
+  while result > 0 and s[result - 1] != '\n':
+    dec result
+
+proc eolOf(s: string, pos: int): int =
+  result = pos
+  while result < s.len and s[result] != '\n':
+    inc result
+
+func isWordChar(c: char): bool =
+  (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+    (c >= '0' and c <= '9') or c == '_'
+
+proc prevWordStart(s: string, pos: int): int =
+  result = pos
+  while result > 0 and not isWordChar(s[result - 1]) and s[result - 1] != '\n':
+    dec result
+  while result > 0 and isWordChar(s[result - 1]):
+    dec result
+
+proc nextWordEnd(s: string, pos: int): int =
+  result = pos
+  while result < s.len and not isWordChar(s[result]) and s[result] != '\n':
+    inc result
+  while result < s.len and isWordChar(s[result]):
+    inc result
+
+proc gotoLineEdge(s: string, toEnd: bool, extend: bool) =
+  caret = if toEnd: eolOf(s, caret) else: bolOf(s, caret)
+  if not extend:
+    selAnchor = caret
+
+proc gotoWord(s: string, dir: int, extend: bool) =
+  caret = if dir < 0: prevWordStart(s, caret) else: nextWordEnd(s, caret)
+  if not extend:
+    selAnchor = caret
+
+proc gotoLine(s: string, delta: int) =
+  ## Up/Down and C-p/C-n: keep the column where the target line has room.
+  let col = caret - bolOf(s, caret)
+  if delta < 0:
+    let ls = bolOf(s, caret)
+    if ls > 0:                       # a previous line exists; ls-1 is its '\n'
+      let prevStart = bolOf(s, ls - 1)
+      caret = min(prevStart + col, ls - 1)
+  else:
+    let le = eolOf(s, caret)         # le is the newline below, when any
+    if le < s.len:
+      caret = min(le + 1 + col, s.len)
+  selAnchor = caret
+
+## --- delete & kill -------------------------------------------------------------
+##
+## Plain deletes swallow the selection. Emacs kills (C-k/C-u/C-w/M-d) feed a
+## single-slot kill buffer; consecutive kills accumulate, so `C-k C-k` then
+## `C-y` yanks both lines. Inserting or yanking closes the accumulation.
+
+var killBuf = ""
+var killAppend = false
+
+proc sliceOf(s: string, lo, hi: int): string =
+  result = ""
+  var i = max(lo, 0)
+  while i < hi and i < s.len:
+    result.add s[i]
+    inc i
+
+proc deleteBackward(s: var string) =
+  if selHi() > selLo():
+    splice(s, selLo(), selHi(), "")
+  elif caret > 0:
+    var pos = caret - 1
+    while pos > 0 and isContByte(s[pos]):
+      dec pos
+    splice(s, pos, caret, "")
+
+proc deleteForward(s: var string) =
+  if selHi() > selLo():
+    splice(s, selLo(), selHi(), "")
+  elif caret < s.len:
+    var pos = caret + 1
+    while pos < s.len and isContByte(s[pos]):
+      inc pos
+    splice(s, caret, pos, "")
+
+proc takeKill(s: var string, lo, hi: int) =
+  if hi > lo:
+    let cut = sliceOf(s, lo, hi)
+    if killAppend:
+      killBuf.add cut
+    else:
+      killBuf = cut
+      killAppend = true
+    splice(s, lo, hi, "")
+
+proc killLine(s: var string) =
+  if selHi() > selLo():
+    takeKill(s, selLo(), selHi())
+  elif caret < s.len:
+    takeKill(s, caret, eolOf(s, caret))
+
+proc killToBol(s: var string) =
+  takeKill(s, bolOf(s, caret), caret)
+
+proc killPrevWord(s: var string) =
+  if selHi() > selLo():
+    takeKill(s, selLo(), selHi())
+  else:
+    takeKill(s, prevWordStart(s, caret), caret)
+
+proc killNextWord(s: var string) =
+  takeKill(s, caret, nextWordEnd(s, caret))
+
+proc yank(s: var string) =
+  if killBuf.len > 0:
+    killAppend = false
+    splice(s, caret, caret, killBuf)
+
 proc applyKeys(text: sink string, evs: seq[KeyEvent],
                valid: ValidCharFn): EditResult =
   ## The shared edit loop over an explicit event list; caret/selection state
-  ## is module-private and belongs to whichever field holds focus.
+  ## is module-private and belongs to whichever field holds focus. The full
+  ## keymap is documented at the top of this section; movements extend the
+  ## selection while Shift is held, as with the arrow keys.
   result = EditResult(text: text)
   var s = result.text
   for ev in evs:
@@ -153,34 +288,49 @@ proc applyKeys(text: sink string, evs: seq[KeyEvent],
             splice(s, selLo(), selHi(), one)
           else:
             splice(s, caret, caret, one)
+          killAppend = false
+    of kevLetter:
+      if ev.ctrl:
+        case ev.ch
+        of 'a': gotoLineEdge(s, false, ev.shift)
+        of 'e': gotoLineEdge(s, true, ev.shift)
+        of 'b': moveCaret(s, -1, ev.shift)
+        of 'f': moveCaret(s, 1, ev.shift)
+        of 'p': gotoLine(s, -1)
+        of 'n': gotoLine(s, 1)
+        of 'h': deleteBackward(s)
+        of 'd': deleteForward(s)
+        of 'k': killLine(s)
+        of 'u': killToBol(s)
+        of 'w': killPrevWord(s)
+        of 'y': yank(s)
+        of 'g': result.outcome = eoCancel
+        of 'm': result.outcome = eoCommit
+        else: discard
+      elif ev.alt:
+        case ev.ch
+        of 'b': gotoWord(s, -1, ev.shift)
+        of 'f': gotoWord(s, 1, ev.shift)
+        of 'd': killNextWord(s)
+        else: discard
     of kevBackspace:
-      if selHi() > selLo():
-        splice(s, selLo(), selHi(), "")
-      elif caret > 0:
-        var pos = caret - 1
-        while pos > 0 and isContByte(s[pos]):
-          dec pos
-        splice(s, pos, caret, "")
+      deleteBackward(s)
     of kevDelete:
-      if selHi() > selLo():
-        splice(s, selLo(), selHi(), "")
-      elif caret < s.len:
-        var pos = caret + 1
-        while pos < s.len and isContByte(s[pos]):
-          inc pos
-        splice(s, caret, pos, "")
+      deleteForward(s)
     of kevLeft:
-      moveCaret(s, -1, ev.shift)
+      if ev.alt or ev.ctrl: gotoWord(s, -1, ev.shift)
+      else: moveCaret(s, -1, ev.shift)
     of kevRight:
-      moveCaret(s, 1, ev.shift)
+      if ev.alt or ev.ctrl: gotoWord(s, 1, ev.shift)
+      else: moveCaret(s, 1, ev.shift)
+    of kevUp:
+      gotoLine(s, -1)
+    of kevDown:
+      gotoLine(s, 1)
     of kevHome:
-      caret = 0
-      if not ev.shift:
-        selAnchor = 0
+      gotoLineEdge(s, false, ev.shift)
     of kevEnd:
-      caret = s.len
-      if not ev.shift:
-        selAnchor = s.len
+      gotoLineEdge(s, true, ev.shift)
     of kevEnter:
       result.outcome = eoCommit
     of kevEscape:
@@ -218,21 +368,74 @@ proc caretVisible*(): bool =
   let ms = (getMonoTime().ticks - bootTime) div 1_000_000'i64
   (ms div 500) mod 2 == 0
 
-proc displayText*(text: string): string =
-  ## `text` with the caret glyph spliced in at the cursor; while the caret's
-  ## a selection, the selection range is not painted (see the note above).
-  if not caretVisible():
-    return text
+proc textChildId*(parentId: uint32, child: uint32 = 0): uint32 =
+  ## The id Clay gives the `child`-th flow child of `parentId` when it is
+  ## opened *without* an explicit id (the auto-id rule: hash of sibling
+  ## count and parent id). A field's text element is its first child, so a
+  ## field passes `textChildId(id.id)`; one nested inside an auto-id row
+  ## passes `textChildId(textChildId(id.id))`.
+  hashNumber(child, parentId)
+
+proc caretOverlay*(textElId: uint32, text: string, cfg: TextConfig,
+                   color: Color = textColor) =
+  ## Paint the blinking caret as a 2px bar *floated over* the field's text
+  ## element (`textElId` = that element's auto id, see `textChildId`): the
+  ## bar is attached to the text box and offset to the caret's line and
+  ## column, so it rides on top of the glyphs instead of displacing them.
+  ## Call right after the field's `textElement`, still inside the field,
+  ## only while the field holds focus. Line/column come from Clay's own
+  ## wrapping pass (`wrappedLines` over the text box's previous-frame
+  ## width), so the bar sits on exactly the grid the renderer draws.
+  if focusId == 0'u32 or not caretVisible():
+    return
+  let ctx = currentContext()
+  if not ctx.measureTextInstalled():
+    return
+  let prev = elementData(ElementId(id: textElId))
+  if not prev.found:
+    return                       # text never laid out yet: no geometry
   let pos = min(max(caret, 0), text.len)
-  result = ""
-  var i = 0
-  while i < pos:
-    result.add text[i]
-    inc i
-  result.add "|"
-  while i < text.len:
-    result.add text[i]
-    inc i
+  let m = measureTextCached(ctx, text, cfg)
+  let lineHeight =
+    if cfg.lineHeight > 0: float32(cfg.lineHeight) else: m.unwrapped.height
+  let barH = if lineHeight > 0.0: lineHeight else: float32(cfg.fontSize)
+  let yBase = (lineHeight - m.unwrapped.height) / 2.0
+  var x: float32 = 0.0
+  var lineIdx = 0
+  if cfg.wrap == wordWrap and
+      (m.containsNewlines or m.unwrapped.width > prev.box.width):
+    let lines = wrappedLines(ctx, text, cfg, prev.box.width)
+    if lines.len > 0:
+      var li = 0
+      for i in 0 ..< lines.len:
+        if lines[i].start <= int32(pos):
+          li = i
+      let ln = lines[li]
+      if pos > int(ln.start + ln.length):
+        x = ln.dims.width
+      else:
+        x = measureTextCached(ctx, substr(text, int(ln.start), pos - 1),
+                              cfg).unwrapped.width
+      lineIdx = li
+      # A caret right after a trailing newline belongs to the empty line
+      # the box does not render.
+      if pos == text.len and pos > 0 and text[pos - 1] == '\n':
+        x = 0.0
+        lineIdx = lines.len
+  else:
+    x = measureTextCached(ctx, substr(text, 0, pos - 1), cfg).unwrapped.width
+
+  openElement(ElementId(id: hashNumber(1'u32, textElId)))
+  configureOpenElement(col(width = fixedPx(2), height = fixedPx(barH))
+    .bg(color)
+    .floating(attachElementId,
+              offset = vec2(x, yBase + float32(lineIdx) * lineHeight),
+              zIndex = 32767,
+              parentId = textElId,
+              points = AttachPoints(element: pointLeftTop,
+                                    parent: pointLeftTop),
+              capture = passThroughPointer))
+  closeElement()
 
 ## --- composite widgets -----------------------------------------------------------
 

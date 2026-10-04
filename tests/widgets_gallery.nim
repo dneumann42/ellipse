@@ -34,6 +34,7 @@ var wifi = false
 var comboSel = 1
 var multiSel: Selection = bit(0) or bit(2)
 var nameText = ""
+var noteText = "first line\nsecond line"
 var qty = 2
 
 var comboOpts: seq[string] = @[]
@@ -44,6 +45,7 @@ let swId = hashId("sw")
 let comboId = hashId("combo")
 let multiId = hashId("multi")
 let tfId = hashId("tf")
+let mlId = hashId("ml")
 let nfId = hashId("qty")
 let noteId = hashId("note")
 
@@ -70,8 +72,11 @@ proc draw() =
       clay "col1", col(width = pct(0.5), gap = 12):
         Labeled(label = "Backend"):
           comboSel = comboBox(comboId, comboOpts, comboSel, "Pick one")
-        Labeled(label = "Volume"):
-          nameText = textField(tfId, nameText, "0.0 - 1.0")
+        Labeled(label = "Name"):
+          nameText = textField(tfId, nameText, "Your name")
+        Labeled(label = "Notes"):
+          noteText = multilineField(mlId, noteText, "Leave a note...",
+                                    rows = 3)
         Labeled(label = "Quantity"):
           qty = intNumberField(nfId, qty, 1)
       clay "col2", col(width = grow(), gap = 12):
@@ -79,7 +84,7 @@ proc draw() =
         wifi = switch(swId, "Wifi", wifi)
         Section(title = "Modules"):
           multiSel = multiSelect(multiId, multiOpts, multiSel)
-    caption("Click a dropdown, focus a field and type -- state lives in the caller.")
+    caption("Keyboard editing is Emacs-style: C-a/C-e, C-b/C-f, M-b/M-f words, C-k/C-u/C-w kills, C-y yank, Enter commit (newline in multiline).")
     if textLink(noteId, "Read the docs"):
       discard
     badge("beta")
@@ -105,7 +110,19 @@ proc typeStr(s: string) =
   setPointerState(vec2(-100.0, -100.0), false)
   draw()
 
-proc saveShot() {.raises.} =
+proc pressChord(ch: char, ctrl = true, alt = false) =
+  pushKeyEvent KeyEvent(kind: kevLetter, ch: ch, ctrl: ctrl, alt: alt)
+  beginInputFrame()
+  setPointerState(vec2(-100.0, -100.0), false)
+  draw()
+
+proc pressEnter() =
+  pushKeyEvent KeyEvent(kind: kevEnter)
+  beginInputFrame()
+  setPointerState(vec2(-100.0, -100.0), false)
+  draw()
+
+proc saveShot(path: cstring) {.raises.} =
   let ren = sdlRenderer()
   discard SDL_SetRenderDrawColor(ren, 12, 12, 16, 255)
   discard SDL_RenderClear(ren)
@@ -116,9 +133,9 @@ proc saveShot() {.raises.} =
   if surf == nil:
     echo "readback failed"
     return
-  discard SDL_SaveBMP(surf, "build/widgets_gallery.bmp")
+  discard SDL_SaveBMP(surf, path)
   SDL_DestroySurface(surf)
-  echo "saved build/widgets_gallery.bmp"
+  echo "saved screenshot"
 
 proc main() {.raises.} =
   fillOptions()
@@ -127,21 +144,34 @@ proc main() {.raises.} =
   setCurrentContext(initContext(size(1280.0, 720.0)))
   setMeasureText(measureText)
 
-  # publish boxes, then click into the name field and type, then open the
-  # dropdown: the saved frame shows focused + open states
+  # publish boxes, then click into the name field and edit it with Emacs
+  # chords, continue in the multiline field, then open the dropdown: the
+  # saved frame shows edited + focused + open states
   framePointer(-100.0, -100.0, false)
   framePointer(-100.0, -100.0, false)
 
   let tfp = boxCenter(tfId)
   framePointer(tfp.x, tfp.y, true)
   framePointer(tfp.x, tfp.y, false)
-  typeStr("0.75")
+  typeStr("Hopper")
+  pressChord('a')              # C-a: line start
+  typeStr("Grace ")
+  pressChord('e')              # C-e: line end
+
+  let mlp = boxCenter(mlId)
+  framePointer(mlp.x, mlp.y, true)
+  framePointer(mlp.x, mlp.y, false)
+  pressEnter()                 # Enter inserts a newline here (multiline)
+  typeStr("typed in emacs ")
+
+  saveShot("build/widgets_gallery_edited.bmp")   # caret + typed text, before
+                                                 # the popover covers fields
 
   let cp = boxCenter(comboId)
   framePointer(cp.x, cp.y, true)
-  framePointer(cp.x, cp.y, false)   # final frame: popover open
+  framePointer(cp.x, cp.y, false)   # popover open
 
-  saveShot()
+  saveShot("build/widgets_gallery.bmp")   # popover open over the fields
 
 when isMainModule:
   try:
