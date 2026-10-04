@@ -213,7 +213,7 @@ proc drawGallery() =
                        alignY = centerY):
         vsync = checkbox(hashId("cb-vsync"), "VSync", vsync)
         wifi = switch(hashId("sw-wifi"), "Wifi", wifi)
-        if button(hashId("btn-inc"), "Increment", height = fixedPx(40)):
+        if button(hashId("btn-inc"), "Increment", height = fixedPx(48)):
           inc count
         badge("beta")
 

@@ -1,4 +1,4 @@
-.PHONY: clean setup run run_owl test
+.PHONY: clean setup run run_tome run_owl test
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -6,11 +6,17 @@ build/nimony/bin/nimony:
 bin/ellipse: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/ellipse.nim
 
+bin/tome: setup
+	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/tome.nim
+
 build: bin/ellipse
 	@echo "Finish building ellipse"
 
 run: build 
 	./bin/ellipse
+
+run_tome: bin/tome
+	./bin/tome
 
 ifeq ($(firstword $(MAKECMDGOALS)),run_owl)
 OWL_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))

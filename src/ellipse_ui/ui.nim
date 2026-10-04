@@ -242,8 +242,12 @@ proc menu*(label: string, blk: MenuBody) =
                   parentId = btnId.id))
     menuSelected = false
     if elementData(popId).found:
+      # The shadow attaches to the popover's last-frame box; on the popover's
+      # very first frame no box is published yet, so paint it transparent for
+      # one frame instead of flashing at a stale anchor. The element is still
+      # declared, keeping the rows' auto-ids stable across frames.
       var sh = col(width = grow(), height = grow())
-        .bg(t.palette.shadow).corner(t.radii.popoverShadow)
+        .bg(if elementData(popId).box.width > 0: t.palette.shadow else: rgb(0, 0, 0, 0)).corner(t.radii.popoverShadow)
         .floating(attachParent,
                   offset = vec2(0.0, 4.0), zIndex = 99,
                   points = AttachPoints(element: pointLeftTop,

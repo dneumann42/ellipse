@@ -64,15 +64,19 @@ proc addMapItem(ctx: Context; eid: ElementId; elementIndex: int32) =
   var item = ctx.elementMap.getOrDefault(eid.id, MapItem(elementIndex: -1))
   if item.elementIndex >= 0:
     if item.generation <= ctx.generation:
-      # First sighting of a carried-over id: the element reappeared after at
-      # least one missing frame.
+      # First sighting of a carried-over id: a plain re-declaration from the
+      # last frame, or a reappearance after at least one missing frame.
       item.appeared = item.generation < ctx.generation
       item.generation = ctx.generation + 1
       item.elementIndex = elementIndex
       item.elementGen = ctx.generation + 1
       item.collision = false
       item.hover = nil
-      item.box = Rect()
+      # NOTE: the entry's bounding box is deliberately *kept*: Clay refreshes
+      # it only when `positionAndEmit` republishes the element this frame.
+      # Floating children that paint below their floating parent (a menu's
+      # shadow, z-ordered first) are placed before the parent's own pass and
+      # attach against this last-frame box.
       item.eid = eid
       ctx.elementMap[eid.id] = item
       return
