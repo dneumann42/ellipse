@@ -1,4 +1,4 @@
-.PHONY: clean setup run run_tome run_owl test
+.PHONY: clean setup run run_tome run_owl run_duck test
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -18,15 +18,21 @@ run: build
 run_tome: bin/tome
 	./bin/tome
 
-ifeq ($(firstword $(MAKECMDGOALS)),run_owl)
-OWL_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+ifneq (,$(filter run_owl run_duck,$(firstword $(MAKECMDGOALS))))
+APPS_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 %::
 	@:
 endif
 
 run_owl: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/owl/owl.nim
-	./bin/owl $(ARGS) $(OWL_ARGS)
+	./bin/owl $(ARGS) $(APPS_ARGS)
+
+bin/duck: setup
+	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./apps/duck.nim
+
+run_duck: bin/duck
+	./bin/duck $(ARGS) $(APPS_ARGS)
 
 test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/objects_test.nim
@@ -39,6 +45,7 @@ test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/widgets_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/theme_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/keyboard_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/duck_test.nim
 
 setup: build/nimony/bin/nimony
 	@echo "Nimony is ready"

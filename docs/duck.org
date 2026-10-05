@@ -1,0 +1,50 @@
+#+TITLE: Duck -- a Notepad clone on the ellipse_ui widget set
+
+Duck is a Windows Notepad clone in ~apps/~: a menu bar of ~ui.menu~, the
+document editor from ~widgets/editor~, and modal Find, Replace, Go To,
+Font, About and file-picker dialogs built from the same standard widget
+set as the rest of the UI.
+
+* Build & run
+
+:  make bin/duck            # or: make run_duck [path/to/file.txt]
+:  ./bin/duck notes.txt
+
+~DUCK_SHOT=out.bmp SDL_VIDEODRIVER=offscreen ./bin/duck~ drives a
+scripted interaction and saves the rendered frames for inspection.
+
+* What it implements
+
+- Document area: click / drag / double-click caret & word selection,
+  painted selection, undo / redo history, scrolling that follows the
+  caret, word wrap on/off, zoom (Ctrl+wheel, Ctrl+Plus/Minus/0).
+- Keys: the Emacs chord map from ~widgets/common~ (C-a/e, C-b/f, M-b/f/d,
+  C-k/u/w/y, C-d/h, C-c/x/v clipboard, Ctrl+Home/End document edges)
+  plus Enter-as-newline, Ctrl+A select-all, Ctrl+Z/Y, PageUp/PageDown.
+- Menus: File New/Open/Save/Save As/Exit, Edit Undo/Cut/Copy/Delete/
+  Paste/Find/Find Next/Replace/Go To/Select All/Time-Date (F5), Format
+  Word Wrap/Font, View zoom + Status Bar, Help About.
+- Chords: Ctrl+N/O/S, Ctrl+Shift+S, Ctrl+F/H/G, F3/F5/F1, Alt+F4.
+- Dialogs: Find & Replace (match case, counts), Go To line, Font size,
+  Open/Save file pickers (directory listing, "..", double-click), the
+  save-before-New/Open/Exit prompts with their Yes/No/Cancel semantics,
+  and overwrite confirmations.
+- Files: UTF-8 (BOMs stripped), CR/CRLF folded to LF in the buffer and
+  re-expanded on save; the document's EOL style is remembered (and shown
+  in the status bar). A command-line argument opens that file.
+
+* What the clone deliberately skips
+
+Printing & page setup (no print backend), font *families* (the renderer
+opens one face), tabs/multi-document windows, and the unsaved-changes
+prompt when the *window* is closed via the WM (platform quit has no
+hook).
+
+* Tests
+
+:  make test                # includes tests/duck_test.nim
+
+~tests/duck_test.nim~ drives the editor frame-by-frame headless (typing,
+click placement, drag, double-click, undo/redo, select-all, page turns,
+the unfocused position mirror), and checks the pure search/doc/path
+modules plus a CRLF save/open round trip on disk.

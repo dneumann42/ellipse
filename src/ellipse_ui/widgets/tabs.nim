@@ -36,18 +36,24 @@ proc setActiveTab*(id: ElementId, index: int) =
   ## Move `id`'s selection; the view picks it up on the next frame.
   tabState[id.id] = max(index, 0)
 
-proc tabButtonDecl*(th: Theme, over: bool, selected: bool): ElementDeclaration =
+proc tabButtonDecl*(th: Theme, over: bool, selected: bool,
+                    press = false): ElementDeclaration =
   ## One tab's shape: fit content, top corners only, the panel fill plus
-  ## accent underline when selected, the plain button fill on hover.
+  ## accent underline when selected, the plain button fill on hover, and
+  ## the compressed fill with content shifted down while a press is held.
   var d = col(width = fit(), height = fit(), alignX = centerX,
-      padding = Padding(left: th.metrics.padTabX, right: th.metrics.padTabX,
-                        top: th.metrics.padTabTop, bottom: th.metrics.padTabBottom))
+      padding = squeeze(Padding(left: th.metrics.padTabX,
+                        right: th.metrics.padTabX,
+                        top: th.metrics.padTabTop,
+                        bottom: th.metrics.padTabBottom), press))
   d.corner = CornerRadius(topLeft: th.radii.tab, topRight: th.radii.tab,
                           bottomLeft: 0, bottomRight: 0)
   if selected:
     d.background = th.palette.panelBg
     d.border = BorderConfig(color: th.palette.accent,
       width: BorderWidth(bottom: th.metrics.borderTab))
+  elif press:
+    d.background = th.palette.buttonPressBg
   elif over:
     d.background = th.palette.buttonBg
   result = d
@@ -70,8 +76,9 @@ proc tabStrip*(id: ElementId, labels: seq[string], selected: int): int =
   while i < labels.len:
     let tabId = localIdWithIndex("tabs.tab", uint32(i), id.id)
     let over = pointerOver(tabId)
+    let press = pressing(tabId)
     let clicked = clickedIn(tabId)
-    item(tabId, tabButtonDecl(th, over, i == selected)):
+    item(tabId, tabButtonDecl(th, over, i == selected, press)):
       textElement(labels[i], TextConfig(fontSize: th.text.option,
         color: if i == selected or over: th.palette.textColor
                else: th.palette.dimColor))

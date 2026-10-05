@@ -123,6 +123,7 @@ proc boxCenter(id: ElementId): Vec2 =
 proc framePointer(x, y: float32, down: bool) =
   beginInputFrame()
   setPointerState(vec2(x, y), down)
+  notePressState()
   draw()
 
 proc frameWheel(x, y: float32, down: bool, wheel: Vec2) =
@@ -130,6 +131,7 @@ proc frameWheel(x, y: float32, down: bool, wheel: Vec2) =
   ## in the app this is `updateUI`, minus the wheel-acceleration filter.
   beginInputFrame()
   setPointerState(vec2(x, y), down)
+  notePressState()
   updateScrollContainers(false, wheel, 0.016'f32)
   draw()
 
@@ -213,6 +215,16 @@ proc main() {.raises.} =
 
   saveShot("build/widgets_gallery_edited.bmp")   # caret + typed text, before
                                                  # the popover covers fields
+
+  # --- compressed state: hold a press on the checkbox row. The down edge
+  # claims the press; the held frame renders the row sunk and its content
+  # shifted down, then the release restores it.
+  let cbp = boxCenter(cbId)
+  framePointer(cbp.x, cbp.y, true)
+  framePointer(cbp.x, cbp.y, true)
+  saveShot("build/widgets_gallery_pressed.bmp")
+  framePointer(cbp.x, cbp.y, false)
+  framePointer(-100.0, -100.0, false)
 
   let cp = boxCenter(comboId)
   framePointer(cp.x, cp.y, true)

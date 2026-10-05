@@ -25,6 +25,8 @@
 ##   headings       `heading`/`h1`..`h6`, `widget Section`
 ##   texts          `label`, `bodyText`, `caption`, `overline`, `badge`,
 ##                  `textLink`, `widget Prose`
+##   editor         `editor` -- the full document area: scrollable,
+##                  painted selection, click/drag caret, undo history
 ##   tabs           `widget TabbedView`, `tabStrip`, `activeTab`,
 ##                  `setActiveTab`
 ##   cards          `widget Card`, `widget StatCard`, `widget CardRow`
@@ -39,7 +41,7 @@
 ## `ui.menu` already does.
 
 import ./widgets/[common, checkboxes, comboboxes, multiselects, textfields,
-                  numberfields, headings, texts, tabs, cards, scrollbars]
+                  numberfields, headings, texts, editor, tabs, cards, scrollbars]
 
 export common, checkboxes, comboboxes, multiselects, textfields,
-       numberfields, headings, texts, tabs, cards, scrollbars
+       numberfields, headings, texts, editor, tabs, cards, scrollbars

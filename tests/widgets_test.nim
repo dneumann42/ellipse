@@ -103,6 +103,7 @@ proc draw() =
   endLayout()
 
 proc frame() =
+  notePressState()   # apps fold the press claim inside updateUI; step it here
   draw()
 
 proc boxCenter(id: ElementId): Vec2 =
@@ -158,6 +159,22 @@ proc main() {.raises.} =
   expect(wifi, "switch: click toggles on")
   click(cbId)
   expect(not agree, "checkbox: second click toggles off")
+
+  # --- compressed state: the press claim spans the hold, not just its edge --
+  beginInputFrame()
+  setPointerState(boxCenter(cbId), true)
+  frame()                       # down edge: the checkbox claims the press
+  expect(pressing(cbId), "pressing: the down edge claims the checkbox")
+  expect(not pressing(swId), "pressing: the claim stays where the press began")
+  beginInputFrame()
+  setPointerState(boxCenter(cbId), true)   # still held: state -> pressed
+  frame()
+  expect(pressing(cbId), "pressing: the claim survives the hold frames")
+  beginInputFrame()
+  setPointerState(boxCenter(cbId), false)
+  frame()
+  expect(not pressing(cbId), "pressing: release clears the claim")
+  expect(agree, "pressing: the held press still fired exactly one click")
 
   # --- combobox ---------------------------------------------------------------------
   click(comboId)

@@ -40,6 +40,7 @@ type
     panelBorder*: Color  ## hairlines and idle borders everywhere
     buttonBg*: Color     ## raised surfaces: buttons, combo fields, steppers
     buttonHoverBg*: Color ## and their hover/open variant
+    buttonPressBg*: Color ## the compressed fill while a press is held
     fieldBg*: Color      ## text-field and tick-box interiors
     selectedBg*: Color   ## the chosen row in an option list
     accent*: Color       ## focus rings, checked boxes, links, badges
@@ -111,6 +112,9 @@ type
     borderHairline*: int      ## panels, fields, idle everything
     borderTab*: int           ## active-tab underline
 
+    # pressed state
+    pressOffset*: int         ## px the content of a held control shifts down
+
     # heading spacing
     headingPadH1*, headingPadH2*, headingPadH3*, headingPadMinor*: int
     headingPadBottom*: int
@@ -145,6 +149,7 @@ func defaultPalette*(): Palette =
     panelBorder: rgb(60, 64, 78),
     buttonBg: rgb(52, 56, 72),
     buttonHoverBg: rgb(84, 90, 116),
+    buttonPressBg: rgb(38, 41, 53),
     fieldBg: rgb(20, 22, 28),
     selectedBg: rgb(64, 70, 92),
     accent: rgb(96, 130, 220),
@@ -184,7 +189,7 @@ func defaultMetrics*(): Metrics =
     padPanel: 12, padToolbar: 4, padSwitch: 3, padTabX: 14, padTabTop: 7,
     padTabBottom: 6, padMinor: 4, padItem: 6,
     gapCard: 10, gapCardRow: 12, gapProse: 8, gapTight: 6, gapList: 2,
-    borderRaised: 2, borderHairline: 1, borderTab: 2,
+    borderRaised: 2, borderHairline: 1, borderTab: 2, pressOffset: 2,
     headingPadH1: 28, headingPadH2: 20, headingPadH3: 14,
     headingPadMinor: 10, headingPadBottom: 6,
   )
@@ -262,6 +267,7 @@ template panelBg*(): Color = activeTheme.palette.panelBg
 template panelBorder*(): Color = activeTheme.palette.panelBorder
 template buttonBg*(): Color = activeTheme.palette.buttonBg
 template buttonHoverBg*(): Color = activeTheme.palette.buttonHoverBg
+template buttonPressBg*(): Color = activeTheme.palette.buttonPressBg
 template fieldBg*(): Color = activeTheme.palette.fieldBg
 template selectedBg*(): Color = activeTheme.palette.selectedBg
 template accent*(): Color = activeTheme.palette.accent

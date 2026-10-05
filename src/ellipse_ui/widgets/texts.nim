@@ -46,12 +46,16 @@ proc badge*(text: string) =
     textElement(text, TextConfig(fontSize: t.text.badge, color: t.palette.onAccent))
 
 proc textLink*(id: ElementId, text: string): bool =
-  ## Accent text that lights up and underlines on hover; true on click.
+  ## Accent text that lights up and underlines on hover, sinks onto a dim
+  ## fill while a press is held; true on click.
   let t = activeTheme
   let over = pointerOver(id)
+  let press = pressing(id)
   var d = row(width = fit(), height = fit())
   d.corner = allCorners(4)
-  if over:
+  if press:
+    d.background = t.palette.buttonPressBg
+  if over or press:
     d.border = BorderConfig(color: t.palette.accent,
       width: BorderWidth(bottom: t.metrics.borderHairline))
   item(id, d):

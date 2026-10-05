@@ -53,14 +53,20 @@ proc clickedOut*(id: ElementId): bool =
 ##
 ## Caret, selection and focus live here so `textfields` and `numberfields`
 ## share one edit engine. Selection is tracked (shift-arrows, backspace
-## deletes it) but not painted; the caret is `caretOverlay`: a 2px bar
-## floated over the field's text element at the caret's measured line and
-## column, so it renders *on top* of the text without displacing glyphs.
+## deletes it) and *painted* by the full editor surface
+## (`widgets/editor.nim`), which builds on this engine; small fields use
+## the caret but leave a selection as an invisible edit range. The caret is
+## `caretOverlay`: a 2px bar floated over the field's text element at the
+## caret's measured line and column, so it renders *on top* of the text
+## without displacing glyphs. Line/column come from `caretGeom` -- Clay's
+## own wrapping pass -- which the editor reuses for pointer hit-testing,
+## its selection rectangles and scrolling the caret into view.
 ##
 ## Keys follow the Emacs/readline default map: C-a/C-e line edges, C-b/C-f
 ## and arrows characters (M-b/M-f, M-Left/M-Right words), C-p/C-n and
 ## Up/Down lines, C-d/C-h and Delete/Backspace deletion, C-k/C-u/C-w/M-d
-## kills into a yank-able kill buffer (C-y), Enter/C-m commit and
+## kills into a yank-able kill buffer (C-y), C-c/C-x/C-v the *system*
+## clipboard, Ctrl+Home/End the document edges, Enter/C-m commit and
 ## Escape/C-g cancel. Single-line fields never contain `\n`, so their
 ## "line" motions degenerate to buffer edges automatically.
 
@@ -103,8 +109,30 @@ proc focus*(id: ElementId, text: string) =
   caret = text.len
   selAnchor = caret
 
+proc focusAt*(id: ElementId, text: string, pos: int, extend = false) =
+  ## `focus` with the caret placed at `pos` instead of the end -- what a
+  ## click inside a bigger editing surface (see `widgets/editor`) wants:
+  ## the press maps a pointer position to a character index, and focus
+  ## lands there. With `extend` the anchor stays put, growing a selection.
+  focusId = id.id
+  snapshot = text
+  caret = min(max(pos, 0), text.len)
+  if not extend:
+    selAnchor = caret
+
 proc blur*() =
   focusId = 0'u32
+
+proc refocus*(id: ElementId, text: string) =
+  ## Take back the caret without moving it: what a menu action or a closing
+  ## dialog does to return focus to the field it had stolen -- the caret
+  ## and selection the engine still holds belong to this widget's text.
+  focusId = id.id
+  snapshot = text
+
+proc focusIdOf*(): uint32 =
+  ## The element id holding the caret now, 0 for none.
+  focusId
 
 proc fieldBorder*(id: ElementId): Color =
   ## Focused (or hovered) fields get the accent ring; idle ones the plain
@@ -116,8 +144,10 @@ proc fieldBorder*(id: ElementId): Color =
 proc selLo(): int = min(caret, selAnchor)
 proc selHi(): int = max(caret, selAnchor)
 
-func isContByte(c: char): bool =
+func isContByte*(c: char): bool =
   ## A UTF-8 continuation byte: backspace/delete must skip whole codepoints.
+  ## (Public: the editor's pointer-to-index hit test walks the same
+  ## boundaries.)
   (ord(c) and 0xC0) == 0x80
 
 proc splice(s: var string, lo, hi: int, ins: string) =
@@ -277,6 +307,132 @@ proc yank(s: var string) =
     killAppend = false
     splice(s, caret, caret, killBuf)
 
+## --- exported caret & selection API ----------------------------------------
+##
+## The engine's caret lives here, module-private like `menu`'s open slot;
+## these are the doors the widget set (and apps building on it) walk
+## through to drive it from outside the key pipeline -- pointer placement,
+## programmatic selection, undo-history restore, app-side insertions.
+
+proc anchorPos*(): int =
+  ## The far end of the selection, opposite the caret.
+  selAnchor
+
+proc selRange*(): tuple[lo, hi: int] =
+  ## The selection as a half-open byte range, `lo == hi` when collapsed.
+  (selLo(), selHi())
+
+proc caretTo*(s: string, pos: int, extend: bool) =
+  ## Park the caret at `pos` (clamped to the text); with `extend` keep the
+  ## selection anchor and drag the selection edge, else collapse. This is
+  ## how pointer motion -- a click-to-place, a drag sweep, a page jump --
+  ## drives the caret from outside the key pipeline.
+  caret = min(max(pos, 0), s.len)
+  if not extend:
+    selAnchor = caret
+
+proc selectRange*(s: string, lo, hi: int) =
+  ## Select the half-open range `[lo, hi)` (clamped): caret at `hi`, anchor
+  ## at `lo`. Select-all is `selectRange(text, 0, text.len)`.
+  let a = min(max(lo, 0), s.len)
+  let b = min(max(hi, 0), s.len)
+  selAnchor = a
+  caret = b
+
+proc setCarets*(s: string, caretAt, anchor: int) =
+  ## Restore a whole caret/anchor pair (undo history does this), clamped.
+  caret = min(max(caretAt, 0), s.len)
+  selAnchor = min(max(anchor, 0), s.len)
+
+proc insertAtCaret*(s: var string, ins: string) =
+  ## Splice `ins` in at the caret (selection replaced first), collapse --
+  ## the way an application injects text a keystroke can't express, like
+  ## Notepad's F5 date/time stamp.
+  if selHi() > selLo():
+    splice(s, selLo(), selHi(), ins)
+  else:
+    splice(s, caret, caret, ins)
+  killAppend = false
+
+proc wordRange*(s: string, pos: int): tuple[lo, hi: int] =
+  ## The whole word bracketing `pos`: the range a double click selects.
+  ## A caret inside or right after a word claims it from its start; a
+  ## caret at a word start claims the word ahead; between words, nothing.
+  if pos > 0 and isWordChar(s[pos - 1]):
+    let lo = prevWordStart(s, pos)
+    return (lo, nextWordEnd(s, lo))
+  if pos < s.len and isWordChar(s[pos]):
+    return (pos, nextWordEnd(s, pos))
+  return (pos, pos)
+
+## --- clipboard ---------------------------------------------------------------
+##
+## `C-c/C-x/C-v` are the *system* clipboard round trip (via SDL), while the
+## Emacs kills above keep their own internal one-slot ring -- the two coexist
+## exactly as they do in a shell: `C-w` then `C-y` never touches Ctrl+V's
+## content. A paste runs every character through the field's validator, so a
+## number field pasting "12px" keeps the "12" -- and newline-carrying pastes
+## into a single-line field lose their line breaks.
+
+proc copySel(s: string) =
+  if selHi() > selLo():
+    setClipboard(sliceOf(s, selLo(), selHi()))
+
+proc clipboardCopy*(s: string) =
+  ## The clipboard half of `Ctrl+C`, for menu items driving the same act.
+  copySel(s)
+
+proc cutSel(s: var string) =
+  copySel(s)
+  if selHi() > selLo():
+    splice(s, selLo(), selHi(), "")
+
+proc clipboardCut*(s: var string) =
+  ## `Ctrl+X` for menu callers: copy the selection, then delete it.
+  cutSel(s)
+
+proc pasteInto(s: var string, valid: ValidCharFn) =
+  var ins = ""
+  for ch in getClipboard():
+    if ch != '\r' and valid(ch):
+      ins.add ch
+  if ins.len > 0:
+    if selHi() > selLo():
+      splice(s, selLo(), selHi(), ins)
+    else:
+      splice(s, caret, caret, ins)
+    killAppend = false
+
+proc clipboardPaste*(s: var string, valid: ValidCharFn = acceptAll) =
+  ## `Ctrl+V` for menu callers: splice the clipboard in at the caret
+  ## through the same validator the keystroke path uses.
+  pasteInto(s, valid)
+
+var keyFilter: proc (evs: seq[KeyEvent]): seq[KeyEvent] {.closure.}
+  ## The app's key-routing seam (see `installKeyFilter`).
+var keyFilterOn = false     ## whether a filter lives in the slot above
+
+proc installKeyFilter*(fn: proc (evs: seq[KeyEvent]): seq[KeyEvent] {.closure.}) =
+  ## Install a filter through which *every* widget's this-frame key batch
+  ## passes before editing: the seam an app uses to keep a modal dialog's
+  ## Enter/Escape from also committing a field, or to hand an app-level
+  ## chord (`Ctrl+N`) that the shared engine would otherwise ignore.
+  ## Filters run per widget call, must be pure, and return the events the
+  ## widgets should see. `clearKeyFilter` removes it.
+  keyFilter = fn
+  keyFilterOn = true
+
+proc clearKeyFilter*() =
+  keyFilterOn = false
+
+proc frameKeys*(): seq[KeyEvent] =
+  ## This input frame's key events, post the installed key filter -- what
+  ## a widget (or an app mirroring the same routing) should read.
+  let evs = keyEvents()
+  if not keyFilterOn:
+    return evs
+  keyFilter(evs)
+
 proc applyKeys(text: sink string, evs: seq[KeyEvent],
                valid: ValidCharFn): EditResult =
   ## The shared edit loop over an explicit event list; caret/selection state
@@ -312,6 +468,9 @@ proc applyKeys(text: sink string, evs: seq[KeyEvent],
         of 'u': killToBol(s)
         of 'w': killPrevWord(s)
         of 'y': yank(s)
+        of 'c': copySel(s)
+        of 'x': cutSel(s)
+        of 'v': pasteInto(s, valid)
         of 'g': result.outcome = eoCancel
         of 'm': result.outcome = eoCommit
         else: discard
@@ -336,9 +495,20 @@ proc applyKeys(text: sink string, evs: seq[KeyEvent],
     of kevDown:
       gotoLine(s, 1)
     of kevHome:
-      gotoLineEdge(s, false, ev.shift)
+      if ev.ctrl or ev.alt:
+        # Document edges: the classic editor's Ctrl+Home / Ctrl+End.
+        caret = 0
+        if not ev.shift:
+          selAnchor = 0
+      else:
+        gotoLineEdge(s, false, ev.shift)
     of kevEnd:
-      gotoLineEdge(s, true, ev.shift)
+      if ev.ctrl or ev.alt:
+        caret = s.len
+        if not ev.shift:
+          selAnchor = caret
+      else:
+        gotoLineEdge(s, true, ev.shift)
     of kevEnter:
       result.outcome = eoCommit
     of kevEscape:
@@ -353,7 +523,7 @@ proc editStep*(text: sink string, valid: ValidCharFn = acceptAll): EditResult =
   result = EditResult(text: text)
   if focusId == 0'u32:
     return
-  result = applyKeys(text, keyEvents(), valid)
+  result = applyKeys(text, frameKeys(), valid)
 
 proc editStepWith*(text: sink string, evs: seq[KeyEvent],
                    valid: ValidCharFn = acceptAll): EditResult =
@@ -384,6 +554,85 @@ proc textChildId*(parentId: uint32, child: uint32 = 0): uint32 =
   ## passes `textChildId(textChildId(id.id))`.
   hashNumber(child, parentId)
 
+type
+  CaretGeom* = object
+    ## One caret's placement on the renderer's line grid: `lineIdx` the
+    ## wrapped display line, `x` the offset within it, `y` the line's top
+    ## inside the text box (`yBase + lineIdx * lineHeight`), and the
+    ## shared metrics a caller needs to paint a bar or hit-test a point.
+    lineIdx*: int
+    x*: float32
+    y*: float32
+    lineHeight*: float32
+    barH*: float32
+    found*: bool      ## false: no geometry yet (never laid out / measured)
+
+proc caretGeom*(text: string, pos: int, cfg: TextConfig,
+                boxWidth: float32): CaretGeom =
+  ## Where the caret sits for `text`/`pos` given the text box's laid-out
+  ## `boxWidth` -- Clay's own wrapping pass (`wrappedLines`), so the answer
+  ## lies on exactly the grid the renderer draws. Word-wrapped text maps
+  ## `pos` onto its wrapped line and measures the prefix before it;
+  ## no-wrap text breaks on hard newlines, its box as wide as the longest
+  ## line. A caret right after a trailing newline belongs to the virtual
+  ## empty line below.
+  let ctx = currentContext()
+  if not ctx.measureTextInstalled():
+    return CaretGeom()
+  result = CaretGeom()
+  let m = measureTextCached(ctx, text, cfg)
+  let lineHeight =
+    if cfg.lineHeight > 0: float32(cfg.lineHeight) else: m.unwrapped.height
+  let barH = if lineHeight > 0.0: lineHeight else: float32(cfg.fontSize)
+  let yBase = (lineHeight - m.unwrapped.height) / 2.0
+  result.lineHeight = lineHeight
+  result.barH = barH
+  result.found = true
+  let p = min(max(pos, 0), text.len)
+  if cfg.wrap == wordWrap and
+      (m.containsNewlines or m.unwrapped.width > boxWidth):
+    let lines = wrappedLines(ctx, text, cfg, boxWidth)
+    if lines.len > 0:
+      var li = 0
+      for i in 0 ..< lines.len:
+        if lines[i].start <= int32(p):
+          li = i
+      let ln = lines[li]
+      if p > int(ln.start + ln.length):
+        result.x = ln.dims.width
+      else:
+        result.x = measureTextCached(ctx, substr(text, int(ln.start), p - 1),
+                                     cfg).unwrapped.width
+      result.lineIdx = li
+      # A caret right after a trailing newline belongs to the empty line
+      # the box does not render.
+      if p == text.len and p > 0 and text[p - 1] == '\n':
+        result.x = 0.0
+        result.lineIdx = lines.len
+    result.y = yBase + float32(result.lineIdx) * lineHeight
+  elif cfg.wrap == noWrap and m.containsNewlines:
+    # No-wrap multi-line: hard newlines only; measure within the segment.
+    let ls = bolOf(text, p)
+    result.x = measureTextCached(ctx, substr(text, ls, p - 1),
+                                 cfg).unwrapped.width
+    var li = 0
+    var i = 0
+    while i < ls:
+      if text[i] == '\n':
+        inc li
+      inc i
+    result.lineIdx = li
+    if p == text.len and p > 0 and text[p - 1] == '\n':
+      result.x = 0.0
+      result.lineIdx += 1
+    result.y = yBase + float32(result.lineIdx) * lineHeight
+  else:
+    # Single logical line (single-line fields, no-wrap text without
+    # newlines): x is the whole prefix, y the box's vertical centre band.
+    result.x = measureTextCached(ctx, substr(text, 0, p - 1),
+                                 cfg).unwrapped.width
+    result.y = yBase
+
 proc caretOverlay*(textElId: uint32, text: string, cfg: TextConfig,
                    color: Color = textColor) =
   ## Paint the blinking caret as a 2px bar *floated over* the field's text
@@ -391,53 +640,21 @@ proc caretOverlay*(textElId: uint32, text: string, cfg: TextConfig,
   ## bar is attached to the text box and offset to the caret's line and
   ## column, so it rides on top of the glyphs instead of displacing them.
   ## Call right after the field's `textElement`, still inside the field,
-  ## only while the field holds focus. Line/column come from Clay's own
-  ## wrapping pass (`wrappedLines` over the text box's previous-frame
-  ## width), so the bar sits on exactly the grid the renderer draws.
+  ## only while the field holds focus. Geometry comes from `caretGeom` --
+  ## Clay's own wrapping pass over the text box's previous-frame width.
   if focusId == 0'u32 or not caretVisible():
-    return
-  let ctx = currentContext()
-  if not ctx.measureTextInstalled():
     return
   let prev = elementData(ElementId(id: textElId))
   if not prev.found:
     return                       # text never laid out yet: no geometry
-  let pos = min(max(caret, 0), text.len)
-  let m = measureTextCached(ctx, text, cfg)
-  let lineHeight =
-    if cfg.lineHeight > 0: float32(cfg.lineHeight) else: m.unwrapped.height
-  let barH = if lineHeight > 0.0: lineHeight else: float32(cfg.fontSize)
-  let yBase = (lineHeight - m.unwrapped.height) / 2.0
-  var x: float32 = 0.0
-  var lineIdx = 0
-  if cfg.wrap == wordWrap and
-      (m.containsNewlines or m.unwrapped.width > prev.box.width):
-    let lines = wrappedLines(ctx, text, cfg, prev.box.width)
-    if lines.len > 0:
-      var li = 0
-      for i in 0 ..< lines.len:
-        if lines[i].start <= int32(pos):
-          li = i
-      let ln = lines[li]
-      if pos > int(ln.start + ln.length):
-        x = ln.dims.width
-      else:
-        x = measureTextCached(ctx, substr(text, int(ln.start), pos - 1),
-                              cfg).unwrapped.width
-      lineIdx = li
-      # A caret right after a trailing newline belongs to the empty line
-      # the box does not render.
-      if pos == text.len and pos > 0 and text[pos - 1] == '\n':
-        x = 0.0
-        lineIdx = lines.len
-  else:
-    x = measureTextCached(ctx, substr(text, 0, pos - 1), cfg).unwrapped.width
-
+  let g = caretGeom(text, caret, cfg, prev.box.width)
+  if not g.found:
+    return
   openElement(ElementId(id: hashNumber(1'u32, textElId)))
-  configureOpenElement(col(width = fixedPx(2), height = fixedPx(barH))
+  configureOpenElement(col(width = fixedPx(2), height = fixedPx(g.barH))
     .bg(color)
     .floating(attachElementId,
-              offset = vec2(x, yBase + float32(lineIdx) * lineHeight),
+              offset = vec2(g.x, g.y),
               zIndex = 32767,
               parentId = textElId,
               points = AttachPoints(element: pointLeftTop,
@@ -541,15 +758,20 @@ proc fieldFocus*(id: ElementId, text: string): bool =
 ## The theme-resolved `ElementDeclaration`s the widgets keep re-deriving by
 ## hand. Each takes the sizing/padding knobs its call sites actually vary.
 
-proc toggleRowDecl*(over: bool, showBg = true): ElementDeclaration =
+proc toggleRowDecl*(over: bool, press = false, showBg = true): ElementDeclaration =
   ## The labelled row a `checkbox`/`switch` lives in: fit content, centred,
   ## `padCheckRow` padding, 10px gap before the label; with `showBg` a
-  ## button fill lights it while hovered.
+  ## button fill lights it while hovered, and while `press` is held the row
+  ## shows its compressed state (sunk fill, content shifted down).
   let t = activeTheme
-  result = row(gap = 10, width = fit(), height = fit(), alignY = centerY,
-    padding = padAll(t.metrics.padCheckRow))
+  var pad = padAll(t.metrics.padCheckRow)
   if showBg:
-    result = result.bg(if over: t.palette.buttonBg else: Color())
+    pad = squeeze(pad, press)
+  result = row(gap = 10, width = fit(), height = fit(), alignY = centerY,
+    padding = pad)
+  if showBg:
+    result = result.bg(if press: t.palette.buttonPressBg
+      elif over: t.palette.buttonBg else: Color())
       .corner(t.radii.button)
 
 proc fieldPad*(): Padding =
@@ -578,27 +800,32 @@ proc fieldDecl*(id: ElementId, width: SizingAxis, height: SizingAxis,
 proc shadeDecl*(id: ElementId, width: SizingAxis, height: SizingAxis,
                 dir: Direction = leftToRight, padding: Padding = Padding(),
                 alignX: AlignX = left, alignY: AlignY = top): ElementDeclaration =
-  ## A small button surface that just lights up under the pointer --
-  ## number-field steppers, dropdown footer buttons: `shade(pointerOver(id))`
-  ## over `inner` corners.
+  ## A small button surface that lights up under the pointer and compresses
+  ## under a held press -- number-field steppers, dropdown footer buttons:
+  ## `shade(pointerOver(id), pressing(id))` over `inner` corners.
   let t = activeTheme
+  let press = pressing(id)
+  let pad = squeeze(padding, press)
   result = if dir == leftToRight:
-    row(width = width, height = height, padding = padding,
+    row(width = width, height = height, padding = pad,
         alignX = alignX, alignY = alignY)
   else:
-    col(width = width, height = height, padding = padding,
+    col(width = width, height = height, padding = pad,
         alignX = alignX, alignY = alignY)
-  result = result.bg(shade(pointerOver(id))).corner(t.radii.inner)
+  result = result.bg(shade(pointerOver(id), press)).corner(t.radii.inner)
 
-proc optionRowDecl*(over, selected: bool, gap: int = 0,
+proc optionRowDecl*(over, selected: bool, press = false, gap: int = 0,
                     alignY: AlignY = top): ElementDeclaration =
   ## A dropdown option row: grows to the panel width, `padOption` inset,
-  ## `inner` corners, the selected fill or the hover fill, in that order.
+  ## `inner` corners, the selected fill, the compressed fill of a held
+  ## press, or the hover fill, in that order.
   let t = activeTheme
   result = row(width = grow(), height = fit(), gap = gap,
-      padding = padAll(t.metrics.padOption), alignY = alignY)
+      padding = squeeze(padAll(t.metrics.padOption), press), alignY = alignY)
   if selected:
     result.background = t.palette.selectedBg
+  elif press:
+    result.background = t.palette.buttonPressBg
   elif over:
     result.background = t.palette.buttonHoverBg
   result.corner = allCorners(t.radii.inner)
@@ -631,11 +858,14 @@ proc dropdownField*(id: ElementId, isOpen: bool, shown: string,
                     shownColor: Color, width: SizingAxis, height: SizingAxis) =
   ## The combo-style summary field: a raised `padButton` row ringed in
   ## accent while open, holding `shown`, a `spacer`, and the `chevron`.
+  ## It sits compressed while open or held down -- like a button whose
+  ## menu is up.
   let t = activeTheme
+  let press = pressing(id) or isOpen
   openElement(id)
   configureOpenElement(row(width = width, height = height, gap = 8,
-    padding = padAll(t.metrics.padButton), alignY = centerY)
-    .bg(shade(pointerOver(id) or isOpen))
+    padding = squeeze(padAll(t.metrics.padButton), press), alignY = centerY)
+    .bg(shade(pointerOver(id), press))
     .corner(t.radii.field)
     .border(t.metrics.borderHairline,
       if isOpen: t.palette.accent else: t.palette.panelBorder))
@@ -658,7 +888,9 @@ proc dropdownPanelDecl*(anchor: ElementId, maxHeight: float32):
     .border(t.metrics.borderHairline, t.palette.panelBorder)
     .corner(t.radii.popover)
     .floating(attachElementId,
-      offset = vec2(0.0, t.metrics.popoverOffset), zIndex = 200,
+      offset = vec2(0.0, t.metrics.popoverOffset), zIndex = 30010,
+      # High enough to clear a modal backdrop (30000): a combo inside a
+      # dialog must not get dimmed by the very modal it lives in.
       points = AttachPoints(element: pointLeftTop,
                             parent: pointLeftBottom),
       parentId = anchor.id,
@@ -687,7 +919,8 @@ template optionRow*(id: untyped, selected: untyped, gap: untyped,
   ## content-heavy rows vary.
   block:
     openElement(id)
-    configureOpenElement(optionRowDecl(hovered(), selected, gap, alignY))
+    configureOpenElement(optionRowDecl(hovered(), selected, pressing(),
+                                       gap, alignY))
     body
     closeElement()
 

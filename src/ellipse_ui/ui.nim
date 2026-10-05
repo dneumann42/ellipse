@@ -50,19 +50,104 @@ proc smoothedWheel*(rawY: float32, dt: float32): float32 =
       result += wheelPending
       wheelPending = 0.0
 
-proc updateUI*() =
+## --- press hold ----------------------------------------------------------------
+##
+## Clay reports the click *edge* (`pressedThisFrame`) but not which element the
+## press belongs to, so after that single frame nothing can answer "is my
+## button still being held down?". `updateUI` snapshots the pointer-over list
+## on the press edge; while the pointer stays down, membership in that
+## snapshot is the press claim of every element that contained the down point
+## -- exactly what `clickedIn` reads, stretched over the whole hold. Release
+## clears it, and dragging off the button does not: a held button stays
+## compressed until the finger lifts.
+##
+## Widgets fold the claim into a *compressed state*: `shade(over, press)`
+## sinks the surface to `buttonPressBg` and `squeeze(pad, press)` moves the
+## content down by `pressOffset` -- top inset grows, bottom shrinks -- so the
+## control looks pushed in without changing its outer box.
+
+var pressHeld: seq[uint32] = @[]
+
+proc notePressState*() =
+  ## Fold this frame's pointer edge into the held-press snapshot: the down
+  ## edge records the elements under the pointer, release clears them.
+  ## `updateUI` calls it right after `setPointerState`; frame drivers that
+  ## step the clay engine directly (tests) call it themselves.
+  let ctx = currentContext()
+  let pstate = ctx.pointerData().state
+  if pstate == pressedThisFrame:
+    let overIds = ctx.pointerOverIds()
+    pressHeld.setLen(0)
+    for el in overIds:
+      pressHeld.add(el.id)
+  elif pstate == released or pstate == releasedThisFrame:
+    pressHeld.setLen(0)
+
+proc pressing*(id: ElementId): bool =
+  ## The primary button went down inside `id`'s box and is still held: the
+  ## widget's compressed (pressed-in) look.
+  for held in pressHeld:
+    if held == id.id:
+      return true
+  return false
+
+proc pressing*(): bool =
+  ## `pressing` for the currently open element.
+  pressing(ElementId(id: openElementId()))
+
+proc shade*(over, press: bool): Color =
+  ## The three-way raised-surface pick: a held press sinks the surface to
+  ## `buttonPressBg`, else the pointer lights it with hover, else it rests.
+  if press:
+    return buttonPressBg
+  if over:
+    return buttonHoverBg
+  return buttonBg
+
+proc shade*(over, press: bool, idle: Color, hover = buttonHoverBg): Color =
+  ## The same idle/hover/press pick with the resting colour chosen by the
+  ## caller.
+  if press:
+    return buttonPressBg
+  if over:
+    return hover
+  return idle
+
+proc squeeze*(pad: Padding, press: bool): Padding =
+  ## The compressed state's inset: while `press` the content box shifts down
+  ## by `pressOffset`, keeping the sum of the insets -- and so a `fit`-sized
+  ## widget's outer box -- unchanged.
+  result = pad
+  if press:
+    let off = activeTheme.metrics.pressOffset
+    result.top += off
+    if result.bottom >= off:
+      result.bottom -= off
+
+proc updateUI*(skipWheel: bool = false) =
+  ## Advance the clay engine one input frame: pointer, held-press snapshot,
+  ## wheel scrolling, layout dimensions, error drain. `skipWheel` holds the
+  ## wheel back from the scroll containers for one frame -- the seam a zoom
+  ## gesture (Ctrl + wheel) uses so the same notch does not both zoom and
+  ## scroll.
   beginInputFrame()
 
   let pointer = pointerState()
   setPointerState(vec2(pointer.x, pointer.y), pointer.down)
+
+  # Fold this frame's press edge into the held-press snapshot (see above).
+  notePressState()
 
   # Wheel-driven scrolling for the widget set's clip containers (page and
   # panels, dropdown lists etc), through the accel/glide filter above.
   # Drag-scrolling stays off: widgets claim press themselves, and the
   # scrollbars drive containers directly via `setScrollPosition`.
   let wheel = wheelDelta()
-  updateScrollContainers(false,
-    vec2(wheel.x, smoothedWheel(wheel.y, frameDt)), frameDt)
+  if skipWheel:
+    updateScrollContainers(false, vec2(0.0, 0.0), frameDt)
+  else:
+    updateScrollContainers(false,
+      vec2(wheel.x, smoothedWheel(wheel.y, frameDt)), frameDt)
 
   let (w, h) = windowPixelSize()
   let dims = layoutDimensions()
@@ -103,18 +188,24 @@ proc shade*(over: bool, idle: Color, hover = buttonHoverBg): Color =
     return hover
   return idle
 
-proc button*(id: ElementId, label: string, width = fit(), height = fit()): bool =
+proc button*(id: ElementId, label: string, width = fit(), height = fit(),
+             fontSize: uint16 = 0): bool =
+  ## A themed push button: the three-way raised surface (`shade`), the
+  ## compressed hold state (`squeeze`), and the label centred in it.
+  ## `fontSize` overrides the theme's button size -- dialogs pass the
+  ## smaller `control` size so compact footers fit their labels.
   let t = activeTheme
+  let fs = if fontSize > 0: fontSize else: t.text.button
   let over = pointerOver(id)
+  let press = pressing(id)
   result = over and currentContext().pointerData().state == pressedThisFrame
   openElement(id)
   configureOpenElement(col(width = width, height = height, alignX = centerX,
-      alignY = centerY, padding = padAll(t.metrics.padButton))
-      .bg(shade(over))
+      alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
+      .bg(shade(over, press))
       .corner(t.radii.button)
       .border(t.metrics.borderRaised, t.palette.panelBorder))
-  textElement(label, TextConfig(fontSize: t.text.button,
-    color: t.palette.textColor))
+  textElement(label, TextConfig(fontSize: fs, color: t.palette.textColor))
   closeElement()
 
 ## --- items: bracketed child elements ------------------------------------------
@@ -142,23 +233,28 @@ proc button*(id: ElementId, label: string, width = fit(), height = fit()): bool 
 proc listRowDecl*(idle: Color = panelBg, hover = buttonHoverBg): ElementDeclaration =
   ## The standard list-row declaration (see `listRow`): `grow` wide,
   ## `fit` tall, `padItem` padded, vertically centred, `itemRadius`
-  ## corners, `idle` at rest and `hover` under the pointer. Reads the
-  ## hover state of whatever element is open at the call.
+  ## corners, `idle` at rest, `hover` under the pointer and the compressed
+  ## fill while held. Reads the hover and press state of whatever element
+  ## is open at the call.
   let t = activeTheme
+  let press = pressing()
   result = row(width = grow(), height = fit(),
-      padding = padAll(t.metrics.padItem), alignY = centerY)
-    .bg(shade(hovered(), idle, hover))
+      padding = squeeze(padAll(t.metrics.padItem), press), alignY = centerY)
+    .bg(shade(hovered(), press, idle, hover))
     .corner(t.radii.item)
 
 proc listCardDecl*(width: SizingAxis, idle: Color = buttonBg,
                    hover = buttonHoverBg): ElementDeclaration =
   ## The standard hover-card declaration (see `listCard`): `width` across,
   ## full height, centred content, `padCard` inset, hairline border,
-  ## `button` corners, `idle` at rest and `hover` under the pointer.
+  ## `button` corners, `idle` at rest, `hover` under the pointer and the
+  ## compressed fill while held.
   let t = activeTheme
+  let press = pressing()
   result = col(width = width, height = grow(),
-      alignX = centerX, alignY = centerY, padding = padAll(t.metrics.padCard))
-    .bg(shade(hovered(), idle, hover))
+      alignX = centerX, alignY = centerY,
+      padding = squeeze(padAll(t.metrics.padCard), press))
+    .bg(shade(hovered(), press, idle, hover))
     .corner(t.radii.button)
     .border(t.metrics.borderHairline, t.palette.panelBorder)
 
@@ -220,10 +316,11 @@ proc menu*(label: string, blk: MenuBody) =
   let isOpen = openMenuId == btnId.id
 
   let over = pointerOver(btnId)
+  let press = pressing(btnId) or isOpen   # an open menu sits pressed in
   openElement(btnId)
   configureOpenElement(col(width = fit(), height = grow(), alignX = centerX,
-      alignY = centerY, padding = padAll(t.metrics.padButton))
-      .bg(shade(over or isOpen))
+      alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
+      .bg(shade(over, press))
       .corner(t.radii.button)
       .border(t.metrics.borderHairline, t.palette.panelBorder))
   textElement(label, TextConfig(fontSize: t.text.menu, color: t.palette.textColor))
@@ -266,12 +363,15 @@ proc menu*(label: string, blk: MenuBody) =
 proc menuItem*(label: string, shortcut = ""): bool =
   let t = activeTheme
   openElement()
+  let press = pressing()
   result = menuPressed() and hovered()
   if result:
     menuSelected = true
   var d = row(width = grow(), height = fit(), gap = 16,
-              padding = padAll(t.metrics.padMenuItem))
-  if hovered():
+              padding = squeeze(padAll(t.metrics.padMenuItem), press))
+  if press:
+    d.background = buttonPressBg
+  elif hovered():
     d.background = buttonHoverBg
   d.corner = allCorners(t.radii.inner)
   configureOpenElement(d)

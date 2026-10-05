@@ -62,6 +62,35 @@ const
   ScanLeft = 80'i32
   ScanDown = 81'i32
   ScanUp = 82'i32
+  ## Keypad Enter: a separate HID usage from the main Enter key; both edit
+  ## as `kevEnter`.
+  ScanKeypadEnter = 88'i32
+  ## PgUp / PgDn: the page motions a text editor scrolls by.
+  ScanPageUp = 75'i32
+  ScanPageDown = 78'i32
+  ## F1..F12: the function row, delivered as `kevF1`..`kevF12`.
+  ScanF1 = 58'i32
+  ScanF2 = 59'i32
+  ScanF3 = 60'i32
+  ScanF4 = 61'i32
+  ScanF5 = 62'i32
+  ScanF6 = 63'i32
+  ScanF7 = 64'i32
+  ScanF8 = 65'i32
+  ScanF9 = 66'i32
+  ScanF10 = 67'i32
+  ScanF11 = 68'i32
+  ScanF12 = 69'i32
+  ## The chords a text app binds beyond letters: minus(45), equals(46) and
+  ## the digits 1..9,0 (30..39); with Ctrl they arrive as `kevLetter`
+  ## carrying the *unshifted meaning* char ('-', '+', '1'..'9', '0').
+  ScanMinus = 45'i32
+  ScanEquals = 46'i32
+  ScanDigit1 = 30'i32
+  ScanDigit0 = 39'i32
+  ## Keypad minus / plus, same `kevLetter` treatment as the chords above.
+  ScanKPMinus = 86'i32
+  ScanKPPlus = 87'i32
   ## QWERTY home-row letters, as SDL3 scancodes: A..Z run 4..29, so a
   ## scancode in this range maps to `chr('a' + scancode - 4)`.
   ScanA = 4'i32
@@ -130,7 +159,7 @@ type
     which: uint32
     button: uint8
     down: bool
-    clicks: uint8
+    clicks: uint8       ## SDL3's click counter: 1 = single, 2 = double
     padding: uint8
     x: float32
     y: float32
@@ -156,6 +185,14 @@ proc SDL_CreateWindowAndRenderer(title: cstring; width, height: int32; flags: ui
 proc SDL_StartTextInput(win: ptr SDL_Window): bool {.importc: "SDL_StartTextInput", header: "<SDL3/SDL.h>".}
 proc SDL_StopTextInput(win: ptr SDL_Window): bool {.importc: "SDL_StopTextInput", header: "<SDL3/SDL.h>".}
 proc SDL_GetCurrentVideoDriver(): cstring {.importc: "SDL_GetCurrentVideoDriver", header: "<SDL3/SDL.h>".}
+proc SDL_SetWindowTitle(win: ptr SDL_Window; title: cstring): bool {.
+  importc: "SDL_SetWindowTitle", header: "<SDL3/SDL.h>".}
+proc SDL_GetClipboardText(): cstring {.
+  importc: "SDL_GetClipboardText", header: "<SDL3/SDL.h>".}
+proc SDL_SetClipboardText(text: cstring): bool {.
+  importc: "SDL_SetClipboardText", header: "<SDL3/SDL.h>".}
+proc SDL_free(mem: pointer) {.importc: "SDL_free", header: "<SDL3/SDL.h>".}
+proc SDL_GetModState(): uint32 {.importc: "SDL_GetModState", header: "<SDL3/SDL.h>".}
 proc SDL_GetKeyFromScancode(scancode, modstate: int32; key_event: bool): int32 {.
   importc: "SDL_GetKeyFromScancode", header: "<SDL3/SDL.h>".}
 proc SDL_DestroyWindow(win: ptr SDL_Window) {.importc: "SDL_DestroyWindow", header: "<SDL3/SDL.h>".}
@@ -203,10 +240,14 @@ type
     ## What a `KeyEvent` carries. Printable input arrives as `kevText`
     ## (SDL text events, keyboard-layout independent); the rest are the
     ## navigation keys the UI widgets edit with. Ctrl/Alt + a letter (the
-    ## Emacs-style editing chords) arrive as `kevLetter` with `ch` set.
-    ## `kevNone` marks ignored keys and never enters the queue.
+    ## Emacs-style editing chords) arrive as `kevLetter` with `ch` set --
+    ## and so do the Ctrl/Alt chords on '-', '+' and the digits, carrying
+    ## that char. `kevNone` marks ignored keys and never enters the queue.
     kevNone, kevText, kevLetter, kevBackspace, kevDelete, kevLeft, kevRight,
-    kevUp, kevDown, kevHome, kevEnd, kevEnter, kevEscape
+    kevUp, kevDown, kevHome, kevEnd, kevEnter, kevEscape,
+    kevPageUp, kevPageDown,
+    kevF1, kevF2, kevF3, kevF4, kevF5, kevF6,
+    kevF7, kevF8, kevF9, kevF10, kevF11, kevF12
 
   KeyEvent* = object
     kind*: KeyEventKind
@@ -227,6 +268,8 @@ type
     keyFrame: seq[KeyEvent]     ## the events `keyEvents()` hands to widgets
     wheelPending: tuple[x, y: float32]
     wheelFrame: tuple[x, y: float32]
+    doublePending: bool         ## a left-button click with SDL's click
+    doubleFrame: bool           ## counter >= 2, per input frame
 
 proc `=destroy`(app: var PlatformApplication) =
   `=destroy`(app.renderer)
@@ -350,30 +393,63 @@ proc utf8Of(cp: int32): string =
 
 proc keyEventFor(scancode, key, modifiers: int32): KeyEvent =
   ## Maps a keydown to a `KeyEvent`; unknown keys yield `kevNone`.
-  ## Ctrl/Alt + letter becomes a `kevLetter` chord. With the IME path off,
-  ## printable keys also synthesize a `kevText` from the event's keycode --
-  ## the platform keymap already resolved the layout, shift and dead keys
-  ## into it -- so text entry works without StartTextInput stealing raw
-  ## key presses from an input method.
+  ## Ctrl/Alt + letter becomes a `kevLetter` chord -- and so do Ctrl/Alt
+  ## chords on '-', '+', the keypad +/-. and the digit row, carrying that
+  ## char. The function row arrives as `kevF1`..`kevF12`, PgUp/PgDn as
+  ## `kevPageUp`/`kevPageDown`. With the IME path off, printable keys also
+  ## synthesize a `kevText` from the event's keycode -- the platform
+  ## keymap already resolved the layout, shift and dead keys into it --
+  ## so text entry works without StartTextInput stealing raw key presses
+  ## from an input method.
   result = KeyEvent(kind: kevNone,
     shift: (modifiers and ModShift) != 0,
     ctrl: (modifiers and ModCtrl) != 0,
     alt: (modifiers and ModAlt) != 0)
   case scancode
-  of ScanEnter: result.kind = kevEnter
+  of ScanEnter, ScanKeypadEnter: result.kind = kevEnter
   of ScanEscape: result.kind = kevEscape
   of ScanBackspace: result.kind = kevBackspace
   of ScanDelete: result.kind = kevDelete
   of ScanHome: result.kind = kevHome
   of ScanEnd: result.kind = kevEnd
+  of ScanPageUp: result.kind = kevPageUp
+  of ScanPageDown: result.kind = kevPageDown
   of ScanRight: result.kind = kevRight
   of ScanLeft: result.kind = kevLeft
   of ScanDown: result.kind = kevDown
   of ScanUp: result.kind = kevUp
+  of ScanF1: result.kind = kevF1
+  of ScanF2: result.kind = kevF2
+  of ScanF3: result.kind = kevF3
+  of ScanF4: result.kind = kevF4
+  of ScanF5: result.kind = kevF5
+  of ScanF6: result.kind = kevF6
+  of ScanF7: result.kind = kevF7
+  of ScanF8: result.kind = kevF8
+  of ScanF9: result.kind = kevF9
+  of ScanF10: result.kind = kevF10
+  of ScanF11: result.kind = kevF11
+  of ScanF12: result.kind = kevF12
   else:
     if scancode >= ScanA and scancode <= ScanZ and (result.ctrl or result.alt):
       result.kind = kevLetter
       result.ch = char(ord('a') + int(scancode - ScanA))
+    elif result.ctrl or result.alt:
+      # The chords a text app binds beyond letters: minus, equals (delivered
+      # as '+', its shifted meaning), the keypad +/-. and the digit row.
+      case scancode
+      of ScanMinus, ScanKPMinus:
+        result.kind = kevLetter
+        result.ch = '-'
+      of ScanEquals, ScanKPPlus:
+        result.kind = kevLetter
+        result.ch = '+'
+      of ScanDigit1 .. ScanDigit0:
+        result.kind = kevLetter
+        # 30..38 are '1'..'9'; 39 is '0' -- wrap the tenth step back.
+        result.ch = char(ord('0') + (int(scancode - ScanDigit1) + 1) mod 10)
+      else:
+        discard
     elif not result.ctrl and not result.alt and not textImeActive:
       var cp = key
       if cp == 0:   # some backends leave `key` unset; consult the keymap
@@ -411,6 +487,8 @@ proc pumpEvents(app: var PlatformApplication) =
       let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
       if e.button == ButtonLeft:
         app.pointer.down = true
+        if e.clicks >= 2:
+          app.doublePending = true
     elif kind == EventMouseButtonUp:
       let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
       if e.button == ButtonLeft:
@@ -435,6 +513,10 @@ proc pointerState*(): PointerState =
   ## `clay.setPointerState` once per update tick.
   activeApp.pointer
 
+proc quit*() =
+  ## End the `start` loop at the next iteration -- an app's File > Exit.
+  activeApp.running = false
+
 proc windowPixelSize*(): tuple[width, height: float32] =
   ## The window's drawable size in renderer pixels, as of the most recent
   ## event pump. Feed it to `clay.setLayoutDimensions` each update tick so
@@ -453,6 +535,8 @@ proc beginInputFrame*() =
   activeApp.keyPending.setLen(0)
   activeApp.wheelFrame = activeApp.wheelPending
   activeApp.wheelPending = (float32(0.0), float32(0.0))
+  activeApp.doubleFrame = activeApp.doublePending
+  activeApp.doublePending = false
 
 proc keyEvents*(): seq[KeyEvent] =
   ## Keyboard/text events collected since the last `beginInputFrame`.
@@ -463,10 +547,55 @@ proc wheelDelta*(): tuple[x, y: float32] =
   ## in SDL's units: positive y scrolls up/away from the user.
   activeApp.wheelFrame
 
+proc doubleClick*(): bool =
+  ## The primary button went down for the *second* click of a double click
+  ## this input frame (SDL's own click counter and timing window). Widgets
+  ## that offer double-click behaviour (word selection, list activation)
+  ## combine this with their normal `clickedIn` edge: the frame a double
+  ## click lands on is also a press edge.
+  activeApp.doubleFrame
+
+proc keyMods*(): tuple[ctrl, shift, alt: bool] =
+  ## The live Ctrl/Shift/Alt modifier state -- not queued like key events
+  ## but polled, so chords held *while the wheel turns* are visible (zoom
+  ## widgets) even though the press itself emitted no event this frame.
+  let m = SDL_GetModState().int32
+  (ctrl: (m and ModCtrl) != 0, shift: (m and ModShift) != 0,
+   alt: (m and ModAlt) != 0)
+
+proc setWindowTitle*(title: string) =
+  ## Rename the window. A no-op before `initialize()`.
+  if activeApp.window.raw != nil:
+    var t = title
+    discard SDL_SetWindowTitle(activeApp.window.raw, t.toCString)
+
+proc getClipboard*(): string =
+  ## The system clipboard as text; empty when nothing is (or SDL is not
+  ## up yet, which is the state headless tests run in).
+  if activeApp.window.raw == nil:
+    return ""
+  let cstr = SDL_GetClipboardText()
+  if cstr.isNil:
+    return ""
+  result = fromCString(cstr)
+  SDL_free(cstr)
+
+proc setClipboard*(text: string) =
+  ## Put `text` on the system clipboard. No-op before `initialize()`.
+  if activeApp.window.raw == nil:
+    return
+  var t = text
+  discard SDL_SetClipboardText(t.toCString)
+
 proc pushKeyEvent*(ev: KeyEvent) =
   ## Feed a synthetic event into the queue -- the seam for tests, on-screen
   ## keyboards and gamepad text input.
   activeApp.keyPending.add ev
+
+proc pushDoubleClick*() =
+  ## Mark a double-click edge on the next input frame -- the same seam
+  ## `pushKeyEvent` is for tests and synthetic pointers.
+  activeApp.doublePending = true
 
 proc drawFrame(app: var PlatformApplication; render: FrameFn) {.raises.} =
   sdlHandle(SDL_SetRenderDrawColor(app.renderer.raw, 0, 0, 0, 255), "SDL_SetRenderDrawColor()")
