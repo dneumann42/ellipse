@@ -198,6 +198,7 @@ proc SDL_GetKeyFromScancode(scancode, modstate: int32; key_event: bool): int32 {
 proc SDL_DestroyWindow(win: ptr SDL_Window) {.importc: "SDL_DestroyWindow", header: "<SDL3/SDL.h>".}
 proc SDL_DestroyRenderer(ren: ptr SDL_Renderer) {.importc: "SDL_DestroyRenderer", header: "<SDL3/SDL.h>".}
 proc SDL_PollEvent(event: ptr SDL_Event): bool {.importc: "SDL_PollEvent", header: "<SDL3/SDL.h>".}
+proc SDL_PushEvent(event: ptr SDL_Event): bool {.importc: "SDL_PushEvent", header: "<SDL3/SDL.h>".}
 proc SDL_Delay(ms: uint32) {.importc: "SDL_Delay", header: "<SDL3/SDL.h>".}
 proc SDL_SetRenderDrawColor(ren: ptr SDL_Renderer; r, g, b, a: uint8): bool {.importc: "SDL_SetRenderDrawColor", header: "<SDL3/SDL.h>".}
 proc SDL_RenderClear(ren: ptr SDL_Renderer): bool {.importc: "SDL_RenderClear", header: "<SDL3/SDL.h>".}
@@ -596,6 +597,59 @@ proc pushDoubleClick*() =
   ## Mark a double-click edge on the next input frame -- the same seam
   ## `pushKeyEvent` is for tests and synthetic pointers.
   activeApp.doublePending = true
+
+## --- raw SDL event injection ---------------------------------------------
+##
+## The seams *below* `pushKeyEvent`: these put events onto SDL's own queue,
+## so the `pumpEvents` -> `beginInputFrame` plumbing itself -- event types,
+## struct layouts, keycode synthesis, the IME-mode gate -- is testable (and
+## on-screen keyboards or gamepad text could feed input the same way the WM
+## does). `pushKeyEvent` skips all of that; these do not.
+
+var pushedTexts: seq[string] = @[]
+  ## Keeps the TEXT_INPUT payload strings alive until SDL has polled them;
+  ## the queue copies the struct, older SDL versions not the string.
+
+proc pushSdlKeydown*(scancode, key, modifiers: int32) =
+  ## One key press onto the SDL queue, autorepeat-free.
+  var ev = default(SDL_Event)
+  let k = cast[ptr SDL_KeyboardEvent](addr ev)
+  k.typ = EventKeyDown
+  k.scancode = scancode
+  k.key = key
+  k.modifiers = uint16(modifiers)
+  k.down = true
+  discard SDL_PushEvent(addr ev)
+
+proc pushSdlTextInput*(text: string) =
+  ## One composed-text commit onto the SDL queue -- what the IME path
+  ## delivers when `setTextInputEnabled(true)`.
+  var ev = default(SDL_Event)
+  pushedTexts.add text
+  let t = cast[ptr SDL_TextInputEvent](addr ev)
+  t.typ = EventTextInput
+  t.text = pushedTexts[^1].toCString
+  discard SDL_PushEvent(addr ev)
+
+proc pushSdlWheel*(x, y: float32) =
+  ## Scroll-wheel motion onto the SDL queue; the integer counters mirror
+  ## the float units, as SDL3 fills them itself.
+  var ev = default(SDL_Event)
+  let w = cast[ptr SDL_MouseWheelEvent](addr ev)
+  w.typ = EventMouseWheel
+  w.x = x
+  w.y = y
+  w.integerX = int32(x)
+  w.integerY = int32(y)
+  discard SDL_PushEvent(addr ev)
+
+proc pushSdlQuit*() =
+  ## A quit event onto the SDL queue -- ends the `start` loop through the
+  ## same path a window-manager close takes.
+  var ev = default(SDL_Event)
+  let q = cast[ptr SDL_CommonEvent](addr ev)
+  q.typ = EventQuit
+  discard SDL_PushEvent(addr ev)
 
 proc drawFrame(app: var PlatformApplication; render: FrameFn) {.raises.} =
   sdlHandle(SDL_SetRenderDrawColor(app.renderer.raw, 0, 0, 0, 255), "SDL_SetRenderDrawColor()")

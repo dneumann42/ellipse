@@ -6,25 +6,8 @@
 import std/[syncio]
 
 import clay
-import ellipse/platform/platform
 import ellipse/platform/renderer
 import ellipse_ui/ui
-
-type
-  SDL_Rect {.importc: "SDL_Rect", header: "<SDL3/SDL.h>".} = object
-    x, y, w, h: int32
-  SDL_Surface {.importc: "SDL_Surface", header: "<SDL3/SDL.h>".} = object
-
-proc SDL_SetRenderDrawColor(ren: ptr SDL_Renderer; r, g, b, a: uint8): bool {.
-  importc: "SDL_SetRenderDrawColor", header: "<SDL3/SDL.h>".}
-proc SDL_RenderClear(ren: ptr SDL_Renderer): bool {.
-  importc: "SDL_RenderClear", header: "<SDL3/SDL.h>".}
-proc SDL_RenderReadPixels(ren: ptr SDL_Renderer; rect: ptr SDL_Rect): ptr SDL_Surface {.
-  importc: "SDL_RenderReadPixels", header: "<SDL3/SDL.h>".}
-proc SDL_SaveBMP(surf: ptr SDL_Surface; file: cstring): bool {.
-  importc: "SDL_SaveBMP", header: "<SDL3/SDL.h>".}
-proc SDL_DestroySurface(surf: ptr SDL_Surface) {.
-  importc: "SDL_DestroySurface", header: "<SDL3/SDL.h>".}
 
 var count = 0
 
@@ -49,10 +32,7 @@ proc frame(pointer: Vec2, down: bool) {.raises.} =
   endLayout()
 
 proc main() {.raises.} =
-  initialize()
-  initializeRenderer()
-  setCurrentContext(initContext(size(1280.0, 720.0)))
-  setMeasureText(measureText)
+  bootup()
 
   # Frame 1: neutral. Frame 2: press over the "File" button (top-left of the
   # toolbar). Frame 3+: popover open, shadow attached -- this is what we save.
@@ -60,18 +40,9 @@ proc main() {.raises.} =
   frame(vec2(30.0, 24.0), true)
   frame(vec2(60.0, 120.0), false)   # pointer moved onto the popover
 
-  let ren = sdlRenderer()
-  discard SDL_SetRenderDrawColor(ren, 12, 12, 16, 255)
-  discard SDL_RenderClear(ren)
-  drawCommands()
-
-  var full = SDL_Rect(x: 0, y: 0, w: 1280, h: 720)
-  let surf = SDL_RenderReadPixels(ren, addr full)
-  if surf == nil:
+  if not saveScreenshot("build/render_menu_shot.bmp"):
     echo "readback failed"
     return
-  discard SDL_SaveBMP(surf, "build/render_menu_shot.bmp")
-  SDL_DestroySurface(surf)
   echo "saved build/render_menu_shot.bmp"
 
 when isMainModule:

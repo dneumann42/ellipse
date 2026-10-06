@@ -106,6 +106,30 @@ proc editorSel*(id: ElementId, text: string): tuple[lo, hi: int] =
   let a = editorAnchor(id, text)
   (min(c, a), max(c, a))
 
+func lineCol*(text: string, pos: int): tuple[line, col: int] =
+  ## The 1-based line and column of `pos` in the buffer -- the status-bar
+  ## readout every text editor shows for its caret. Pure: any string, any
+  ## offset, no widget state involved.
+
+  ## Count lines walked and the last line's start as one forward scan.
+  var ln = 1
+  var bol = 0
+  var i = 0
+  while i < pos and i < text.len:
+    if text[i] == '\n':
+      inc ln
+      bol = i + 1
+    inc i
+  (ln, pos - bol + 1)
+
+func countLines*(text: string): int =
+  ## The buffer's logical line count -- 1 for empty text, one more per
+  ## newline after it.
+  result = 1
+  for c in text:
+    if c == '\n':
+      inc result
+
 proc editorSetCarets*(id: ElementId, text: string, c, a: int) =
   ## Park caret and anchor (clamped) on the editor, engine included while
   ## it holds focus, mirror always.

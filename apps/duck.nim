@@ -186,23 +186,6 @@ proc menuStrip() =
 
 ## --- status bar ---------------------------------------------------------------------
 
-func lineCol(text: string, pos: int): tuple[line, col: int] =
-  var ln = 1
-  var bol = 0
-  var i = 0
-  while i < pos and i < text.len:
-    if text[i] == '\n':
-      inc ln
-      bol = i + 1
-    inc i
-  (ln, pos - bol + 1)
-
-func countLines(text: string): int =
-  result = 1
-  for c in text:
-    if c == '\n':
-      inc result
-
 proc drawStatus() =
   let t = activeTheme
   let c = editorCaret(editorId, document.text)
@@ -267,21 +250,6 @@ proc render() {.raises.} =
 ## Same trick tests/render_shot.nim uses, but through the live app so the
 ## shot shows what the real menus/editor/dialogs actually compose to.
 
-type
-  SDL_RectX {.importc: "SDL_Rect", header: "<SDL3/SDL.h>".} = object
-    x, y, w, h: int32
-  SDL_Surface {.importc: "SDL_Surface", header: "<SDL3/SDL.h>".} = object
-
-proc SDL_SetRenderDrawColor2(ren: ptr SDL_Renderer; r, g, b, a: uint8): bool {.
-  importc: "SDL_SetRenderDrawColor", header: "<SDL3/SDL.h>".}
-proc SDL_RenderClear2(ren: ptr SDL_Renderer): bool {.
-  importc: "SDL_RenderClear", header: "<SDL3/SDL.h>".}
-proc SDL_RenderReadPixels(ren: ptr SDL_Renderer; rect: nil ptr SDL_RectX):
-    nil ptr SDL_Surface {.
-  importc: "SDL_RenderReadPixels", header: "<SDL3/SDL.h>".}
-proc SDL_SaveBMP(surf: ptr SDL_Surface; file: cstring): bool {.
-  importc: "SDL_SaveBMP", header: "<SDL3/SDL.h>".}
-
 proc typeForShot(s: string) {.raises.} =
   var i = 0
   while i < s.len:
@@ -292,14 +260,9 @@ proc typeForShot(s: string) {.raises.} =
   update()
 
 proc saveShot(path: string) {.raises.} =
-  let ren = sdlRenderer()
-  discard SDL_SetRenderDrawColor2(ren, 0, 0, 0, 255)
-  discard SDL_RenderClear2(ren)
-  render()
-  let surf = SDL_RenderReadPixels(ren, nil)
-  if surf != nil:
-    var p = path
-    discard SDL_SaveBMP(surf, p.toCString)
+  ## The platform library's readback (clear, `drawCommands`, BMP save);
+  ## black like the live app's clear color.
+  discard saveScreenshot(path, bg = rgb(0, 0, 0))
 
 proc shot(path: string) {.raises.} =
   let base =
@@ -331,11 +294,7 @@ proc shot(path: string) {.raises.} =
 
 when isMainModule:
   try:
-    initialize()
-    initializeRenderer()
-    let (w, h) = windowPixelSize()
-    setCurrentContext(initContext(size(w, h)))
-    setMeasureText(measureText)
+    bootup()
     installKeyFilter(routeKeys)
     initLists()
     # an initial file rides on the command line like notepad's

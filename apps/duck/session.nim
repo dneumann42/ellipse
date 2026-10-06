@@ -18,6 +18,7 @@ import clay
 import ellipse_ui/ui
 import ellipse_ui/widgets
 
+import ellipse/clock
 import ellipse/platform/platform
 
 import ./doc
@@ -170,25 +171,17 @@ proc doGoto*() =
 
 ## --- stamp ---------------------------------------------------------------------
 
-type CTm {.importc: "struct tm", header: "<time.h>".} = object
-  tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday, tm_isdst: int
-
-proc c_time(t: nil pointer): int64 {.importc: "time", header: "<time.h>".}
-proc c_localtime(t: ptr int64): nil ptr CTm {.
-  importc: "localtime", header: "<time.h>".}
-
 func pad2(n: int): string =
   if n < 10: "0" & $n else: $n
 
 proc stamp*(): string =
-  ## The F5 time/date, in Notepad's shape: MM/DD/YYYY HH:MM.
-  var nowT = c_time(nil)
-  let tm = c_localtime(addr nowT)
-  if tm == nil:
+  ## The F5 time/date, in Notepad's shape: MM/DD/YYYY HH:MM. The broken-down
+  ## wall clock itself comes from `ellipse/clock`.
+  let t = clock.now()
+  if t.year == 0:
     return ""
-  result = pad2(tm[].tm_mon + 1) & "/" & pad2(tm[].tm_mday) & "/" &
-    $((tm[].tm_year + 1900)) & " " & pad2(tm[].tm_hour) & ":" &
-    pad2(tm[].tm_min)
+  result = pad2(t.month) & "/" & pad2(t.day) & "/" & $t.year & " " &
+    pad2(t.hour) & ":" & pad2(t.minute)
 
 proc doStamp*() =
   editorInsert(editorId, document.text, stamp())

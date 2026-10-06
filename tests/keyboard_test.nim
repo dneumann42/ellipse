@@ -12,58 +12,6 @@ import std/[syncio, envvars]
 
 import ellipse/platform/platform
 
-type
-  SDL_EventT {.importc: "SDL_Event", header: "<SDL3/SDL.h>".} = object
-
-  # Mirror layouts of the SDL3 event structs, padded to sizeof(SDL_Event)
-  # so SDL_PushEvent's 128-byte copy stays in bounds.
-  TextInputRaw = object
-    typ: uint32
-    reserved: uint32
-    timestamp: uint64
-    windowId: uint32
-    text: cstring
-    pad: array[96, byte]
-
-  KeyDownRaw = object
-    typ: uint32
-    reserved: uint32
-    timestamp: uint64
-    windowId: uint32
-    which: uint32
-    scancode: int32
-    key: int32
-    mods: uint16
-    raw: uint16
-    down: bool
-    repeat: bool
-    pad: array[90, byte]
-
-  WheelRaw = object
-    typ: uint32
-    reserved: uint32
-    timestamp: uint64
-    windowId: uint32
-    which: uint32
-    x: float32
-    y: float32
-    direction: int32
-    mouseX: float32
-    mouseY: float32
-    integerX: int32
-    integerY: int32
-    pad: array[76, byte]
-
-  QuitRaw = object
-    typ: uint32
-    reserved: uint32
-    timestamp: uint64
-    windowId: uint32
-    pad: array[108, byte]
-
-proc SDL_PushEvent(event: ptr SDL_EventT): bool {.
-  importc: "SDL_PushEvent", header: "<SDL3/SDL.h>".}
-
 var failures = 0
 var passed = 0
 
@@ -75,14 +23,8 @@ proc expect(cond: bool, msg: string) =
     echo "FAILED: ", msg
 
 const
-  EvKeyDown = 0x00000300'u32
-  EvTextInput = 0x00000303'u32
-  EvMouseWheel = 0x00000403'u32
-  EvQuit = 0x00000100'u32
   ModS = 0x00000003'i32     # KMOD_SHIFT
   ModC = 0x000000C0'i32     # KMOD_CTRL
-
-var hello = "hi"   # must outlive the queue copy for non-duping SDL versions
 
 var seenEvents: seq[KeyEvent] = @[]
 var seenImeMode: seq[KeyEvent] = @[]
@@ -91,13 +33,7 @@ var seenWheel: tuple[x, y: float32]
 var phase = 0
 
 proc pushKeyboard(scancode, key, modifiers: int32) =
-  var e = KeyDownRaw(typ: EvKeyDown, scancode: scancode, key: key,
-    mods: uint16(modifiers), down: true)
-  discard SDL_PushEvent(cast[ptr SDL_EventT](addr e))
-
-proc pushQuit() =
-  var q = QuitRaw(typ: EvQuit)
-  discard SDL_PushEvent(cast[ptr SDL_EventT](addr q))
+  pushSdlKeydown(scancode, key, modifiers)
 
 proc update() {.raises.} =
   beginInputFrame()
@@ -117,7 +53,7 @@ proc update() {.raises.} =
   of 2:
     seenReEnabled = keyEvents()
     phase = 3
-    pushQuit()
+    pushSdlQuit()
   else:
     discard
 
@@ -131,15 +67,12 @@ proc main() {.raises.} =
   # printable via the TEXT_INPUT path, a Ctrl-A chord, Backspace, then two
   # synthesized keydowns: bare 'a' (keycode set) and shift+B (keycode unset,
   # exercising the SDL_GetKeyFromScancode fallback) + a wheel notch down.
-  var helloC = hello.toCString
-  var t = TextInputRaw(typ: EvTextInput, text: helloC)
-  discard SDL_PushEvent(cast[ptr SDL_EventT](addr t))
+  pushSdlTextInput("hi")
   pushKeyboard(4, 1, ModC)         # Ctrl+A -> kevLetter chord, no text
   pushKeyboard(42, 8, 0)           # Backspace
   pushKeyboard(4, 97, 0)           # 'a' -> synthesized kevText
   pushKeyboard(5, 0, ModS)         # B, keycode unset -> keymap fallback
-  var w = WheelRaw(typ: EvMouseWheel, y: 2.0, integerY: 2)
-  discard SDL_PushEvent(cast[ptr SDL_EventT](addr w))
+  pushSdlWheel(0.0, 2.0)
 
   start(update, render)   # three pumped frames, then the pushed quit lands
 

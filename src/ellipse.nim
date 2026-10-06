@@ -338,11 +338,7 @@ proc render() {.raises.} =
 when isMainModule:
   try:
     fillLists()
-    initialize()
-    initializeRenderer()
-    let (w, h) = windowPixelSize()
-    setCurrentContext(initContext(size(w, h)))
-    setMeasureText(measureText)
+    bootup()
     start(update, render)
   except ErrorCode:
     discard

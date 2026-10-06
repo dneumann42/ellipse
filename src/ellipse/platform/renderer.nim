@@ -33,6 +33,8 @@ type
   SDL_Rect {.importc: "SDL_Rect", header: "<SDL3/SDL.h>".} = object
     x, y, w, h: int32
 
+  SDL_Surface {.importc: "SDL_Surface", header: "<SDL3/SDL.h>".} = object
+
   SDL_FColor {.importc: "SDL_FColor", header: "<SDL3/SDL.h>".} = object
     r, g, b, a: float32
 
@@ -60,6 +62,15 @@ proc SDL_RenderGeometry(ren: ptr SDL_Renderer; texture: nil pointer;
   importc: "SDL_RenderGeometry", header: "<SDL3/SDL.h>".}
 proc SDL_SetRenderClipRect(ren: ptr SDL_Renderer; rect: nil ptr SDL_Rect): bool {.
   importc: "SDL_SetRenderClipRect", header: "<SDL3/SDL.h>".}
+proc SDL_RenderClear(ren: ptr SDL_Renderer): bool {.
+  importc: "SDL_RenderClear", header: "<SDL3/SDL.h>".}
+proc SDL_RenderReadPixels(ren: ptr SDL_Renderer; rect: nil ptr SDL_Rect):
+    nil ptr SDL_Surface {.
+  importc: "SDL_RenderReadPixels", header: "<SDL3/SDL.h>".}
+proc SDL_SaveBMP(surf: ptr SDL_Surface; file: cstring): bool {.
+  importc: "SDL_SaveBMP", header: "<SDL3/SDL.h>".}
+proc SDL_DestroySurface(surf: ptr SDL_Surface) {.
+  importc: "SDL_DestroySurface", header: "<SDL3/SDL.h>".}
 
 proc TTF_Init(): bool {.importc: "TTF_Init", header: "<SDL3_ttf/SDL_ttf.h>".}
 proc TTF_OpenFont(file: cstring; ptsize: float32): nil ptr TTF_Font {.
@@ -387,6 +398,22 @@ proc measureText*(text: string; cfg: TextConfig): Size =
   return Size(width: float32(text.len) * float32(cfg.fontSize),
               height: float32(cfg.fontSize))
 
+proc bootup*(width, height: float32 = 0.0) {.raises.} =
+  ## The whole GUI startup dance in one call: platform window + renderer,
+  ## a clay context at `width`x`height` (0 takes the live window size) and
+  ## this renderer's `measureText` wired into clay's layout. The one
+  ## sequence every ellipse app's `main` repeats.
+  initialize()
+  initializeRenderer()
+  var w = width
+  var h = height
+  if w <= 0.0 or h <= 0.0:
+    let (winW, winH) = windowPixelSize()
+    w = winW
+    h = winH
+  setCurrentContext(initContext(size(w, h)))
+  setMeasureText(measureText)
+
 proc drawCommands*() {.raises.} =
   ## Paint the current context's commands from the last `endLayout`, in
   ## order. Call once per frame from the app's render hook (after the
@@ -435,3 +462,25 @@ proc drawCommands*() {.raises.} =
           discard SDL_SetRenderClipRect(ren, nil)
     of renderImage, renderCustom, renderOverlayStart, renderOverlayEnd:
       discard   # not produced by the built-in UI (yet)
+
+proc saveScreenshot*(path: string; width, height: int32 = 0;
+                     bg: Color = rgb(12, 12, 16)): bool {.raises.} =
+  ## Headless inspection shot: clear the platform renderer with `bg`, paint
+  ## the last layout pass with `drawCommands`, read the framebuffer back and
+  ## write `path` as a BMP. `width`/`height` of 0 grab the whole render
+  ## target. Returns false when the readback or the write failed -- the
+  ## offscreen-driver idiom every shot harness in this repo used to
+  ## hand-bind against SDL for.
+  let ren = sdlRenderer()
+  setColor(ren, bg)
+  discard SDL_RenderClear(ren)
+  drawCommands()
+  var full = SDL_Rect(x: 0, y: 0, w: width, h: height)
+  let surf = if width > 0 and height > 0: SDL_RenderReadPixels(ren, addr full)
+             else: SDL_RenderReadPixels(ren, nil)
+  if surf == nil:
+    return false
+  var p = path
+  result = SDL_SaveBMP(surf, p.toCString)
+  SDL_DestroySurface(surf)
+
