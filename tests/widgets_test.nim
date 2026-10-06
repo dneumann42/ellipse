@@ -381,6 +381,53 @@ proc main() {.raises.} =
   pressChord('k')                        # C-k: kill the rest of that line
   expect(noteText == "ab\nX!\nc\nef",
     "multilineField: C-k kills to line end, got " & $noteText)
+
+  # --- multiline field: grows a line per newline, scrolls past maxLines ----------
+  # mono metrics: an 18px line pitch, 8px field padding top and bottom. The
+  # 600px root overflows and would squeeze the field to its `rows` minimum,
+  # so give the layout room while measuring growth.
+  setLayoutDimensions(size(800.0, 2000.0))
+  beginInputFrame()
+  frame()
+  let lineH = 18.0'f32
+  let padH = 16.0'f32
+  expect(nearly(elementData(mlId).box.height, 4.0 * lineH + padH),
+    "multilineField: four lines tall, got " & $elementData(mlId).box.height)
+  pressKey(kevDown)                      # onto "ef"
+  pressChord('e')                        # its end, the buffer's end
+  pressKey(kevEnter)                     # a trailing newline opens line five
+  beginInputFrame()
+  frame()
+  expect(noteText == "ab\nX!\nc\nef\n",
+    "multilineField: trailing newline typed, got " & $noteText)
+  expect(nearly(elementData(mlId).box.height, 5.0 * lineH + padH),
+    "multilineField: a trailing newline grows the box, got " &
+    $elementData(mlId).box.height)
+  var n = 0
+  while n < 6:                           # eleven lines: past maxLines = 8
+    pressKey(kevEnter)
+    inc n
+  beginInputFrame()
+  frame()
+  beginInputFrame()
+  frame()
+  expect(nearly(elementData(mlId).box.height, 8.0 * lineH + padH),
+    "multilineField: height caps at maxLines, got " &
+    $elementData(mlId).box.height)
+  let mlScroll = scrollContainerData(mlId)
+  expect(mlScroll.found and nearly(mlScroll.position.y, -3.0 * lineH),
+    "multilineField: scrolls to keep the caret line in view, got " &
+    $mlScroll.position.y)
+  setScrollPosition(mlId, vec2(0.0, 0.0))   # the wheel, back to the top
+  beginInputFrame()
+  frame()
+  beginInputFrame()
+  frame()
+  expect(nearly(scrollContainerData(mlId).position.y, 0.0),
+    "multilineField: a still caret lets the text scroll, got " &
+    $scrollContainerData(mlId).position.y)
+  noteText = "ab\nX!\nc\nef"
+  setLayoutDimensions(size(800.0, 600.0))
   click(tfId)                            # blur commits the buffer
 
   # --- focus: every control is a Tab stop, in layout order ----------------------

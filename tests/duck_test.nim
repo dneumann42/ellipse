@@ -219,6 +219,62 @@ proc main() {.raises.} =
   pressKey(kevEscape)
   expect(text == "ab\n\ncd", "editor: Escape does not mutate the document")
 
+  # --- Enter on an empty page moves the caret down a line ----------------------------
+  text = ""
+  frame()
+  editorPlaceCaret(eid, text, 0)
+  pressKey(kevEnter)
+  pressKey(kevEnter)
+  frame()
+  let tel = ElementId(id: textChildId(eid.id))
+  expect(text == "\n\n" and caretPos() == 2,
+    "editor: two Enters on an empty page, got " & $text.len)
+  expect(nearly(boxOf(tel).height, 54.0),
+    "editor: newline-only text lays out a line each, got " &
+    $boxOf(tel).height)
+
+  # --- the view follows the caret past the bottom edge -------------------------------
+  var tall = ""
+  var j = 0
+  while j < 60:
+    tall.add "\n"
+    inc j
+  text = tall
+  frame()
+  editorPlaceCaret(eid, text, text.len)   # the empty line after the last newline
+  frame()
+  frame()
+  let esd = scrollContainerData(eid)
+  let ebox = boxOf(eid)
+  expect(esd.found and esd.position.y < 0.0,
+    "editor: scrolled down to the caret, got " & $esd.position.y)
+  let caretBot = boxOf(tel).y + 61.0'f32 * 18.0'f32
+  expect(caretBot <= ebox.y + ebox.height + 0.5,
+    "editor: the last line is inside the view, bottom " & $caretBot &
+    " vs " & $(ebox.y + ebox.height))
+  editorPlaceCaret(eid, text, 0)
+  frame()
+  frame()
+  expect(nearly(scrollContainerData(eid).position.y, 0.0),
+    "editor: back at the top scrolls up again, got " &
+    $scrollContainerData(eid).position.y)
+  # The wheel (or the scrollbar) moves the page while the caret holds still:
+  # the caret must not drag the view back.
+  setScrollPosition(eid, vec2(0.0, -100.0))
+  frame()
+  frame()
+  frame()
+  expect(nearly(scrollContainerData(eid).position.y, -100.0),
+    "editor: a still caret lets the page scroll, got " &
+    $scrollContainerData(eid).position.y)
+  pressKey(kevRight)                      # a moving caret pulls it back
+  frame()
+  frame()
+  expect(nearly(scrollContainerData(eid).position.y, 0.0),
+    "editor: moving the caret returns the view to it, got " &
+    $scrollContainerData(eid).position.y)
+  editorPlaceCaret(eid, text, 3)   # where the Enter test left it: "xyz"'s end below
+
   # --- stats flags --------------------------------------------------------------------
   text = "xyz"
   frame()

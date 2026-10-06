@@ -237,8 +237,8 @@ proc drawGallery() =
           artist = textField(hashId("tf-artist"), artist, "Your name")
         Labeled(label = "Notes"):
           notes = multilineField(hashId("tf-notes"), notes,
-                                 "Leave a note...", rows = 3)
-      caption("Enter commits, Escape reverts, a click outside commits too. Caret and selection live in the widget; the text is yours.")
+                                 "Leave a note...", rows = 3, maxLines = 6)
+      caption("Enter commits, Escape reverts, a click outside commits too. Caret and selection live in the widget; the text is yours. Notes grows with each new line up to six, then scrolls.")
       caption("Emacs bindings: C-a/C-e line edges, C-b/C-f chars, M-b/M-f words, Up/Down and C-p/C-n lines, C-k/C-u/C-w/M-d kill, C-y yank, C-d/C-h delete, Enter commit, C-g or Escape cancel.")
 
     Section(title = "Numbers"):

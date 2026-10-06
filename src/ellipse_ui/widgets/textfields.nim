@@ -18,6 +18,7 @@ import ../ui
 
 import ellipse/platform/platform   ## KeyEvent/kevEnter for the multiline remap
 import ./common
+import ./scrollbars
 
 widget textField(id: ElementId, text: string, placeholder = "",
                 fontSize = activeTheme.text.control, width = grow(),
@@ -51,10 +52,12 @@ widget textField(id: ElementId, text: string, placeholder = "",
 
 widget multilineField(id: ElementId, text: string, placeholder = "",
                       fontSize = activeTheme.text.control, rows = 4,
-                      width = grow(), tabIndex = 0) -> string:
-  ## The same edit engine over a taller, word-wrapped box. Enter inserts a
-  ## newline instead of committing; a click outside (or Tab) leaves the
-  ## field.
+                      maxLines = 8, width = grow(), tabIndex = 0) -> string:
+  ## The same edit engine over a word-wrapped box that grows with its
+  ## text: at least `rows` lines tall, at most `maxLines` (0: no cap).
+  ## Past the cap the text scrolls -- wheel, scrollbar, and the caret
+  ## pulls its line into view. Enter inserts a newline instead of
+  ## committing; a click outside (or Tab) leaves the field.
   emits TextChanged
   var edited = text
   if fieldFocus(id, text, tabIndex):
@@ -75,11 +78,22 @@ widget multilineField(id: ElementId, text: string, placeholder = "",
   let t = activeTheme
   let cfg = TextConfig(fontSize: fontSize, color: t.palette.textColor)
   let (shown, color) = fieldText(edited, placeholder, focused(id))
-  item(id, fieldDecl(id, width,
-      fixedPx(float32(rows) * t.metrics.textRowHeight), dir = topToBottom)):
+  let textEl = ElementId(id: textChildId(id.id))
+  let pitch = linePitch(cfg)
+  let padY = float32(t.metrics.padFieldY)
+  let minH = float32(max(rows, 1)) * pitch + 2.0 * padY
+  let maxH = if maxLines > 0: max(float32(maxLines) * pitch + 2.0 * padY, minH)
+             else: 0.0'f32
+  item(id, fieldDecl(id, width, fit(min = minH, max = maxH),
+      dir = topToBottom)
+      .clip(horizontal = false, vertical = true,
+            childOffset = currentScrollOffset())):
     textElement(shown, TextConfig(fontSize: fontSize, color: color))
     if focused(id):
-      caretOverlay(textChildId(id.id), edited, cfg)
+      caretOverlay(textEl.id, edited, cfg)
+      scrollCaretIntoView(id, textEl, edited, cfg, caretPos(),
+                          float32(t.metrics.padFieldX), padY)
+    scrollbar(localId("multiline.bar"), id)
   if edited != text:
     emit TextChanged(id: id, text: edited)
   result = edited

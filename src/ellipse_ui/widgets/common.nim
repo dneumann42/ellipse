@@ -584,8 +584,8 @@ proc caretGeom*(text: string, pos: int, cfg: TextConfig,
   ## lies on exactly the grid the renderer draws. Word-wrapped text maps
   ## `pos` onto its wrapped line and measures the prefix before it;
   ## no-wrap text breaks on hard newlines, its box as wide as the longest
-  ## line. A caret right after a trailing newline belongs to the virtual
-  ## empty line below.
+  ## line. A caret right after a trailing newline sits on the empty last
+  ## line `wrappedLines` lays out for it.
   let ctx = currentContext()
   if not ctx.measureTextInstalled():
     return CaretGeom()
@@ -614,11 +614,6 @@ proc caretGeom*(text: string, pos: int, cfg: TextConfig,
         result.x = measureTextCached(ctx, substr(text, int(ln.start), p - 1),
                                      cfg).unwrapped.width
       result.lineIdx = li
-      # A caret right after a trailing newline belongs to the empty line
-      # the box does not render.
-      if p == text.len and p > 0 and text[p - 1] == '\n':
-        result.x = 0.0
-        result.lineIdx = lines.len
     result.y = yBase + float32(result.lineIdx) * lineHeight
   elif cfg.wrap == noWrap and m.containsNewlines:
     # No-wrap multi-line: hard newlines only; measure within the segment.
@@ -671,6 +666,91 @@ proc caretOverlay*(textElId: uint32, text: string, cfg: TextConfig,
                                     parent: pointLeftTop),
               capture = passThroughPointer))
   closeElement()
+
+type FollowMark = object
+  id: uint32
+  pos: int
+  len: int
+  frames: int   ## frames left to keep chasing the caret
+
+const followFrames = 3   ## geometry lags a frame; chase until it settles
+
+var followMarks: seq[FollowMark] = @[]
+
+proc caretNeedsFollow(id: uint32, pos, len: int): bool =
+  ## Whether `id`'s caret should pull the view this frame: only after the
+  ## caret or the text changed (and for a few frames after, while last
+  ## frame's layout catches up). A still caret leaves the view alone, so
+  ## the wheel and scrollbar can move the page away from it.
+  for i in 0 ..< followMarks.len:
+    if followMarks[i].id == id:
+      if followMarks[i].pos != pos or followMarks[i].len != len:
+        followMarks[i].pos = pos
+        followMarks[i].len = len
+        followMarks[i].frames = followFrames
+      if followMarks[i].frames > 0:
+        dec followMarks[i].frames
+        return true
+      return false
+  followMarks.add FollowMark(id: id, pos: pos, len: len,
+                             frames: followFrames - 1)
+  true
+
+proc scrollCaretIntoView*(id, textEl: ElementId, text: string,
+                          cfg: TextConfig, pos: int, padX, padY: float32,
+                          followX = false) =
+  ## Nudge the scroll container `id` so the caret's line (and column, with
+  ## `followX` for unwrapped text) sits inside its viewport inset by
+  ## `padX`/`padY` -- what a real editor does on typing, arrowing, and a
+  ## programmatic jump. Only a caret that moved (or text that changed)
+  ## pulls the view; call it every frame. `textEl` is the scrolled text
+  ## element; geometry is last frame's, like `caretOverlay`.
+  if not caretNeedsFollow(id.id, pos, text.len):
+    return
+  let sd = scrollContainerData(id)
+  let prev = elementData(textEl)
+  if not sd.found or not prev.found:
+    return
+  let ctx = currentContext()
+  if not ctx.measureTextInstalled():
+    return
+  let g = caretGeom(text, pos, cfg, prev.box.width)
+  if not g.found:
+    return
+  let cbox = elementData(id).box
+  var posv = sd.position
+  let lineTop = prev.box.y + g.y
+  let lineBot = lineTop + g.barH
+  let innerTop = cbox.y + padY
+  let innerBot = cbox.y + cbox.height - padY
+  # Scroll positions run negative as the content moves up: showing a line
+  # below the viewport *subtracts* the overshoot.
+  if lineTop < innerTop:
+    posv.y += innerTop - lineTop
+  elif lineBot > innerBot:
+    posv.y -= lineBot - innerBot
+  if followX:
+    let cx = prev.box.x + g.x
+    let innerLeft = cbox.x + padX
+    let innerRight = cbox.x + cbox.width - padX
+    if cx < innerLeft:
+      posv.x += innerLeft - cx
+    elif cx > innerRight - 2.0:
+      posv.x -= cx - (innerRight - 2.0)
+  if posv.x != sd.position.x or posv.y != sd.position.y:
+    setScrollPosition(id, posv)
+
+proc linePitch*(cfg: TextConfig): float32 =
+  ## The height one text line takes under `cfg` -- the unit `rows` /
+  ## `maxLines` count in. Falls back to the theme's `textRowHeight` before
+  ## a measurer is installed.
+  if cfg.lineHeight > 0:
+    return float32(cfg.lineHeight)
+  let ctx = currentContext()
+  if not ctx.measureTextInstalled():
+    return activeTheme.metrics.textRowHeight
+  let h = measureTextCached(ctx, "Ag", cfg).unwrapped.height
+  if h > 0: h else: activeTheme.metrics.textRowHeight
 
 ## --- element brackets ----------------------------------------------------------
 ##

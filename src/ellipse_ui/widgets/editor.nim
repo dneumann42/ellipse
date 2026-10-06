@@ -55,6 +55,8 @@ type
     fontSize*: uint16 = 0  ## 0 = the live theme's `control` size (zoom lives here)
     blocked*: bool = false ## a modal owns keyboard & pointer: paint-only
     readOnly*: bool = false
+    maxLines*: int = 0     ## 0: fill the parent, scrolling once the text
+                           ## outgrows it; N: hug the text, up to N lines
 
   EditorStats* = object
     ## What one editor frame produced.
@@ -499,42 +501,6 @@ proc selectionOverlay*(textElId: uint32, text: string, cfg: TextConfig,
       x1 = x0 + space
     selRectAt(textElId, li, x0, float32(li) * pitch, x1 - x0, pitch, fill)
 
-proc scrollCaretIntoView(id, textEl: ElementId, text: string,
-                         cfg: TextConfig, wrapped: bool, pos: int) =
-  ## Nudge the editor's scroll container so the caret's line (and column,
-  ## without word wrap) sits inside the padded viewport -- what a real
-  ## editor does on typing, arrowing, and a programmatic jump.
-  let sd = scrollContainerData(id)
-  let prev = elementData(textEl)
-  if not sd.found or not prev.found:
-    return
-  let ctx = currentContext()
-  if not ctx.measureTextInstalled():
-    return
-  let g = caretGeom(text, pos, cfg, prev.box.width)
-  if not g.found:
-    return
-  let cbox = elementData(id).box
-  var posv = sd.position
-  let lineTop = prev.box.y + g.y
-  let lineBot = lineTop + g.barH
-  let innerTop = cbox.y + float32(editorPad)
-  let innerBot = cbox.y + cbox.height - float32(editorPad)
-  if lineTop < innerTop:
-    posv.y += lineTop - innerTop
-  elif lineBot > innerBot:
-    posv.y += lineBot - innerBot
-  if not wrapped:
-    let cx = prev.box.x + g.x
-    let innerLeft = cbox.x + float32(editorPad)
-    let innerRight = cbox.x + cbox.width - float32(editorPad)
-    if cx < innerLeft:
-      posv.x += cx - innerLeft
-    elif cx > innerRight - 2.0:
-      posv.x += cx - (innerRight - 2.0)
-  if posv.x != sd.position.x or posv.y != sd.position.y:
-    setScrollPosition(id, posv)
-
 proc pageStep(s: string, cfg: TextConfig, id, textEl: ElementId,
               up: bool, extend: bool) =
   ## PageUp/PageDown: jump the caret a viewport of lines, keeping its
@@ -690,7 +656,13 @@ widget editor(id: ElementId, text: string,
     mAnchor = anchorPos()
 
   # ---- layout & overlays ---------------------------------------------------
-  item(id, fieldDecl(id, grow(), grow(), dir = topToBottom,
+  let pad2 = float32(2 * editorPad)
+  let height =
+    if opts.maxLines > 0:
+      let pitch = linePitch(cfg)
+      fit(min = pitch + pad2, max = float32(opts.maxLines) * pitch + pad2)
+    else: grow()
+  item(id, fieldDecl(id, grow(), height, dir = topToBottom,
       padding = padAll(editorPad))
       .clip(horizontal = not opts.wrap, vertical = true,
             childOffset = currentScrollOffset())):
@@ -705,8 +677,9 @@ widget editor(id: ElementId, text: string,
       selectionOverlay(textEl.id, s, cfg, slo, shi)
       if focused(id) and not opts.blocked:
         caretOverlay(textEl.id, s, cfg, t.palette.textColor)
-      scrollCaretIntoView(id, textEl, s, cfg, opts.wrap,
-                          editorCaret(id, s))
+      scrollCaretIntoView(id, textEl, s, cfg, editorCaret(id, s),
+                          float32(editorPad), float32(editorPad),
+                          followX = not opts.wrap)
     scrollbar(localId("editor.bar"), id)
 
   let moved = editorCaret(id, s) != caretBefore or

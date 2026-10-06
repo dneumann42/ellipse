@@ -107,6 +107,11 @@ proc measureTextCached*(ctx: Context; text: string; cfg: TextConfig): Measuremen
     m.minWidth = max(dims.width, m.minWidth)
 
   measuredWidth = max(lineWidth, measuredWidth) - float32(cfg.letterSpacing)
+  if measuredHeight == 0 and text.len > 0:
+    # Only newlines and spaces: no word carried a height, yet every line
+    # still needs the font's pitch -- else a run of empty lines collapses
+    # to nothing and a caret on them never leaves the top.
+    measuredHeight = ctx.measureText(" ", cfg).height
   m.unwrapped = Size(width: measuredWidth, height: measuredHeight)
   result = m
   ctx.textCache[key] = result
@@ -179,6 +184,12 @@ proc wrappedLines*(ctx: Context; text: string; cfg: TextConfig;
     result.add TextLine(
       start: lineStart, length: lineLength,
       dims: Size(width: lineWidth - float32(cfg.letterSpacing), height: lineHeight))
+  elif text.len > 0 and text[^1] == '\n':
+    # A trailing newline opens an empty last line. Clay drops it; an editor
+    # needs it laid out, so the box grows when Enter is pressed at the end
+    # and the caret below the last newline has a line to sit on.
+    result.add TextLine(start: int32(text.len), length: 0,
+                        dims: Size(width: 0, height: lineHeight))
 
 proc wrapTextElement*(ctx: Context; el: var LayoutElement) =
   ## Break `el`'s text into lines that fit `el.dims.width`, filling

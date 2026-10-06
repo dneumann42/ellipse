@@ -311,18 +311,20 @@ proc setScrollPosition*(ctx: Context; id: ElementId; position: Vec2) =
   ## Externally drive a scroll container's position (scrollbars, auto-scroll
   ## to a focused item). Direct: both the spring target and the visible
   ## position snap, so a held scrollbar drag tracks the pointer 1:1.
-  ## Clamped against last frame's content size.
+  ## Clamped against last frame's content size and viewport box -- not the
+  ## element's live dims, which are still unsized when a widget calls this
+  ## mid-declaration.
   for i in 0 ..< ctx.scrollDatas.len:
     let sd = ctx.scrollDatas[i]
     if sd.elementId == id.id:
       let el = ctx.elements[sd.elementIndex]
       var p = position
       if el.decl.clip.vertical:
-        p.y = max(min(p.y, 0), -(sd.contentSize.height - el.dims.height))
+        p.y = max(min(p.y, 0), -max(sd.contentSize.height - sd.box.height, 0))
       else:
         p.y = 0
       if el.decl.clip.horizontal:
-        p.x = max(min(p.x, 0), -(sd.contentSize.width - el.dims.width))
+        p.x = max(min(p.x, 0), -max(sd.contentSize.width - sd.box.width, 0))
       else:
         p.x = 0
       ctx.scrollDatas[i].position = p
