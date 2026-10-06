@@ -55,3 +55,84 @@ with any changes the handler made to the payload.
 =eventLog()= lists the last frame's emits with the emitting widget, the
 widgets each one passed and the ones that handled it -- the sections of
 the UI an event invalidates.
+
+* Frame pacing
+
+The loop runs a frame only when something asks for one, and then at the
+display rate (vsync). Between frames it sleeps in the event queue.
+
+- input :: keys, clicks, wheel and window events. Pointer motion counts
+  only when it changes the set of elements under the pointer, a button is
+  held, or the last frame called =trackPointer()=.
+- deadlines :: a widget's =refresh= guard schedules the frame it is next
+  due in; the caret blink schedules its flips.
+- animation :: =requestFrame()= asks for the next frame; =approach= eases a
+  value and asks until it lands; scroll springs and the wheel glide ask
+  while they move.
+- resize :: the first resize event opens a gesture. Frames then run at
+  vsync, painting straight to the backbuffer, until the window has held
+  still for 200 ms (=resizeStarted()= / =resizing()= / =resizeFinished()=).
+- settling :: a frame whose output changed asks for one more, since
+  immediate-mode widgets read the previous frame's geometry.
+
+Each frame still runs the whole widget tree. A widget guards its costly or
+slow work with a cadence, and the loop wakes for whichever guard is due
+next:
+
+#+begin_src nim
+
+  widget Clock():
+    refresh every(1000, wall = true):   # on the second, every second
+      clockText = formatClock(now())
+    text(clockText)
+
+  widget Memory():
+    item(hashId("mem"), row(...)):
+      refresh onHover(every(1000)):     # only while the pointer is over it
+        memText = memLine()
+      text(memText)
+
+  widget Title():
+    refresh "title", onInput():         # first frame + invalidate only
+      titleText = wm.focusedTitle()
+    text(titleText)
+
+  # elsewhere, when the WM reports a focus change:
+  invalidate("title")                   # due next frame, and wakes the loop
+
+#+end_src
+
+Cadences: =everyFrame()=, =every(ms, wall = false)=, =onInput()=,
+=onHover(rate)= and =c.whileHovered(rate)=. Ticks sit on a fixed grid: a
+late frame does not shift the schedule, and a long sleep does not replay
+the ticks it missed.
+
+The renderer keeps the last picture in a texture. It diffs each frame's
+render commands against the previous frame's (=ellipse/platform/damage=),
+repaints only the damaged rectangles, and presents nothing when no command
+changed.
+
+=ELLIPSE_FRAME_STATS=1= logs each second's frames, presents, why each
+frame woke, and the pixels repainted. =make run_bar= runs the showcase.
+
+** Debug mode
+
+An app opts in with =installDebugMode()= (=ellipse_ui/debug=) after
+=bootup()=; duck, the gallery and the bar do. F1 then toggles an overlay,
+and the key never reaches widgets or app chords. The overlay shows:
+
+- every widget's box, labelled =Name Nfps rM=. =N= is how many times a
+  second the widget's own painted output changed. =M= is how often its
+  =refresh= guards ran. A widget that repainted in the frame on screen is
+  tinted;
+- the window's frames, repaints and repainted pixels per second, the
+  display rate, and how long ago the last frame ran;
+- a 5-second timeline with one tick per frame (each full re-run of the
+  UI), coloured by why it ran: input, timer, animation, settle or resize.
+  A tick is tall when the frame repainted. Below it is a lane per busy
+  widget: a square where it repainted, a bar where it refreshed.
+
+The overlay doesn't disturb what it measures. It is painted onto the
+backbuffer after layout, outside the app's commands and damage tracking.
+It updates itself twice a second with render-only passes that never run
+=update=, so an idle app reads =frames 0/s= with the overlay up.

@@ -18,7 +18,8 @@
 ## Chords:         Ctrl+N/O/S, Ctrl+Shift+S, Ctrl+F/H/G, Ctrl+Z/Y,
 ##                 Ctrl+X/C/V/A, F3/F5, Ctrl+wheel or Ctrl+Plus/Minus/0
 ##                 to zoom, Emacs bindings inside the document (see
-##                 ellipse_ui/widgets/common).
+##                 ellipse_ui/widgets/common), F1 the debug overlay
+##                 (ellipse_ui/debug).
 
 import std/[syncio, strutils, os, envvars, cmdline]
 
@@ -28,6 +29,7 @@ import ellipse/platform/platform
 import ellipse/platform/renderer
 import ellipse_ui/ui
 import ellipse_ui/widgets
+import ellipse_ui/debug
 
 import duck/doc
 import duck/session
@@ -97,7 +99,6 @@ proc appChords() =
         of '-': zoomBy(-2)
         of '0': zoomSize = baseZoom
         else: discard
-    of kevF1: beginAbout()
     of kevF3: doFind(ev.shift)
     of kevF5: doStamp()
     of kevF4:
@@ -209,7 +210,7 @@ widget DuckMenus():
     menuSeparator()
     discard menuItem("Status Bar", if statusOn: "✓" else: "")
   menu("Help") do():
-    discard menuItem("View Help", "F1")
+    discard menuItem("View Help", "")
     discard menuItem("About Duck", "")
 
 proc menuStrip() =
@@ -335,6 +336,7 @@ proc shot(path: string) {.raises.} =
 when isMainModule:
   try:
     bootup()
+    installDebugMode()   # F1: widget boxes, per-widget fps, frame timeline
     installKeyFilter(routeKeys)
     initLists()
     # an initial file rides on the command line like notepad's

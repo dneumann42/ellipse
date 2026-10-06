@@ -17,6 +17,9 @@ export focus
 import ./events
 export events
 
+import ./cadence
+export cadence
+
 ## --- wheel feel ----------------------------------------------------------------
 ##
 ## Scroll feel borrowed from the gothivania HUD (`src/hud/gui.cpp`): a fast
@@ -24,10 +27,10 @@ export events
 ## farther (acceleration, capped), and the accumulated notch count bleeds
 ## into the engine over an exponential ease (deceleration / glide). The
 ## clay-side spring on top of that adds the overshoot-and-settle at the
-## ends. Fixed 60 Hz update ticks, so `dt` is a constant.
+## ends. Frames run at whatever rate the pacer picks, so every step takes the
+## frame's real `frameDelta()`.
 
 const
-  frameDt* = 1.0'f32 / 60.0'f32
   wheelBaseScale = 3.0'f32    ## pixels per notch at rest (x the engine's 10)
   wheelAccelGain = 1.4'f32    ## extra scale per accumulated notch velocity
   wheelAccelMax = 6.0'f32     ## cap of the velocity-driven scale
@@ -130,13 +133,37 @@ proc squeeze*(pad: Padding, press: bool): Padding =
     if result.bottom >= off:
       result.bottom -= off
 
+var motionFilterInstalled = false
+
+type InputHook* = proc () {.closure.}
+
+var inputHooks: seq[InputHook] = @[]
+
+proc onInputFrame*(hook: InputHook) =
+  ## Run `hook` in every `updateUI`, right after the input frame opens and
+  ## before focus and widgets see the keys -- where app-wide bindings (the
+  ## debug overlay's F1) take theirs with `consumeKeys`.
+  inputHooks.add hook
+
+proc motionChangesHover(x, y: float32; down: bool): bool =
+  ## The pacer's motion filter: a pointer move needs a frame only when it
+  ## changes the set of elements under the pointer (hover looks, cadences)
+  ## -- held buttons and `trackPointer` frames are let through upstream.
+  hoverChangesAt(vec2(x, y))
+
 proc updateUI*(skipWheel: bool = false) =
   ## Advance the clay engine one input frame: pointer, held-press snapshot,
   ## wheel scrolling, layout dimensions, error drain. `skipWheel` holds the
   ## wheel back from the scroll containers for one frame -- the seam a zoom
   ## gesture (Ctrl + wheel) uses so the same notch does not both zoom and
-  ## scroll.
+  ## scroll. While the wheel glide or a scroll spring is still moving it
+  ## asks the pacer for the next frame.
+  if not motionFilterInstalled:
+    motionFilterInstalled = true
+    setMotionFilter(motionChangesHover)
   beginInputFrame()
+  for hook in inputHooks:
+    hook()
 
   let pointer = pointerState()
   setPointerState(vec2(pointer.x, pointer.y), pointer.down)
@@ -152,11 +179,14 @@ proc updateUI*(skipWheel: bool = false) =
   # Drag-scrolling stays off: widgets claim press themselves, and the
   # scrollbars drive containers directly via `setScrollPosition`.
   let wheel = wheelDelta()
+  let dt = frameDelta()
   if skipWheel:
-    updateScrollContainers(false, vec2(0.0, 0.0), frameDt)
+    updateScrollContainers(false, vec2(0.0, 0.0), dt)
   else:
     updateScrollContainers(false,
-      vec2(wheel.x, smoothedWheel(wheel.y, frameDt)), frameDt)
+      vec2(wheel.x, smoothedWheel(wheel.y, dt)), dt)
+  if wheelPending != 0.0 or scrollAnimating():
+    requestFrame()
 
   let (w, h) = windowPixelSize()
   let dims = layoutDimensions()

@@ -20,6 +20,7 @@ import std/[math, tables, strutils]
 
 import clay
 import ./platform
+import ./damage
 
 ## --- SDL3 / SDL3_ttf bindings ---------------------------------------------------
 
@@ -34,6 +35,8 @@ type
     x, y, w, h: int32
 
   SDL_Surface {.importc: "SDL_Surface", header: "<SDL3/SDL.h>".} = object
+    w, h, pitch: int32
+    pixels: pointer
 
   SDL_FColor {.importc: "SDL_FColor", header: "<SDL3/SDL.h>".} = object
     r, g, b, a: float32
@@ -43,12 +46,18 @@ type
     color: SDL_FColor          # normalized 0-1 channels in SDL3
     tex_coord: SDL_FPoint
 
+  SDL_Texture {.importc: "SDL_Texture", header: "<SDL3/SDL.h>".} = object
+
   TTF_Font {.importc: "TTF_Font", header: "<SDL3_ttf/SDL_ttf.h>".} = object
   TTF_TextEngine {.importc: "TTF_TextEngine", header: "<SDL3_ttf/SDL_ttf.h>".} = object
   TTF_Text {.importc: "TTF_Text", header: "<SDL3_ttf/SDL_ttf.h>".} = object
 
 const
+  BlendModeNone = 0'i32    # SDL_BLENDMODE_NONE
   BlendModeBlend = 1'i32   # SDL_BLENDMODE_BLEND
+  PixelFormatARGB8888 = 0x16362004'u32
+  TextureAccessTarget = 2'i32
+  ScaleModeNearest = 0'i32
 
 proc SDL_SetRenderDrawColor(ren: ptr SDL_Renderer; r, g, b, a: uint8): bool {.
   importc: "SDL_SetRenderDrawColor", header: "<SDL3/SDL.h>".}
@@ -72,6 +81,23 @@ proc SDL_SaveBMP(surf: ptr SDL_Surface; file: cstring): bool {.
 proc SDL_DestroySurface(surf: ptr SDL_Surface) {.
   importc: "SDL_DestroySurface", header: "<SDL3/SDL.h>".}
 
+proc SDL_CreateTexture(ren: ptr SDL_Renderer; format: uint32; access: int32;
+                       w, h: int32): nil ptr SDL_Texture {.
+  importc: "SDL_CreateTexture", header: "<SDL3/SDL.h>".}
+proc SDL_DestroyTexture(tex: ptr SDL_Texture) {.
+  importc: "SDL_DestroyTexture", header: "<SDL3/SDL.h>".}
+proc SDL_SetRenderTarget(ren: ptr SDL_Renderer; tex: nil ptr SDL_Texture): bool {.
+  importc: "SDL_SetRenderTarget", header: "<SDL3/SDL.h>".}
+proc SDL_RenderTexture(ren: ptr SDL_Renderer; tex: ptr SDL_Texture;
+                       src, dst: nil ptr SDL_FRect): bool {.
+  importc: "SDL_RenderTexture", header: "<SDL3/SDL.h>".}
+proc SDL_SetTextureBlendMode(tex: ptr SDL_Texture; mode: int32): bool {.
+  importc: "SDL_SetTextureBlendMode", header: "<SDL3/SDL.h>".}
+proc SDL_SetTextureScaleMode(tex: ptr SDL_Texture; mode: int32): bool {.
+  importc: "SDL_SetTextureScaleMode", header: "<SDL3/SDL.h>".}
+proc SDL_GetRenderOutputSize(ren: ptr SDL_Renderer; w, h: ptr int32): bool {.
+  importc: "SDL_GetRenderOutputSize", header: "<SDL3/SDL.h>".}
+
 proc TTF_Init(): bool {.importc: "TTF_Init", header: "<SDL3_ttf/SDL_ttf.h>".}
 proc TTF_OpenFont(file: cstring; ptsize: float32): nil ptr TTF_Font {.
   importc: "TTF_OpenFont", header: "<SDL3_ttf/SDL_ttf.h>".}
@@ -84,6 +110,8 @@ proc TTF_SetTextColorFloat(text: nil ptr TTF_Text; r, g, b, a: float32): bool {.
   importc: "TTF_SetTextColorFloat", header: "<SDL3_ttf/SDL_ttf.h>".}
 proc TTF_DrawRendererText(text: nil ptr TTF_Text; x, y: float32): bool {.
   importc: "TTF_DrawRendererText", header: "<SDL3_ttf/SDL_ttf.h>".}
+proc TTF_DestroyText(text: ptr TTF_Text) {.
+  importc: "TTF_DestroyText", header: "<SDL3_ttf/SDL_ttf.h>".}
 proc TTF_GetStringSize(font: nil ptr TTF_Font; text: cstring; length: int;
                        w, h: ptr int32): bool {.
   importc: "TTF_GetStringSize", header: "<SDL3_ttf/SDL_ttf.h>".}
@@ -107,11 +135,24 @@ type
     size: int
     col: uint64
 
+type
+  CachedText = object
+    text: nil ptr TTF_Text
+    used: int64         ## paint serial that last drew it
+
 var
   fonts: Table[int, nil ptr TTF_Font]
-  texts: Table[TextKey, nil ptr TTF_Text]
+  texts: Table[TextKey, CachedText]
   textEngine: nil ptr TTF_TextEngine
   clipStack: seq[SDL_Rect] = @[]
+  paintSerial = 0'i64
+  lastEvict = 0'i64
+
+const
+  TextKeepPaints = 120
+    ## A cached string not drawn for this many repaints is released: a clock
+    ## or a window title makes a new string every tick, and a bar runs for
+    ## days.
 
 proc fontFor(size: int): nil ptr TTF_Font =
   ## One opened TTF font per pixel size (TTF point size == pixel size at
@@ -350,8 +391,9 @@ func packColor(col: Color): uint64 =
 
 proc textFor(key: TextKey, col: Color): nil ptr TTF_Text =
   let cached = texts.getOrDefault(key)
-  if cached != nil:
-    return cached
+  if cached.text != nil:
+    texts[key] = CachedText(text: cached.text, used: paintSerial)
+    return cached.text
   let font = fontFor(key.size)
   if font == nil:
     return nil
@@ -361,8 +403,23 @@ proc textFor(key: TextKey, col: Color): nil ptr TTF_Text =
     return nil
   discard TTF_SetTextColorFloat(text, col.r / 255.0, col.g / 255.0,
                                 col.b / 255.0, col.a / 255.0)
-  texts[key] = text
+  texts[key] = CachedText(text: text, used: paintSerial)
   return text
+
+proc evictTexts() =
+  ## Release cached strings that have not been drawn for a while.
+  if paintSerial - lastEvict < TextKeepPaints:
+    return
+  lastEvict = paintSerial
+  var dead: seq[TextKey] = @[]
+  for k, v in texts:
+    if paintSerial - v.used > TextKeepPaints:
+      dead.add k
+  for k in dead:
+    let t = texts.getOrDefault(k).text
+    if t != nil:
+      TTF_DestroyText(t)
+    texts.del k
 
 proc drawTextCmd(text: string; x, y: float32; col: Color; size: int) =
   ## Draw at (x, y) = top-left of the text box, rounding to the pixel grid:
@@ -414,13 +471,40 @@ proc bootup*(width, height: float32 = 0.0) {.raises.} =
   setCurrentContext(initContext(size(w, h)))
   setMeasureText(measureText)
 
-proc drawCommands*() {.raises.} =
-  ## Paint the current context's commands from the last `endLayout`, in
-  ## order. Call once per frame from the app's render hook (after the
-  ## platform cleared and before it presents).
+func toSdlRect(r: Rect): SDL_Rect =
+  SDL_Rect(x: r.x.int32, y: r.y.int32, w: r.width.int32, h: r.height.int32)
+
+func toRect(r: SDL_Rect): Rect =
+  rect(float32(r.x), float32(r.y), float32(r.w), float32(r.h))
+
+proc applyClip(ren: ptr SDL_Renderer; area: Rect; limited: bool) =
+  ## Set the SDL clip to the innermost clip command, narrowed to `area`
+  ## when repainting a damaged region.
+  if clipStack.len > 0:
+    var cr = clipStack[^1]
+    if limited:
+      cr = toSdlRect(intersect(toRect(cr), area))
+      if cr.w <= 0 or cr.h <= 0:
+        cr = SDL_Rect(x: 0, y: 0, w: 0, h: 0)
+    discard SDL_SetRenderClipRect(ren, addr cr)
+  elif limited:
+    var cr = toSdlRect(area)
+    discard SDL_SetRenderClipRect(ren, addr cr)
+  else:
+    discard SDL_SetRenderClipRect(ren, nil)
+
+proc paintCommands(cmds: seq[RenderCommand]; area: Rect; limited: bool) =
+  ## Paint `cmds` in order. `limited`: only into `area` -- commands entirely
+  ## outside it are skipped, the rest are clipped to it.
   let ren = sdlRenderer()
-  let cmds = renderCommands()
+  inc paintSerial
+  clipStack.setLen(0)
+  applyClip(ren, area, limited)
   for cmd in cmds:
+    if limited and cmd.kind != renderClipStart and cmd.kind != renderClipEnd and
+        not overlaps(rect(cmd.box.x - 2.0, cmd.box.y - 2.0,
+                          cmd.box.width + 4.0, cmd.box.height + 4.0), area):
+      continue
     case cmd.kind
     of renderRectangle:
       if cmd.rectCorner.topLeft > 0.0 or cmd.rectCorner.topRight > 0.0 or
@@ -449,19 +533,256 @@ proc drawCommands*() {.raises.} =
       drawTextCmd(lineText(cmd), cmd.box.x, cmd.box.y, cmd.textColor,
                   cmd.fontSize.int)
     of renderClipStart:
-      var cr = SDL_Rect(x: cmd.box.x.int32, y: cmd.box.y.int32,
-                        w: cmd.box.width.int32, h: cmd.box.height.int32)
-      discard SDL_SetRenderClipRect(ren, addr cr)
-      clipStack.add cr
+      clipStack.add toSdlRect(cmd.box)
+      applyClip(ren, area, limited)
     of renderClipEnd:
       if clipStack.len > 0:
         clipStack.setLen(clipStack.len - 1)
-        if clipStack.len > 0:
-          discard SDL_SetRenderClipRect(ren, addr clipStack[^1])
-        else:
-          discard SDL_SetRenderClipRect(ren, nil)
+        applyClip(ren, area, limited)
     of renderImage, renderCustom, renderOverlayStart, renderOverlayEnd:
       discard   # not produced by the built-in UI (yet)
+  discard SDL_SetRenderClipRect(ren, nil)
+  evictTexts()
+
+## --- retained frame ------------------------------------------------------------
+##
+## The picture lives in a target texture between frames. `drawCommands`
+## diffs this frame's commands against the last painted ones (see
+## `ellipse/platform/damage`), repaints only the damaged rectangles into the
+## texture, copies it to the backbuffer and asks the platform to present. An
+## unchanged frame paints and presents nothing. During a live resize the
+## texture would be reallocated every frame, so the renderer paints straight
+## to the backbuffer until the gesture settles, then rebuilds it.
+
+var
+  clearColor* = rgb(0, 0, 0)
+    ## What the window shows where no command paints.
+  retained: nil ptr SDL_Texture
+  retainedW = 0'i32
+  retainedH = 0'i32
+  retainedOk = true          ## false once target textures proved unsupported
+  lastSigs: seq[CmdSig] = @[]
+  lastValid = false          ## `retained` holds `lastSigs`' picture
+
+proc dropRetained() =
+  let tex = retained
+  if tex != nil:
+    SDL_DestroyTexture(tex)
+    retained = nil
+  lastValid = false
+
+proc ensureRetained(w, h: int32): bool =
+  if not retainedOk:
+    return false
+  if retained != nil and retainedW == w and retainedH == h:
+    return true
+  dropRetained()
+  let tex = SDL_CreateTexture(sdlRenderer(), PixelFormatARGB8888,
+                              TextureAccessTarget, w, h)
+  if tex == nil:
+    retainedOk = false
+    return false
+  discard SDL_SetTextureBlendMode(tex, BlendModeNone)
+  discard SDL_SetTextureScaleMode(tex, ScaleModeNearest)
+  retained = tex
+  retainedW = w
+  retainedH = h
+  return true
+
+proc invalidateFrame*() =
+  ## Forget the retained picture: the next `drawCommands` repaints it all.
+  lastValid = false
+
+proc frameSignatures(cmds: seq[RenderCommand]): seq[CmdSig] =
+  var b = SigBuilder()
+  for cmd in cmds:
+    b.add(cmd, if cmd.kind == renderText: lineText(cmd) else: "")
+  result = b.sigs
+
+proc paintDirect(cmds: seq[RenderCommand]; w, h: int32) =
+  let ren = sdlRenderer()
+  setColor(ren, clearColor)
+  discard SDL_RenderClear(ren)
+  paintCommands(cmds, rect(0, 0, float32(w), float32(h)), false)
+  noteDamage(int64(w) * int64(h))
+
+type
+  OverlayFn* = proc () {.closure, raises.}
+
+var
+  overlayHook: nil OverlayFn
+  contentPaintedFlag = false
+
+proc setOverlay*(f: nil OverlayFn) =
+  ## Paint `f` over every presented picture (debug overlays). It draws with
+  ## the `overlay*` primitives straight onto the backbuffer, after the app's
+  ## commands and outside the retained picture and its damage tracking --
+  ## so it never makes the app repaint or run. While one is set every render
+  ## presents.
+  overlayHook = f
+  invalidateFrame()
+
+proc contentPainted*(): bool =
+  ## The last `drawCommands` repainted app pixels (its commands changed).
+  contentPaintedFlag
+
+proc paintContent(): tuple[painted, ready: bool] {.raises.} =
+  ## Bring the picture up to date. `painted`: app pixels changed; `ready`:
+  ## the backbuffer already holds the picture.
+  let ren = sdlRenderer()
+  let cmds = renderCommands()
+  let sigs = frameSignatures(cmds)
+  var w = 0'i32
+  var h = 0'i32
+  discard SDL_GetRenderOutputSize(ren, addr w, addr h)
+  if w <= 0 or h <= 0:
+    return (false, false)
+  let full = takeFullRedraw()
+
+  if resizing():
+    # Live resize: straight to the backbuffer, every frame.
+    dropRetained()
+    paintDirect(cmds, w, h)
+    lastSigs = sigs
+    return (true, true)
+
+  if not ensureRetained(w, h):
+    # No target textures: the plain paint-everything path, still skipping
+    # frames whose commands did not change.
+    let unchanged = lastValid and not full and
+      diffDamage(lastSigs, sigs, rect(0, 0, float32(w), float32(h))).kind == dmgNone
+    lastSigs = sigs
+    lastValid = true
+    if unchanged:
+      return (false, false)
+    paintDirect(cmds, w, h)
+    return (true, true)
+
+  let viewport = rect(0, 0, float32(w), float32(h))
+  var dmg = Damage(kind: dmgFull)
+  if lastValid and not full:
+    dmg = diffDamage(lastSigs, sigs, viewport)
+  lastSigs = sigs
+  lastValid = true
+  if dmg.kind == dmgNone:
+    return (false, false)
+
+  discard SDL_SetRenderTarget(ren, retained)
+  if dmg.kind == dmgFull:
+    setColor(ren, clearColor)
+    discard SDL_RenderClear(ren)
+    paintCommands(cmds, viewport, false)
+    noteDamage(int64(w) * int64(h))
+  else:
+    for r in dmg.rects:
+      var cr = toSdlRect(r)
+      discard SDL_SetRenderClipRect(ren, addr cr)
+      discard SDL_SetRenderDrawBlendMode(ren, BlendModeNone)
+      fillRect(ren, r, clearColor)
+      discard SDL_SetRenderDrawBlendMode(ren, BlendModeBlend)
+      paintCommands(cmds, r, true)
+      noteDamage(int64(r.width) * int64(r.height))
+  discard SDL_SetRenderTarget(ren, nil)
+  discard SDL_SetRenderClipRect(ren, nil)
+  let tex = retained
+  if tex != nil:
+    discard SDL_RenderTexture(ren, tex, nil, nil)
+  return (true, true)
+
+proc drawCommands*() {.raises.} =
+  ## Paint the current context's commands from the last `endLayout`. Call
+  ## once per frame from the app's render hook; it repaints only what
+  ## changed since the last call and requests a present only when anything
+  ## did (see `pacing.requestPresent`). A frame whose output changed also
+  ## asks for one more frame: immediate-mode widgets read last frame's
+  ## geometry, so a change settles over two frames.
+  let (painted, ready) = paintContent()
+  contentPaintedFlag = painted
+  if painted:
+    requestSettleFrame()
+    requestPresent()
+  let hook = overlayHook
+  if hook == nil:
+    return
+  if not ready:
+    # Unchanged picture: put it back on the backbuffer under the overlay.
+    let ren = sdlRenderer()
+    discard SDL_SetRenderClipRect(ren, nil)
+    let tex = retained
+    if tex != nil and lastValid:
+      discard SDL_RenderTexture(ren, tex, nil, nil)
+    else:
+      var w = 0'i32
+      var h = 0'i32
+      discard SDL_GetRenderOutputSize(ren, addr w, addr h)
+      setColor(ren, clearColor)
+      discard SDL_RenderClear(ren)
+      paintCommands(renderCommands(), rect(0, 0, float32(w), float32(h)), false)
+  inc paintSerial
+  hook()
+  discard SDL_SetRenderClipRect(sdlRenderer(), nil)
+  evictTexts()
+  requestPresent()
+
+## --- overlay primitives ----------------------------------------------------------
+
+proc overlayRect*(r: Rect; col: Color) =
+  ## A filled rectangle (alpha-blended) for an overlay hook.
+  fillRect(sdlRenderer(), r, col)
+
+proc overlayFrame*(r: Rect; width: float32; col: Color) =
+  ## A rectangle outline `width` thick, inside `r`.
+  let ren = sdlRenderer()
+  fillStrip(ren, r.x, r.y, r.width, width, col)
+  fillStrip(ren, r.x, r.y + r.height - width, r.width, width, col)
+  fillStrip(ren, r.x, r.y + width, width, r.height - 2.0 * width, col)
+  fillStrip(ren, r.x + r.width - width, r.y + width, width,
+            r.height - 2.0 * width, col)
+
+proc overlayText*(text: string; x, y: float32; size: int; col: Color) =
+  ## One line of text with its top-left at (x, y).
+  if text.len > 0:
+    drawTextCmd(text, x, y, col, size)
+
+proc overlayTextWidth*(text: string; size: int): float32 =
+  measureText(text, TextConfig(fontSize: uint16(size))).width
+
+proc overlayClip*(r: Rect) =
+  ## Clip overlay painting to `r` until `overlayUnclip`.
+  var cr = toSdlRect(r)
+  discard SDL_SetRenderClipRect(sdlRenderer(), addr cr)
+
+proc overlayUnclip*() =
+  discard SDL_SetRenderClipRect(sdlRenderer(), nil)
+
+proc frameChecksum*(): uint64 {.raises.} =
+  ## FNV-1a over the backbuffer's pixels: what the next present would show.
+  ## The seam the damage tests compare a partial repaint against a full one
+  ## with; 0 when the readback failed.
+  let surf = SDL_RenderReadPixels(sdlRenderer(), nil)
+  if surf == nil:
+    return 0
+  result = 0xCBF29CE484222325'u64
+  let base = cast[uint](surf[].pixels)
+  var y = 0'i32
+  while y < surf[].h:
+    let row = cast[ptr UncheckedArray[uint8]](base + uint(y) * uint(surf[].pitch))
+    var x = 0'i32
+    while x < surf[].w * 4:
+      result = (result xor uint64(row[x])) * 0x100000001B3'u64
+      inc x
+    inc y
+  SDL_DestroySurface(surf)
+
+proc saveBackbuffer*(path: string): bool {.raises.} =
+  ## Write what the next present would show -- app picture and any overlay
+  ## -- as a BMP. Call from the render hook after `drawCommands`.
+  let surf = SDL_RenderReadPixels(sdlRenderer(), nil)
+  if surf == nil:
+    return false
+  var p = path
+  result = SDL_SaveBMP(surf, p.toCString)
+  SDL_DestroySurface(surf)
 
 proc saveScreenshot*(path: string; width, height: int32 = 0;
                      bg: Color = rgb(12, 12, 16)): bool {.raises.} =
@@ -474,7 +795,10 @@ proc saveScreenshot*(path: string; width, height: int32 = 0;
   let ren = sdlRenderer()
   setColor(ren, bg)
   discard SDL_RenderClear(ren)
-  drawCommands()
+  var ow = 0'i32
+  var oh = 0'i32
+  discard SDL_GetRenderOutputSize(ren, addr ow, addr oh)
+  paintCommands(renderCommands(), rect(0, 0, float32(ow), float32(oh)), false)
   var full = SDL_Rect(x: 0, y: 0, w: width, h: height)
   let surf = if width > 0 and height > 0: SDL_RenderReadPixels(ren, addr full)
              else: SDL_RenderReadPixels(ren, nil)

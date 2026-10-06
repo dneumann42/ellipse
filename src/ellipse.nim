@@ -6,6 +6,7 @@ import ellipse/platform/platform
 import ellipse/platform/renderer
 import ellipse_ui/ui
 import ellipse_ui/widgets
+import ellipse_ui/debug
 
 addHandler initStandardLogger()
 
@@ -339,6 +340,7 @@ when isMainModule:
   try:
     fillLists()
     bootup()
+    installDebugMode()   # F1: widget boxes, per-widget fps, frame timeline
     start(update, render)
   except ErrorCode:
     discard

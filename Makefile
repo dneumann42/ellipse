@@ -1,4 +1,4 @@
-.PHONY: clean setup run run_tome run_owl run_duck test
+.PHONY: clean setup run run_tome run_owl run_duck run_bar test
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -46,6 +46,16 @@ test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/theme_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/keyboard_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/duck_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/pacing_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/pacing_loop_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/damage_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/debug_test.nim
+
+bin/bar: setup
+	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./apps/bar.nim
+
+run_bar: bin/bar
+	./bin/bar
 
 setup: build/nimony/bin/nimony
 	@echo "Nimony is ready"

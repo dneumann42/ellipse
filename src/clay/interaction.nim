@@ -12,15 +12,15 @@
 func pointInRect(p: Vec2; r: Rect): bool {.inline.} =
   p.x >= r.x and p.x <= r.x + r.width and p.y >= r.y and p.y <= r.y + r.height
 
-proc setPointerState*(ctx: Context; position: Vec2; pointerDown: bool) =
-  ## Store the pointer, rebuild the hover list against last frame's boxes,
-  ## fire `onHover` callbacks, then advance the press/release state machine.
-  ctx.pointer.position = position
-  ctx.pointerOver.setLen(0)
-
+proc hitTest*(ctx: Context; position: Vec2; fire = false): seq[ElementId] =
+  ## The elements under `position` in last frame's published geometry, in
+  ## `pointerOver` order (outermost-of-topmost first). `fire` runs their
+  ## `onHover` callbacks on the way -- `setPointerState` does; the frame
+  ## pacer's motion filter asks without side effects.
+  result = @[]
   var stack: seq[tuple[idx: int32, visited: bool]] = @[]
   # Test topmost trees first: roots are processed in reverse declaration
-  # order, so `pointerOver` fills outermost-of-topmost-first.
+  # order, so the result fills outermost-of-topmost-first.
   for rootIndex in countdown(ctx.roots.high, 0):
     let root = ctx.roots[rootIndex]
     stack.setLen(0)
@@ -48,9 +48,9 @@ proc setPointerState*(ctx: Context; position: Vec2; pointerDown: bool) =
               let clipItem = ctx.elementMap.getOrDefault(el.clipId, MapItem(elementIndex: -1))
               hit = clipItem.elementIndex < 0 or pointInRect(position, clipItem.box)
           if hit:
-            if item.hover != nil:
+            if fire and item.hover != nil:
               item.hover(item.eid, ctx.pointer)
-            ctx.pointerOver.add(item.eid)
+            result.add(item.eid)
             found = true
           # Clay keeps descending even past a miss: every descendant whose
           # own (clip-tested) box contains the point is registered.
@@ -61,6 +61,22 @@ proc setPointerState*(ctx: Context; position: Vec2; pointerDown: bool) =
         rootEl.decl.floating.capture == capturePointer:
       # A captured floating root swallows pointer-over for every tree below.
       break
+
+proc hoverChangesAt*(ctx: Context; position: Vec2): bool =
+  ## Would moving the pointer to `position` change what it is over?
+  let ids = hitTest(ctx, position)
+  if ids.len != ctx.pointerOver.len:
+    return true
+  for i in 0 ..< ids.len:
+    if ids[i].id != ctx.pointerOver[i].id:
+      return true
+  return false
+
+proc setPointerState*(ctx: Context; position: Vec2; pointerDown: bool) =
+  ## Store the pointer, rebuild the hover list against last frame's boxes,
+  ## fire `onHover` callbacks, then advance the press/release state machine.
+  ctx.pointer.position = position
+  ctx.pointerOver = hitTest(ctx, position, fire = true)
 
   # Press/release state machine (mirrors Clay's edge detection exactly).
   if pointerDown:
@@ -115,6 +131,8 @@ func pointerOverIds*(ctx: Context): seq[ElementId] =
 const
   springK* = 420.0'f32   ## spring stiffness of the position->target follower
   springC* = 34.0'f32    ## damping: slightly underdamped -> springy landings
+  SettleDist = 0.05'f32  ## px: the spring is home ...
+  SettleVel = 0.5'f32    ## px/s: ... and at rest
   rubberResist* = 0.35'f32  ## how much of a drag past an edge reaches the target
 
 func springStep(pos, vel, target, dt: float32): (float32, float32) =
@@ -250,13 +268,17 @@ proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
           else:
             sd.momentumTime += deltaTime
 
-    # Flick momentum keeps driving the target until it comes to rest.
-    sd.target.x += sd.momentum.x
-    sd.momentum.x *= 0.95'f32
+    # Flick momentum keeps driving the target until it comes to rest. Clay's
+    # constants are per 60 Hz frame; `steps` rescales them to `deltaTime`
+    # so a flick travels as far at 144 Hz (or 20 Hz) as at 60.
+    let steps = deltaTime * 60.0'f32
+    let decay = pow(0.95'f32, steps)
+    sd.target.x += sd.momentum.x * steps
+    sd.momentum.x *= decay
     if sd.momentum.x > -0.1'f32 and sd.momentum.x < 0.1'f32:
       sd.momentum.x = 0
-    sd.target.y += sd.momentum.y
-    sd.momentum.y *= 0.95'f32
+    sd.target.y += sd.momentum.y * steps
+    sd.momentum.y *= decay
     if sd.momentum.y > -0.1'f32 and sd.momentum.y < 0.1'f32:
       sd.momentum.y = 0
 
@@ -277,16 +299,43 @@ proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
 
     # Position rides the spring toward the target: this is the deceleration
     # of a flick and the overshoot-and-settle at the ends.
-    let (ny, vys) = springStep(sd.position.y, sd.springVel.y, sd.target.y,
-                               deltaTime)
-    sd.position.y = ny
-    sd.springVel.y = vys
-    let (nx, vxs) = springStep(sd.position.x, sd.springVel.x, sd.target.x,
-                               deltaTime)
-    sd.position.x = nx
-    sd.springVel.x = vxs
+    # Explicit Euler is only stable for small steps: integrate long frames
+    # (a 30 Hz display, a hitch) in sub-steps of at most 1/120 s.
+    var sub = 1
+    while deltaTime / float32(sub) > 1.0'f32 / 120.0'f32 and sub < 8:
+      inc sub
+    let h = deltaTime / float32(sub)
+    var n = 0
+    while n < sub:
+      let (ny, vys) = springStep(sd.position.y, sd.springVel.y, sd.target.y, h)
+      sd.position.y = ny
+      sd.springVel.y = vys
+      let (nx, vxs) = springStep(sd.position.x, sd.springVel.x, sd.target.x, h)
+      sd.position.x = nx
+      sd.springVel.x = vxs
+      inc n
+    # Close enough and slow enough: land exactly, so the container reports
+    # rest and the frame pacer can stop asking for frames.
+    if abs(sd.position.y - sd.target.y) < SettleDist and
+        abs(sd.springVel.y) < SettleVel:
+      sd.position.y = sd.target.y
+      sd.springVel.y = 0
+    if abs(sd.position.x - sd.target.x) < SettleDist and
+        abs(sd.springVel.x) < SettleVel:
+      sd.position.x = sd.target.x
+      sd.springVel.x = 0
 
     ctx.scrollDatas[k] = sd
+
+proc scrollAnimating*(ctx: Context): bool =
+  ## Some scroll container is still moving on its own (flick momentum, the
+  ## spring settling, a held rubber drag): it needs more frames.
+  for sd in ctx.scrollDatas:
+    if sd.momentum.x != 0 or sd.momentum.y != 0 or
+        sd.position.x != sd.target.x or sd.position.y != sd.target.y or
+        sd.springVel.x != 0 or sd.springVel.y != 0:
+      return true
+  return false
 
 proc scrollContainerData*(ctx: Context; id: ElementId): ScrollContainerData =
   ## Query a scroll container by id. `position` mirrors the engine's state;

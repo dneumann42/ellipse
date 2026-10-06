@@ -155,6 +155,53 @@ proc mixKey(a: uint64, b: uint64): uint64 =
   z = (z xor (z shr 27)) * 0x94D049BB133111EB'u64
   result = z xor (z shr 31)
 
+## --- widget trace ------------------------------------------------------------
+##
+## Off by default; the debug overlay (`ellipse_ui/debug`) switches it on to
+## learn, per frame, every widget invocation and the clay elements its body
+## declared -- enough to box it on screen and attribute render commands.
+
+type
+  WidgetTrace* = object
+    key*: WidgetKey
+    name*: string
+    parent*: int              ## index of the enclosing widget, -1 at the root
+    elemStart*, elemEnd*: int ## its body's range in the clay element pool
+
+var
+  traceOn = false
+  traceNow: seq[WidgetTrace] = @[]
+  traceGen = 0'u32
+  traceStack: seq[int] = @[]
+
+proc setWidgetTrace*(on: bool) =
+  traceOn = on
+  traceNow.setLen(0)
+  traceStack.setLen(0)
+
+proc widgetTrace*(): seq[WidgetTrace] =
+  ## The widgets of the current (or, between frames, the last) layout pass,
+  ## in call order. Empty unless `setWidgetTrace(true)`.
+  traceNow
+
+proc tracePush(key: WidgetKey, name: string) =
+  let ctx = currentContext()
+  if ctx.generation != traceGen:
+    traceGen = ctx.generation
+    traceNow.setLen(0)
+    traceStack.setLen(0)
+  let parent = if traceStack.len > 0: traceStack[^1] else: -1
+  traceStack.add traceNow.len
+  traceNow.add WidgetTrace(key: key, name: name, parent: parent,
+    elemStart: ctx.elements.len, elemEnd: ctx.elements.len)
+
+proc tracePop() =
+  if traceStack.len > 0:
+    let i = traceStack[^1]
+    traceStack.setLen(traceStack.len - 1)
+    if i < traceNow.len:
+      traceNow[i].elemEnd = currentContext().elements.len
+
 proc pushEventFrame*(name: string, nameHash: uint32, id: uint32,
                      handler: EventHandler, handles: seq[EventKind]) =
   ## Open the event frame of one widget invocation (generated code). `id`
@@ -181,6 +228,8 @@ proc pushEventFrame*(name: string, nameHash: uint32, id: uint32,
     key = mixKey(key, uint64(index))
   frames.add EventFrame(key: WidgetKey(key), name: name, handler: handler,
                         handles: handles, children: 0'u32)
+  if traceOn:
+    tracePush(WidgetKey(key), name)
 
 proc pushEventFrame*(name: string, nameHash: uint32, id: uint32) =
   ## A frame with no handlers: it still has a key and shows up in paths.
@@ -190,6 +239,8 @@ proc popEventFrame*() =
   ## Close the innermost frame (generated code, from a `finally`).
   if frames.len > 0:
     frames.setLen(frames.len - 1)
+    if traceOn:
+      tracePop()
 
 proc eventDepth*(): int =
   ## Frames open right now: 0 outside every widget and `handleEvents`.

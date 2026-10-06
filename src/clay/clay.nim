@@ -35,7 +35,7 @@
 ## Include order below is dependency order; fragments must not import each
 ## other or anything outside std.
 
-import std/[tables, algorithm, syncio, assertions]
+import std/[tables, algorithm, syncio, assertions, math]
 
 include [types, hashing, store, measurement, engine, interaction]
 
@@ -93,6 +93,9 @@ proc localIdWithIndex*(label: string; index: uint32): ElementId =
   localIdWithIndex(label, index, openElementId())
 
 proc hovered*(): bool = hovered(currentContext())
+proc hoverChangesAt*(position: Vec2): bool =
+  hoverChangesAt(currentContext(), position)
+proc scrollAnimating*(): bool = scrollAnimating(currentContext())
 proc pointerOver*(id: ElementId): bool = pointerOver(currentContext(), id)
 proc onHover*(cb: HoverCallback) = onHover(currentContext(), cb)
 proc elementData*(id: ElementId): ElementData = elementData(currentContext(), id)

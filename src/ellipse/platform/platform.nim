@@ -3,6 +3,8 @@
 import std/[monotimes, strutils, envvars]
 
 import ../logger
+import ./pacing
+export pacing
 
 const
   Audio = 0x00000010'u32
@@ -35,8 +37,15 @@ const
   EventTerminating   = 0x00000101'u32
   EventWindowShown   = 0x00000202'u32
   EventWindowHidden  = 0x00000203'u32
+  EventWindowExposed = 0x00000204'u32
   EventWindowResized = 0x00000206'u32
   EventWindowPixelResized = 0x00000207'u32
+  EventWindowMinimized = 0x00000209'u32
+  EventWindowRestored = 0x0000020B'u32
+  EventWindowMouseLeave = 0x0000020D'u32
+  EventWindowFocusGained = 0x0000020E'u32
+  EventWindowFocusLost = 0x0000020F'u32
+  EventWindowDisplayChanged = 0x00000213'u32
   EventWindowCloseRequested = 0x00000210'u32
   EventKeyDown       = 0x00000300'u32
   EventKeyUp         = 0x00000301'u32
@@ -106,6 +115,8 @@ type
   SDL_Window {.importc: "SDL_Window", header: "<SDL3/SDL.h>".} = object
   SDL_Renderer* {.importc: "SDL_Renderer", header: "<SDL3/SDL.h>".} = object
   SDL_Event {.importc: "SDL_Event", header: "<SDL3/SDL.h>".} = object
+  SDL_DisplayMode {.importc: "SDL_DisplayMode", header: "<SDL3/SDL.h>".} = object
+    refresh_rate: float32
 
   SDL_CommonEvent = object
     typ: uint32
@@ -200,7 +211,15 @@ proc SDL_DestroyWindow(win: ptr SDL_Window) {.importc: "SDL_DestroyWindow", head
 proc SDL_DestroyRenderer(ren: ptr SDL_Renderer) {.importc: "SDL_DestroyRenderer", header: "<SDL3/SDL.h>".}
 proc SDL_PollEvent(event: ptr SDL_Event): bool {.importc: "SDL_PollEvent", header: "<SDL3/SDL.h>".}
 proc SDL_PushEvent(event: ptr SDL_Event): bool {.importc: "SDL_PushEvent", header: "<SDL3/SDL.h>".}
-proc SDL_Delay(ms: uint32) {.importc: "SDL_Delay", header: "<SDL3/SDL.h>".}
+proc SDL_WaitEventTimeout(event: nil ptr SDL_Event; timeoutMS: int32): bool {.
+  importc: "SDL_WaitEventTimeout", header: "<SDL3/SDL.h>".}
+proc SDL_DelayNS(ns: uint64) {.importc: "SDL_DelayNS", header: "<SDL3/SDL.h>".}
+proc SDL_SetRenderVSync(ren: ptr SDL_Renderer; vsync: int32): bool {.
+  importc: "SDL_SetRenderVSync", header: "<SDL3/SDL.h>".}
+proc SDL_GetDisplayForWindow(win: ptr SDL_Window): uint32 {.
+  importc: "SDL_GetDisplayForWindow", header: "<SDL3/SDL.h>".}
+proc SDL_GetCurrentDisplayMode(display: uint32): nil ptr SDL_DisplayMode {.
+  importc: "SDL_GetCurrentDisplayMode", header: "<SDL3/SDL.h>".}
 proc SDL_SetRenderDrawColor(ren: ptr SDL_Renderer; r, g, b, a: uint8): bool {.importc: "SDL_SetRenderDrawColor", header: "<SDL3/SDL.h>".}
 proc SDL_RenderClear(ren: ptr SDL_Renderer): bool {.importc: "SDL_RenderClear", header: "<SDL3/SDL.h>".}
 proc SDL_RenderPresent(ren: ptr SDL_Renderer): bool {.importc: "SDL_RenderPresent", header: "<SDL3/SDL.h>".}
@@ -273,6 +292,8 @@ type
     wheelFrame: tuple[x, y: float32]
     doublePending: bool         ## a left-button click with SDL's click
     doubleFrame: bool           ## counter >= 2, per input frame
+    vsync: bool                 ## presents are paced by the display
+    visible: bool               ## not hidden / minimized: worth presenting
 
 proc `=destroy`(app: var PlatformApplication) =
   `=destroy`(app.renderer)
@@ -320,6 +341,10 @@ proc initialize*() {.raises.} =
   # into the IME path when full international composition is wanted.
   activeApp.width = 1280.0
   activeApp.height = 720.0
+  activeApp.visible = true
+  # Present on vsync: frames that run at all run at the display rate, and the
+  # swap paces them. Drivers without it (offscreen) fall back to a timer.
+  activeApp.vsync = SDL_SetRenderVSync(activeApp.renderer.raw, 1)
   if inputDebug:
     discard info("sdl video driver: ", fromCString(SDL_GetCurrentVideoDriver()))
 
@@ -344,37 +369,16 @@ proc setTextInputEnabled*(enabled: bool) =
 proc textInputEnabled*(): bool =
   textImeActive
 
-const
-  TicksPerSecond = 60'i64
-  NanosPerSecond = 1_000_000_000'i64
-  SpinWindowNs = 1_000_000'i64
-
-type
-  GameEngine = object
-    epoch: int64
-    debugStart: int64
-    simulatedTick: int64
-    renderFrame: int64
-    frames: int64
-    updates: int64
-    requiredTicks: int64
-
-proc tickDeadline(epoch: int64; tick: int64): int64 =
-  epoch + (tick * NanosPerSecond + TicksPerSecond - 1) div TicksPerSecond
-
-proc currentTick(engine: GameEngine): int64 =
-  (getMonoTime().ticks - engine.epoch) * TicksPerSecond div NanosPerSecond
-
-proc waitUntil(deadline: int64) =
-  let now = getMonoTime().ticks
-  if deadline > now + SpinWindowNs:
-    SDL_Delay(uint32((deadline - SpinWindowNs - now) div 1_000_000'i64))
-  while getMonoTime().ticks < deadline:
-    discard
-
-proc beginFrame(engine: var GameEngine) =
-  waitUntil(tickDeadline(engine.epoch, engine.renderFrame))
-  engine.requiredTicks = currentTick(engine)
+proc updateRefreshPeriod(app: PlatformApplication) =
+  ## Pace to the refresh rate of the display the window is on (60 Hz when
+  ## the driver does not say).
+  if app.window.raw == nil:
+    return
+  let mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(app.window.raw))
+  if mode != nil and mode[].refresh_rate > 1.0'f32:
+    setRefreshPeriod(int64(1_000_000_000.0'f64 / float64(mode[].refresh_rate)))
+  else:
+    setRefreshPeriod(16_666_667'i64)
 
 proc utf8Of(cp: int32): string =
   ## Encode one Unicode code point as UTF-8 (no std dependency).
@@ -465,6 +469,9 @@ proc keyEventFor(scancode, key, modifiers: int32): KeyEvent =
         result.text = utf8Of(cp)
 
 proc pumpEvents(app: var PlatformApplication) =
+  ## Drain SDL's queue into the app state, and tell the pacer which events
+  ## need a frame: everything but pointer motion that changes nothing the
+  ## UI shows (see `pacing.motionWakes`).
   var event = default(SDL_Event)
   while SDL_PollEvent(addr event):
     let kind = cast[ptr SDL_CommonEvent](addr event)[].typ
@@ -474,43 +481,77 @@ proc pumpEvents(app: var PlatformApplication) =
         $kb.key, " mod=", $kb.modifiers)
     if kind == EventQuit or kind == EventTerminating or kind == EventWindowCloseRequested:
       app.running = false
+      wake()
     elif kind == EventWindowPixelResized:
       # Track the live window size so the UI can re-layout the moment the
       # window is resized. `data1`/`data2` carry the new drawable size in
       # renderer pixels -- the space we draw and report pointer positions in.
+      # Each one also opens / extends the resize gesture the pacer runs at
+      # vsync until the window holds still.
+      # Drivers also report the initial size (and repeat sizes); only a
+      # real change counts.
       let e = cast[ptr SDL_WindowEvent](addr event)[]
-      if e.data1 > 0 and e.data2 > 0:
+      if e.data1 > 0 and e.data2 > 0 and
+          (float32(e.data1) != app.width or float32(e.data2) != app.height):
         app.width = float32(e.data1)
         app.height = float32(e.data2)
+        noteResize(monoNow())
+    elif kind == EventWindowExposed or kind == EventWindowShown or
+        kind == EventWindowRestored:
+      app.visible = true
+      requestFullRedraw()
+    elif kind == EventWindowHidden or kind == EventWindowMinimized:
+      app.visible = false
+    elif kind == EventWindowDisplayChanged:
+      updateRefreshPeriod(app)
+      requestFullRedraw()
+    elif kind == EventWindowMouseLeave:
+      # The pointer left the window: nothing in it is hovered any more.
+      if not app.pointer.down:
+        app.pointer.x = -1.0e6'f32
+        app.pointer.y = -1.0e6'f32
+      wake()
+    elif kind == EventWindowFocusGained or kind == EventWindowFocusLost:
+      wake()
     elif kind == EventMouseMotion:
       let e = cast[ptr SDL_MouseMotionEvent](addr event)[]
       app.pointer.x = e.x
       app.pointer.y = e.y
       app.pointer.down = (e.state and ButtonLeftMask) != 0
+      if not frameWanted(monoNow()) and
+          motionWakes(e.x, e.y, app.pointer.down):
+        wake()
     elif kind == EventMouseButtonDown:
       let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
       if e.button == ButtonLeft:
         app.pointer.down = true
         if e.clicks >= 2:
           app.doublePending = true
+      wake()
     elif kind == EventMouseButtonUp:
       let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
       if e.button == ButtonLeft:
         app.pointer.down = false
+      wake()
     elif kind == EventKeyDown:
       let e = cast[ptr SDL_KeyboardEvent](addr event)[]
       if e.down:   # SDL delivers autorepeat as repeated downs: forward them
         let ev = keyEventFor(e.scancode, e.key, e.modifiers.int32)
         if ev.kind != kevNone:
           app.keyPending.add ev
+      wake()   # any key, even an unmapped one: modifier state is polled
+    elif kind == EventKeyUp:
+      wake()
     elif kind == EventTextInput:
       let e = cast[ptr SDL_TextInputEvent](addr event)[]
       if not e.text.isNil:   # printable input, already keyboard-layout applied
         app.keyPending.add KeyEvent(kind: kevText, text: fromCString(e.text))
+        wake()
     elif kind == EventMouseWheel:
       let e = cast[ptr SDL_MouseWheelEvent](addr event)[]
       app.wheelPending.x += e.x
       app.wheelPending.y += e.y
+      wake()
 
 proc pointerState*(): PointerState =
   ## The pointer as of the most recent event pump; feed it to
@@ -541,6 +582,15 @@ proc beginInputFrame*() =
   activeApp.wheelPending = (float32(0.0), float32(0.0))
   activeApp.doubleFrame = activeApp.doublePending
   activeApp.doublePending = false
+
+proc consumeKeys*(kind: KeyEventKind) =
+  ## Drop this input frame's events of `kind`: a global binding (the debug
+  ## overlay's F1) takes the key before widgets and app chords see it.
+  var kept: seq[KeyEvent] = @[]
+  for ev in activeApp.keyFrame:
+    if ev.kind != kind:
+      kept.add ev
+  activeApp.keyFrame = kept
 
 proc keyEvents*(): seq[KeyEvent] =
   ## Keyboard/text events collected since the last `beginInputFrame`.
@@ -595,6 +645,7 @@ proc pushKeyEvent*(ev: KeyEvent) =
   ## Feed a synthetic event into the queue -- the seam for tests, on-screen
   ## keyboards and gamepad text input.
   activeApp.keyPending.add ev
+  wake()
 
 proc pushDoubleClick*() =
   ## Mark a double-click edge on the next input frame -- the same seam
@@ -646,6 +697,26 @@ proc pushSdlWheel*(x, y: float32) =
   w.integerY = int32(y)
   discard SDL_PushEvent(addr ev)
 
+proc pushSdlMotion*(x, y: float32; down = false) =
+  ## A pointer move onto the SDL queue -- what the frame pacer's motion
+  ## filter sees from a real mouse.
+  var ev = default(SDL_Event)
+  let m = cast[ptr SDL_MouseMotionEvent](addr ev)
+  m.typ = EventMouseMotion
+  m.x = x
+  m.y = y
+  m.state = if down: ButtonLeftMask else: 0'u32
+  discard SDL_PushEvent(addr ev)
+
+proc pushSdlResize*(w, h: int32) =
+  ## A drawable-size change onto the SDL queue: one step of a live resize.
+  var ev = default(SDL_Event)
+  let e = cast[ptr SDL_WindowEvent](addr ev)
+  e.typ = EventWindowPixelResized
+  e.data1 = w
+  e.data2 = h
+  discard SDL_PushEvent(addr ev)
+
 proc pushSdlQuit*() =
   ## A quit event onto the SDL queue -- ends the `start` loop through the
   ## same path a window-manager close takes.
@@ -654,46 +725,75 @@ proc pushSdlQuit*() =
   q.typ = EventQuit
   discard SDL_PushEvent(addr ev)
 
-proc drawFrame(app: var PlatformApplication; render: FrameFn) {.raises.} =
-  sdlHandle(SDL_SetRenderDrawColor(app.renderer.raw, 0, 0, 0, 255), "SDL_SetRenderDrawColor()")
-  sdlHandle(SDL_RenderClear(app.renderer.raw), "SDL_RenderClear()")
+proc drawFrame(app: var PlatformApplication; render: FrameFn): bool {.raises.} =
+  ## Run the render hook; present only when it painted something (see
+  ## `pacing.requestPresent`) and the window can show it. Returns whether
+  ## a present happened.
   render()
-  sdlHandle(SDL_RenderPresent(app.renderer.raw), "SDL_RenderPresent()")
+  if presentRequested() and app.visible:
+    sdlHandle(SDL_RenderPresent(app.renderer.raw), "SDL_RenderPresent()")
+    return true
+  return false
 
-proc tick(engine: var GameEngine; update: FrameFn) {.raises.} =
-  while engine.simulatedTick < engine.requiredTicks:
-    update()
-    inc engine.simulatedTick
-    inc engine.updates
+proc waitFor(app: PlatformApplication; ns: int64) =
+  ## Sleep until an event arrives or `ns` passes (`Never`: until an event).
+  ## The event stays queued for the next `pumpEvents`.
+  if ns == Never:
+    discard SDL_WaitEventTimeout(nil, -1'i32)
+  elif ns >= 2_000_000'i64:
+    # ms granularity: wake a little early and finish on the precise delay
+    discard SDL_WaitEventTimeout(nil, int32((ns - 1_000_000'i64) div 1_000_000'i64))
+  elif ns > 0:
+    SDL_DelayNS(uint64(ns))
 
-proc endFrame(engine: var GameEngine) =
-  inc engine.renderFrame
-  inc engine.frames
-  let wallTick = currentTick(engine) + 1
-  if wallTick > engine.renderFrame:
-    engine.renderFrame = wallTick
+var statsDebug = getEnv("ELLIPSE_FRAME_STATS") != ""
+  ## When set, the loop logs once per second what the pacer did: frames,
+  ## presents, why each frame woke, repainted pixels.
 
-proc reportFPS(engine: var GameEngine) =
-  let now = getMonoTime().ticks
-  let elapsed = float64(now - engine.debugStart) / float64(NanosPerSecond)
-  if elapsed >= 1.0:
-    let fps = float64(engine.frames) / elapsed
-    let ups = float64(engine.updates) / elapsed
-    info "FPS: ", $fps, " | UPS: ", $ups
-    engine.frames = 0
-    engine.updates = 0
-    engine.debugStart = now
+proc reportStats(lastReport: var int64) =
+  if not statsDebug:
+    return
+  let now = monoNow()
+  if now - lastReport < NsPerSec:
+    return
+  let st = takeStats()
+  let secs = float64(now - lastReport) / float64(NsPerSec)
+  info "frames: ", $st.frames, " presents: ", $st.presents,
+    " (input ", $st.inputWakes, ", timer ", $st.timerWakes,
+    ", anim ", $st.animWakes, ", resize ", $st.resizeFrames,
+    ") repaint px: ", $st.damagePx, " over ", $secs, "s"
+  lastReport = now
 
 proc start*(update: FrameFn; render: FrameFn) {.raises.} =
-  var engine = GameEngine()
-  engine.epoch = getMonoTime().ticks
-  engine.debugStart = engine.epoch
-
+  ## The app loop. It sleeps until the pacer wants a frame -- input, a
+  ## widget's refresh deadline, an animation, a resize gesture (see
+  ## `pacing`) -- then runs exactly one `update` (input + layout) and one
+  ## `render`, presenting only when the renderer painted. Frames never run
+  ## faster than the display refreshes.
   activeApp.running = true
+  updateRefreshPeriod(activeApp)
+  var lastReport = monoNow()
   while activeApp.running:
     pumpEvents(activeApp)
-    beginFrame(engine)
-    tick(engine, update)
-    drawFrame(activeApp, render)
-    endFrame(engine)
-    reportFPS(engine)
+    if not activeApp.running:
+      break
+    var now = monoNow()
+    if not frameWanted(now):
+      if overlayWanted(now):
+        # Render-only pass for a debug overlay: the app does not run.
+        beginOverlayPass()
+        discard drawFrame(activeApp, render)
+        endOverlayPass()
+        continue
+      waitFor(activeApp, idleWait(now))
+      reportStats(lastReport)
+      continue
+    let earliest = earliestFrameStart(activeApp.vsync)
+    if now < earliest:
+      waitFor(activeApp, earliest - now)
+      continue
+    beginFrame(now)
+    update()
+    let presented = drawFrame(activeApp, render)
+    endFrame(presented)
+    reportStats(lastReport)

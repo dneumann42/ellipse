@@ -552,8 +552,10 @@ proc syncCaret*(textLen: int) =
     selAnchor = textLen
 
 proc caretVisible*(): bool =
-  ## Half-second blink phase from wall-clock time.
+  ## Half-second blink phase from wall-clock time. A caret on screen keeps
+  ## the loop waking at each flip; nothing else needs to run for it.
   let ms = (getMonoTime().ticks - bootTime) div 1_000_000'i64
+  requestFrameIn((500'i64 - ms mod 500'i64) * 1_000_000'i64)
   (ms div 500) mod 2 == 0
 
 proc textChildId*(parentId: uint32, child: uint32 = 0): uint32 =
