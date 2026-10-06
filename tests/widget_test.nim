@@ -131,6 +131,114 @@ proc barKey(ctx: Context, kind: KeyEventKind, shift = false) =
   stepFocus(keyEvents())
   bar(ctx)
 
+# --- events: Root(handleEvents) > Outer > Middle > Leaf a, Leaf b ----------------
+
+var evLog: seq[string] = @[]
+var fire = ""            ## the leaf that emits Toggled this frame
+var pingFrom = ""        ## ... Ping
+var loseFrom = ""        ## ... Lost (nobody handles it)
+var selfPass = false     ## the leaf's own handler reemits
+var middlePass = false
+var outerPass = false
+var emitResult = false
+var keyA = WidgetKey(0'u64)
+var keyB = WidgetKey(0'u64)
+var keyedKey = WidgetKey(0'u64)
+var depthInLeaf = 0
+
+defineEvent Ping(n: int)
+
+widget Leaf(tag: string):
+  emits Toggled(on: bool)
+  emits Ping
+  emits Lost()
+  event Toggled(e):
+    evLog.add "leaf." & tag
+    if selfPass:
+      reemit
+  if tag == "a":
+    keyA = currentWidgetKey()
+  else:
+    keyB = currentWidgetKey()
+  depthInLeaf = eventDepth()
+  if fire == tag:
+    emitResult = emit Toggled(on: true)
+  if pingFrom == tag:
+    emit Ping(n: 7)
+  if loseFrom == tag:
+    emitResult = emit Lost()
+
+widget Middle(body: proc(): void):
+  emits Renamed(old: string)
+  event Toggled(e):
+    evLog.add "middle:" & $e.on
+    e.on = false                    # travels on with a reemit
+    if middlePass:
+      reemit
+  event Ping(e):
+    evLog.add "middle.ping:" & $e.n
+    emit Renamed(old: "ping")       # translated: starts at Outer
+  event Renamed:
+    evLog.add "middle.renamed"      # never: not its own translation
+  body()
+
+widget Outer(body: proc(): void):
+  event Toggled(e):
+    evLog.add "outer:" & $e.on
+    if outerPass:
+      reemit
+  event Renamed(e):
+    evLog.add "outer.renamed:" & e.old
+  body()
+
+widget focusable Keyed():
+  keyedKey = currentWidgetKey()
+
+proc evTree(ctx: Context, extraFirst = false) =
+  beginLayout()
+  handleEvents:
+    event Toggled(e):
+      evLog.add "root:" & $e.on
+    Outer:
+      Middle:
+        if extraFirst:
+          Spacer()
+        Keyed(id = hashId("keyed"), tabIndex = -1)
+        Leaf(tag = "a")
+        Leaf(tag = "b")
+  endLayout(ctx)
+
+proc evRun(ctx: Context, f = "", ping = "", lose = "", sp = false, mp = false,
+           op = false) =
+  evLog = @[]
+  fire = f
+  pingFrom = ping
+  loseFrom = lose
+  selfPass = sp
+  middlePass = mp
+  outerPass = op
+  emitResult = false
+  evTree(ctx)
+  fire = ""
+  pingFrom = ""
+  loseFrom = ""
+
+proc shown(xs: seq[string]): string =
+  result = "["
+  for i in 0 ..< xs.len:
+    if i > 0:
+      result.add ", "
+    result.add xs[i]
+  result.add "]"
+
+proc logIs(want: seq[string]): bool =
+  if evLog.len != want.len:
+    return false
+  for i in 0 ..< want.len:
+    if evLog[i] != want[i]:
+      return false
+  return true
+
 proc renderAct() =
   clay "act", row(width = fixedPx(20), height = fixedPx(20)):
     discard
@@ -313,6 +421,63 @@ proc main() {.raises.} =
   barKey(ctx, kevEnter)
   barKey(ctx, kevTab)
   expect(not elementData(filePop).found, "menu: Tab away closes it")
+
+  # 9. events: self-handle first, catch stops bubbling, reemit carries the
+  #    changed payload on, translations start at the parent, unhandled
+  #    events reach the log, frames are balanced and keyed stably.
+  evRun(ctx, f = "a")
+  expect(logIs(@["leaf.a"]), "events: the emitter's own handler runs first " &
+    "and consumes, got " & shown(evLog))
+  expect(emitResult, "events: emit returns true when consumed")
+  evRun(ctx, f = "a", sp = true)
+  expect(logIs(@["leaf.a", "middle:true"]),
+    "events: reemit hands it to the parent, got " & shown(evLog))
+  evRun(ctx, f = "b", sp = true, mp = true)
+  expect(logIs(@["leaf.b", "middle:true", "outer:false"]),
+    "events: a reemit carries the mutated payload, got " & shown(evLog))
+  evRun(ctx, f = "a", sp = true, mp = true, op = true)
+  expect(logIs(@["leaf.a", "middle:true", "outer:false", "root:false"]),
+    "events: handleEvents catches at the root, got " & shown(evLog))
+  var log = eventLog()
+  expect(log.len == 1, "events: one record per emit, got " & $log.len)
+  if log.len == 1:
+    let r = log[0]
+    expect(r.name == "Toggled" and r.consumed, "events: record names it")
+    expect(r.source == keyA, "events: source is the emitting widget")
+    expect(r.path.len == 4 and r.handledBy.len == 4,
+      "events: path and handledBy span leaf..root, got " & $r.path.len &
+      "/" & $r.handledBy.len)
+  expect(eventDepth() == 0, "events: frames balanced after layout")
+  expect(depthInLeaf == 4, "events: root, outer, middle, leaf frames open, got " &
+    $depthInLeaf)
+
+  evRun(ctx, ping = "b")
+  expect(logIs(@["middle.ping:7", "outer.renamed:ping"]),
+    "events: a translated emit skips the translator's own handler, got " &
+    shown(evLog))
+  log = eventLog()
+  expect(log.len == 2 and log[0].name == "Renamed" and log[1].name == "Ping",
+    "events: nested emit recorded inside its parent's dispatch")
+
+  evRun(ctx, lose = "a")
+  expect(not emitResult, "events: emit returns false when nobody consumes")
+  log = eventLog()
+  expect(log.len == 1 and not log[0].consumed and log[0].handledBy.len == 0 and
+    log[0].path.len == 4, "events: an unhandled event is logged unconsumed")
+
+  evRun(ctx)
+  let a1 = keyA
+  let b1 = keyB
+  let k1 = keyedKey
+  evRun(ctx)
+  expect(keyA == a1 and keyB == b1, "events: widget keys stable across frames")
+  expect(keyA != keyB, "events: sibling widgets get distinct keys")
+  evLog = @[]
+  evTree(ctx, extraFirst = true)
+  expect(keyA != a1, "events: positional keys follow the sibling index")
+  expect(keyedKey == k1, "events: an element id keys a widget independent " &
+    "of its siblings")
+  expect(eventLog().len == 0, "events: a quiet frame logs nothing")
 
   echo "widget_test: ", passed, " passed, ", failures, " failed"
   if failures > 0:

@@ -14,6 +14,9 @@ export theme
 import ./focus
 export focus
 
+import ./events
+export events
+
 ## --- wheel feel ----------------------------------------------------------------
 ##
 ## Scroll feel borrowed from the gothivania HUD (`src/hud/gui.cpp`): a fast
@@ -546,6 +549,29 @@ proc menuSeparator*() =
 ## the Tab chain before its body runs: click focuses it, Tab / Shift+Tab
 ## walk the chain in `tabIndex` order, and the body reads `focused(id)`,
 ## `gainedFocus(id)` and `keyActivated(id)`. See `ellipse_ui/focus`.
+##
+## Widgets talk upward with *events*: typed payloads that bubble from the
+## emitting widget through its enclosing widgets until one catches them.
+## A widget declares what it emits and catches at the top of its body:
+##
+##   widget focusable Toggle(label: string, on: bool):
+##     emits Toggled(on: bool)        # declares the event type
+##     ...
+##     if clickedIn(id) or keyActivated(id):
+##       emit Toggled(on: not on)
+##
+##   widget Settings(body: proc(): void):
+##     event Toggled(e):              # caught: stops here...
+##       dirty = true
+##       reemit                       # ...unless passed on
+##     body()
+##
+## The emitter's own handlers run first, then each enclosing widget's, then
+## a `handleEvents:` block around the whole tree. A handler may change the
+## payload before a `reemit`, or `emit` a different event, which starts at
+## the handler's parent. Every emit is recorded per frame (`eventLog`) with
+## the widgets it passed and the ones that handled it. See
+## `ellipse_ui/events`.
 
 proc emptySlot*() =
   ## The no-op slot: what a widget renders where a call site passed nothing.

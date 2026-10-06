@@ -1,0 +1,284 @@
+## Widget events: typed, payload-carrying messages that bubble up the live
+## widget nesting until something catches them.
+##
+## A widget declares what it emits and what it catches in its body (the
+## `widget` macro lifts both out, see `ellipse_ui/ui`):
+##
+##   widget focusable Toggle(label: string, on: bool):
+##     emits Toggled(on: bool)      # declares `type Toggled* = object`
+##     event Toggled(e):            # the widget may catch its own events
+##       e.on = e.on and enabled    # `e` points at the live payload
+##       reemit                     # ...and pass it on, changed
+##     if keyActivated(id):
+##       emit Toggled(on: not on)   # -> true when something consumed it
+##
+##   widget Form(body: proc(): void):
+##     event Toggled(e):
+##       dirty = true               # caught: bubbling stops here
+##     body()
+##
+## `emits Name(field: T, ...)` declares the event type (an exported object
+## plus its `emit` overload); a bare `emits Name` names one declared
+## elsewhere -- by another widget or a top-level `defineEvent Name(...)`.
+## The macro rejects a direct `emit Name` in a widget body that does not
+## declare `emits Name`.
+##
+## Dispatch is synchronous, during layout. Every widget invocation pushes an
+## *event frame* for the duration of its body; `emit` walks the frames from
+## the innermost outwards and runs the first handler for the event's kind:
+##
+##   - the handler *consumes* the event by default: bubbling stops;
+##   - `reemit` inside the handler lets it continue to the next frame up,
+##     carrying whatever the handler changed in the payload;
+##   - an `emit` inside a handler starts at the handler's *parent* frame, so
+##     a widget can translate an event (catch `Toggled`, emit `FormChanged`)
+##     without catching its own translation.
+##
+## Slot content runs inside the frame of the widget that calls the slot, so
+## an `emit` in a caller's block bubbles through the host widget first --
+## the composed-tree rule DOM events follow.
+##
+## Code outside any widget catches events with a `handleEvents:` block, which
+## installs a frame around its statements:
+##
+##   handleEvents:
+##     event FormChanged:
+##       save()
+##     drawUi()
+##
+## Because handlers run mid-layout, whatever a catching widget already drew
+## this frame reflects the state before the event. The *event log* records
+## that precisely: each frame's records name the emitting widget, the frames
+## the event passed, and the frames that handled it -- the set of UI
+## sections an event invalidates. `eventLog()` is the last complete frame's
+## log; records with `consumed == false` reached the root unhandled.
+##
+## Widget identity: each frame gets a `WidgetKey` derived from its parent's
+## key, the widget's name and its position among the parent's widget
+## children (a focusable widget's element id replaces the position), so a
+## widget keeps its key across frames as long as the tree above it is
+## stable.
+
+import std/syncio
+
+import clay
+
+type
+  EventKind* = distinct uint32
+    ## A per-event-type id: FNV-1a of the type's qualified name.
+  WidgetKey* = distinct uint64
+    ## Stable identity of one widget invocation (see the module header).
+  EventFlow* = enum
+    efConsumed  ## the handler caught the event: stop bubbling
+    efReemit    ## the handler ran and passed the event on
+    efPass      ## no handler for this kind in this frame
+  EventHandler* = proc (kind: EventKind, payload: pointer): EventFlow {.closure.}
+
+  EventFrame = object
+    key: WidgetKey
+    name: string
+    handler: EventHandler
+    handles: seq[EventKind]
+    children: uint32          ## widget children pushed so far this frame
+
+  EventRecord* = object
+    ## One `emit`: what was emitted, from where, and who handled it.
+    kind*: EventKind
+    name*: string
+    source*: WidgetKey            ## innermost frame at the emit, 0 = none
+    path*: seq[WidgetKey]         ## frames the event visited, innermost first
+    handledBy*: seq[WidgetKey]    ## frames whose handler ran for it
+    consumed*: bool               ## some handler stopped it
+
+  KindEntry = object
+    kind: EventKind
+    name: string
+
+proc `==`*(a, b: EventKind): bool {.borrow.}
+proc `==`*(a, b: WidgetKey): bool {.borrow.}
+proc `$`*(k: EventKind): string = $uint32(k)
+proc `$`*(k: WidgetKey): string = $uint64(k)
+
+proc noHandler(kind: EventKind, payload: pointer): EventFlow = efPass
+
+var
+  frames: seq[EventFrame] = @[]
+  rootChildren = 0'u32       ## root-level widget frames pushed this frame
+  rootGen = 0'u32            ## clay generation `rootChildren` counts for
+  dispatchDepth = 0          ## nested `dispatchEvent` calls in flight
+  dispatchStart = -1         ## while a handler runs: the frame to start at
+  reemitRequested = false
+  logNow: seq[EventRecord] = @[]
+  logNowGen = 0'u32
+  logLast: seq[EventRecord] = @[]
+  logLastGen = 0'u32
+  kinds: seq[KindEntry] = @[]
+
+# --- kinds ---------------------------------------------------------------------
+
+proc registerEventKind*(kind: EventKind, name: string) =
+  ## Record a declared event type (the generated code calls this at module
+  ## init). Two distinct names hashing to one kind abort start-up: their
+  ## handlers would catch each other's events.
+  for e in kinds:
+    if e.kind == kind:
+      if e.name != name:
+        echo "ellipse_ui/events: event kind collision between `", e.name,
+          "` and `", name, "` -- rename one of them"
+        quit 1
+      return
+  kinds.add KindEntry(kind: kind, name: name)
+
+proc eventKindName*(kind: EventKind): string =
+  ## The qualified name a kind was registered with, "" when unknown.
+  for e in kinds:
+    if e.kind == kind:
+      return e.name
+  return ""
+
+# --- frames --------------------------------------------------------------------
+
+proc mixKey(a: uint64, b: uint64): uint64 =
+  ## One splitmix64 round over `a xor b`.
+  var z = (a xor b) + 0x9E3779B97F4A7C15'u64
+  z = (z xor (z shr 30)) * 0xBF58476D1CE4E5B9'u64
+  z = (z xor (z shr 27)) * 0x94D049BB133111EB'u64
+  result = z xor (z shr 31)
+
+proc pushEventFrame*(name: string, nameHash: uint32, id: uint32,
+                     handler: EventHandler, handles: seq[EventKind]) =
+  ## Open the event frame of one widget invocation (generated code). `id`
+  ## is the widget's element id when it has one, else 0 -- then the frame
+  ## is keyed by its position among its parent's widget children.
+  var parent = 0'u64
+  var index = 0'u32
+  if frames.len > 0:
+    parent = uint64(frames[^1].key)
+    index = frames[^1].children
+    frames[^1].children += 1'u32
+  else:
+    let ctx = currentContext()
+    let gen = ctx.generation
+    if gen != rootGen:
+      rootGen = gen
+      rootChildren = 0'u32
+    index = rootChildren
+    rootChildren += 1'u32
+  var key = mixKey(parent, uint64(nameHash))
+  if id != 0'u32:
+    key = mixKey(key, 0x1_0000_0000'u64 or uint64(id))
+  else:
+    key = mixKey(key, uint64(index))
+  frames.add EventFrame(key: WidgetKey(key), name: name, handler: handler,
+                        handles: handles, children: 0'u32)
+
+proc pushEventFrame*(name: string, nameHash: uint32, id: uint32) =
+  ## A frame with no handlers: it still has a key and shows up in paths.
+  pushEventFrame(name, nameHash, id, noHandler, @[])
+
+proc popEventFrame*() =
+  ## Close the innermost frame (generated code, from a `finally`).
+  if frames.len > 0:
+    frames.setLen(frames.len - 1)
+
+proc eventDepth*(): int =
+  ## Frames open right now: 0 outside every widget and `handleEvents`.
+  frames.len
+
+proc currentWidgetKey*(): WidgetKey =
+  ## The key of the innermost open frame, 0 outside every widget.
+  if frames.len == 0:
+    return WidgetKey(0'u64)
+  return frames[^1].key
+
+# --- dispatch ------------------------------------------------------------------
+
+proc handles(f: EventFrame, kind: EventKind): bool =
+  for k in f.handles:
+    if k == kind:
+      return true
+  return false
+
+proc reemit*() =
+  ## Inside an `event` handler: pass the event on to the next frame up once
+  ## the handler returns, instead of consuming it. Changes the handler made
+  ## to the payload travel with it.
+  reemitRequested = true
+
+proc noteRecord(rec: EventRecord) =
+  let ctx = currentContext()
+  let gen = ctx.generation
+  if gen != logNowGen:
+    logLast = logNow
+    logLastGen = logNowGen
+    logNow = @[]
+    logNowGen = gen
+  logNow.add rec
+
+proc dispatchEvent*(kind: EventKind, name: string, payload: pointer): bool =
+  ## Bubble one event (generated `emit` overloads call this): run the
+  ## handlers for `kind` from the innermost frame outwards until one
+  ## consumes it. Returns true when some handler consumed it.
+  var at = frames.len - 1
+  if dispatchDepth > 0:
+    at = min(dispatchStart, frames.len - 1)
+  var rec = EventRecord(kind: kind, name: name, path: @[], handledBy: @[],
+                        consumed: false)
+  if at >= 0:
+    rec.source = frames[at].key
+  let savedStart = dispatchStart
+  let savedReemit = reemitRequested
+  inc dispatchDepth
+  try:
+    while at >= 0:
+      rec.path.add frames[at].key
+      if handles(frames[at], kind):
+        rec.handledBy.add frames[at].key
+        reemitRequested = false
+        dispatchStart = at - 1
+        let handler = frames[at].handler
+        let flow = handler(kind, payload)
+        if flow == efConsumed and not reemitRequested:
+          rec.consumed = true
+          break
+      dec at
+  finally:
+    dec dispatchDepth
+    dispatchStart = savedStart
+    reemitRequested = savedReemit
+  result = rec.consumed
+  noteRecord(rec)
+
+# --- the log -------------------------------------------------------------------
+
+proc eventLog*(): seq[EventRecord] =
+  ## The emits of the last complete frame, in emit order. Mid-layout that
+  ## is the previous generation's log, between frames the one just laid
+  ## out -- the same rotation as the focus chain.
+  let ctx = currentContext()
+  var complete = ctx.generation
+  if ctx.openStack.len > 1:     # mid-layout: root + its scope are open
+    complete -= 1'u32
+  if logNowGen == complete:
+    return logNow
+  if logLastGen == complete:
+    return logLast
+  return @[]
+
+proc currentEventLog*(): seq[EventRecord] =
+  ## The emits of the frame in progress so far (or of the latest frame).
+  let ctx = currentContext()
+  if logNowGen == ctx.generation:
+    return logNow
+  return @[]
+
+# --- the DSL -------------------------------------------------------------------
+
+template handleEvents*(body: untyped) {.plugin: "ellipse_ui/deps/mevents".}
+  ## Catch events around a block of statements outside any widget: the
+  ## block's `event Name(e): ...` sections become a frame's handlers, the
+  ## remaining statements run inside it.
+
+template defineEvent*(head: untyped) {.plugin: "ellipse_ui/deps/mevents".}
+  ## Declare an event type at top level -- `defineEvent Saved(path: string)`
+  ## -- for widgets that share it through a bare `emits Saved`.

@@ -21,3 +21,37 @@
 
 #+end_src
 
+* Events
+
+Widgets declare the events they emit; an emitted event bubbles up the
+widget nesting (the emitter first, then each enclosing widget, then a
+=handleEvents:= block) until a handler consumes it. =reemit= passes it on,
+with any changes the handler made to the payload.
+
+#+begin_src nim
+
+  widget focusable Toggle(label: string, on: bool):
+    emits Toggled(on: bool)
+    item(id, row(padding = padAll(6)).focusRing(id)):
+      text(label)
+    if clickedIn(id) or keyActivated(id):
+      emit Toggled(on: not on)
+
+  widget Settings(body: proc(): void):
+    emits SettingsChanged()
+    event Toggled(e):
+      emit SettingsChanged()      # translated: starts at Settings' parent
+    body()
+
+  proc drawUi() =
+    handleEvents:
+      event SettingsChanged:
+        saveSettings()
+      Settings:
+        Toggle(id = hashId("wifi"), label = "Wifi", on = wifi)
+
+#+end_src
+
+=eventLog()= lists the last frame's emits with the emitting widget, the
+widgets each one passed and the ones that handled it -- the sections of
+the UI an event invalidates.

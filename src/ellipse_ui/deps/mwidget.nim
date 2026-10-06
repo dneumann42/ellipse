@@ -59,6 +59,23 @@
 ## `registerFocus(id, tabIndex)` -- so the body can ask `focused(id)`,
 ## `gainedFocus(id)`, `keyActivated(id)` or paint `.focusRing(id)`.
 ##
+## Events (`ellipse_ui/events`): the body's top-level `emits Name(...)`
+## lines and `event Name(e): ...` sections are lifted out (`meventgen`).
+## Declared event types are generated ahead of the proc; every widget body
+## opens an event frame -- keyed by `id` when the widget has an
+## `id: ElementId` -- that holds its handlers while the rest of the body
+## runs:
+##
+##   widget focusable Toggle(label: string, on: bool):
+##     emits Toggled(on: bool)
+##     event Toggled(e):
+##       reemit
+##     if keyActivated(id):
+##       emit Toggled(on: not on)
+##
+## A direct `emit Name(...)` of an event the widget does not declare is a
+## compile error.
+##
 ## Input shape (verified against nifler output):
 ##   (stmts widget (oconstr Name (kv pname ptype)...) (stmts impl...))
 ## or, for `widget Name():`, the head is `(call Name)`; for `widget Name:`
@@ -69,6 +86,7 @@
 
 import plugins
 import std/[syncio, envvars]
+import ./meventgen
 
 type
   WidgetParam = object
@@ -306,6 +324,14 @@ proc transform(n: NifCursor): NifBuilder =
       args)
   let impl = args               # cursor into the (refcounted) input tree
 
+  # events: lift `emits` / `event` sections out of the body
+  let owner = "widget `" & name & "`"
+  var sections = collectEventSections(impl, owner, allowEmits = true)
+  if sections.error.len == 0:
+    checkSections(sections, owner, checkEmits = true)
+  if sections.error.len > 0:
+    return errorTree(sections.error, sections.errorAt)
+
   # the trailing block fills the last declared parameter when it is a slot
   var blockSlot = ""
   if params.len > 0 and params[^1].isSlot:
@@ -328,8 +354,20 @@ proc transform(n: NifCursor): NifBuilder =
                            zeroDefault: true)
     params = full
 
+  # the frame is keyed by the widget's element id when it has one
+  var idIdent = ""
+  for p in params:
+    if p.name == "id" and (p.injected == "ElementId" or
+        (p.typ.kind == Ident and p.typ.identText == "ElementId")):
+      idIdent = "id"
+
   # --- (proc NameImpl* <params> = impl) ---------------------------------
   result.withTree StmtsS, info:
+    # --- event types this widget declares ---------------------------------
+    for d in sections.decls:
+      if d.declares:
+        emitEventType(result, d, moduleName(info))
+
     result.withTree ProcS, info:
       result.addIdent name & "Impl"
       result.addIdent "x"                 # exported
@@ -338,17 +376,15 @@ proc transform(n: NifCursor): NifBuilder =
         for p in params:
           emitParam(result, info, p)
       result.addEmptyNode3 info           # result, pragmas, effects
-      var ci = impl
-      if focusable:
-        # registerFocus(id, tabIndex) ahead of the body
-        result.withTree StmtsS, info:
+      result.withTree StmtsS, info:
+        if focusable:
+          # registerFocus(id, tabIndex) ahead of the body
           result.withTree CallS, info:
             result.addIdent "registerFocus"
             result.addIdent "id"
             result.addIdent "tabIndex"
-          result.takeTree ci
-      else:
-        result.takeTree ci
+        # handlers + pushEventFrame + try: body finally: popEventFrame()
+        emitEventFrame(result, info, sections, name, idIdent)
 
     # --- (template Name* <untyped params> = ...closure wrapper...) ------
     result.withTree TemplateS, info:
@@ -392,9 +428,12 @@ proc transform(n: NifCursor): NifBuilder =
                     result.addIdent p.name
                 result.addSymUse slotSym, info
 
-  if getEnv("WIDGET_DSL_DEBUG") != "":
+  # WIDGET_DSL_DEBUG=1 dumps to /tmp/opencode, =<dir> into that directory
+  let debugDir = getEnv("WIDGET_DSL_DEBUG")
+  if debugDir != "":
+    let dir = if debugDir == "1": "/tmp/opencode" else: debugDir
     try:
-      writeFile("/tmp/opencode/mwidget-" & name & ".nif", renderTree(result))
+      writeFile(dir & "/mwidget-" & name & ".nif", renderTree(result))
     except ErrorCode:
       discard
 
