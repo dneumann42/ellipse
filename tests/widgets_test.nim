@@ -104,6 +104,7 @@ proc draw() =
 
 proc frame() =
   notePressState()   # apps fold the press claim inside updateUI; step it here
+  stepFocus(keyEvents())   # ... and Tab, likewise
   draw()
 
 proc boxCenter(id: ElementId): Vec2 =
@@ -295,6 +296,118 @@ proc main() {.raises.} =
   expect(noteText == "ab\nX!\nc\nef",
     "multilineField: C-k kills to line end, got " & $noteText)
   click(tfId)                            # blur commits the buffer
+
+  # --- focus: every control is a Tab stop, in layout order ----------------------
+  pressKey(kevEnter)                     # leave the text field: nothing focused
+  expect(focusedId() == 0'u32, "focus: Enter left the field")
+  var stops: seq[ElementId] = @[]
+  stops.add cbId
+  stops.add swId
+  stops.add comboId
+  stops.add multiId
+  stops.add tfId
+  stops.add mlId
+  stops.add nfId
+  stops.add noteId
+  stops.add tabStripId(viewId)
+  stops.add refreshId
+  var k = 0
+  while k < stops.len:
+    pressKey(kevTab)
+    expect(focused(stops[k]), "focus: Tab stop " & $k & " in layout order")
+    inc k
+  pressKey(kevTab)
+  expect(focused(cbId), "focus: Tab wraps to the first control")
+  pressKey(kevTab, shift = true)
+  expect(focused(refreshId), "focus: Shift+Tab wraps back to the last")
+
+  # button: Enter presses it
+  refreshClicked = false
+  pressKey(kevEnter)
+  expect(refreshClicked, "focus: Enter presses a focused button")
+
+  # checkbox: Space flips it; switch: Enter flips it
+  pressKey(kevTab)                       # wraps to the checkbox
+  let agreeBefore = agree
+  typeStr(" ")
+  expect(agree != agreeBefore, "focus: Space toggles a focused checkbox")
+  pressKey(kevTab)
+  let wifiBefore = wifi
+  pressKey(kevEnter)
+  expect(wifi != wifiBefore, "focus: Enter toggles a focused switch")
+
+  # combo: arrows step the selection, Enter opens, Tab away closes
+  pressKey(kevTab)
+  expect(focused(comboId), "focus: Tab -> combo")
+  comboSel = 0
+  pressKey(kevDown)
+  expect(comboSel == 1, "focus: Down steps the combo, got " & $comboSel)
+  pressKey(kevUp)
+  pressKey(kevUp)
+  expect(comboSel == 0, "focus: Up stops at the first option")
+  let comboPop = localId("combo.pop", comboId.id)
+  pressKey(kevEnter)
+  expect(elementData(comboPop).found, "focus: Enter opens the combo list")
+  pressKey(kevEscape)
+  expect(not elementData(comboPop).found, "focus: Escape closes the list")
+  expect(focused(comboId), "focus: Escape keeps the combo focused")
+  pressKey(kevEnter)
+  pressKey(kevTab)
+  expect(not elementData(comboPop).found, "focus: Tab away closes the list")
+
+  # multiselect: Space opens, arrows move the highlight, Space ticks
+  expect(focused(multiId), "focus: Tab -> multiselect")
+  let multiPop = localId("multi.pop", multiId.id)
+  multiSel = 0'u64
+  typeStr(" ")
+  expect(elementData(multiPop).found, "focus: Space opens the multiselect")
+  expect(multiSel == 0'u64, "focus: the opening Space ticks nothing")
+  pressKey(kevDown)
+  typeStr(" ")
+  expect(isSet(multiSel, 1) and countSelected(multiSel) == 1,
+    "focus: Space ticks the highlighted option")
+  pressKey(kevEscape)
+  expect(not elementData(multiPop).found, "focus: Escape closes the list")
+
+  # text field: Tab seeds the caret at the end, Escape reverts to it
+  pressKey(kevTab)
+  expect(focused(tfId), "focus: Tab -> text field")
+  let nameBefore = nameText
+  typeStr("e")
+  expect(nameText == nameBefore & "e",
+    "focus: a tabbed-to field seeds its caret at the end, got " & $nameText)
+  pressKey(kevEscape)
+  expect(nameText == nameBefore,
+    "focus: Escape reverts to the value Tab arrived with, got " & $nameText)
+
+  # number field: tabbing out commits the typed buffer
+  pressKey(kevTab)                       # nothing focused -> first stop
+  while not focused(nfId):
+    pressKey(kevTab)
+  let qtyBefore = qty
+  typeStr("0")                           # buffer "<qty>0"
+  pressKey(kevTab)
+  expect(qty == qtyBefore * 10,
+    "focus: tabbing out commits the number buffer, got " & $qty)
+
+  # link: Enter follows it
+  expect(focused(noteId), "focus: Tab -> text link")
+  noteClicked = false
+  pressKey(kevEnter)
+  expect(noteClicked, "focus: Enter follows a focused link")
+  noteClicked = false
+
+  # tab strip: Left/Right switch tabs, wrapping
+  pressKey(kevTab)
+  setActiveTab(viewId, 0)
+  pressKey(kevRight)
+  expect(activeTab(viewId) == 1, "focus: Right selects the next tab")
+  pressKey(kevLeft)
+  pressKey(kevLeft)
+  expect(activeTab(viewId) == viewTabs.len - 1, "focus: Left wraps")
+  setActiveTab(viewId, 0)
+  blur()
+  pressKey(kevEscape)                    # settle a frame with nothing focused
 
   # --- text link ---------------------------------------------------------------------
   click(noteId)

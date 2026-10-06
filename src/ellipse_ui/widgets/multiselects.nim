@@ -7,14 +7,24 @@
 ## panel, option rows, shaded footer buttons) comes from `common`, shared
 ## with `comboBox`; only the tick rows and their bitmask bookkeeping are
 ## this widget's own.
+##
+## Keyboard: a Tab stop at `tabIndex`; Enter toggles the list, Space opens
+## it, Escape closes it. In the open list Up/Down move a highlight and
+## Space ticks the highlighted option.
 
 import clay
 import ../ui
+
+import ellipse/platform/platform
 
 import ./common
 import ./scrollbars
 
 type Selection* = uint64
+
+var
+  cursorId = 0'u32   ## the multiselect whose list the highlight belongs to
+  cursor = -1        ## keyboard-highlighted option, -1 none
 
 func bit*(i: int): Selection =
   ## The mask for option `i`.
@@ -57,13 +67,29 @@ func selectionSummary*(sel: Selection, options: seq[string]): string =
 
 proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
                   placeholder = "Select...", width = grow(),
-                  height = fixedPx(activeTheme.metrics.controlHeight)): Selection =
+                  height = fixedPx(activeTheme.metrics.controlHeight),
+                  tabIndex: int = 0): Selection =
   ## Returns the selection mask to store back. The popover stays open while
   ## the user ticks items; a click outside it closes.
   result = selection
   let t = activeTheme
   let popId = localId("multi.pop", id.id)
-  let isOpen = toggleDropdown(id, popId)
+  let wasOpen = dropdownIsOpen(id)
+  let isOpen = dropdownFocus(id, popId, tabIndex)
+  if isOpen and not wasOpen:
+    cursorId = id.id
+    cursor = if focused(id): 0 else: -1
+  if isOpen and wasOpen and focused(id) and cursorId == id.id and
+      options.len > 0:
+    # keys the open list owns (the opening key itself belongs to the field)
+    let evs = keyEvents()
+    for ev in evs:
+      if ev.kind == kevDown:
+        cursor = (cursor + 1) mod options.len
+      elif ev.kind == kevUp:
+        cursor = if cursor <= 0: options.len - 1 else: cursor - 1
+      elif isSpace(ev) and cursor >= 0 and cursor < options.len:
+        result = result xor bit(cursor)
 
   let summary = selectionSummary(result, options)
   var shown = placeholder
@@ -78,7 +104,7 @@ proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
       var i = 0
       while i < options.len:
         let oid = localIdWithIndex("multi.opt", uint32(i), id.id)
-        optionRow(oid, false, 8, centerY):
+        optionRow(oid, cursorId == id.id and i == cursor, 8, centerY):
           let picked = pressedNow() and hovered()
           # tick already flipped when this is the frame the row was hit
           tickBox(isSet(result, i) != picked, box = t.metrics.checkSizeSm,

@@ -54,6 +54,7 @@ const
   ## SDL3 scancodes for the keys the UI edits with (USB HID usage page 0x07).
   ScanEnter = 40'i32
   ScanEscape = 41'i32
+  ScanTab = 43'i32
   ScanBackspace = 42'i32
   ScanDelete = 76'i32
   ScanHome = 74'i32
@@ -248,7 +249,8 @@ type
     kevUp, kevDown, kevHome, kevEnd, kevEnter, kevEscape,
     kevPageUp, kevPageDown,
     kevF1, kevF2, kevF3, kevF4, kevF5, kevF6,
-    kevF7, kevF8, kevF9, kevF10, kevF11, kevF12
+    kevF7, kevF8, kevF9, kevF10, kevF11, kevF12,
+    kevTab   ## Tab / Shift+Tab: focus traversal (see `ellipse_ui/focus`)
 
   KeyEvent* = object
     kind*: KeyEventKind
@@ -409,6 +411,7 @@ proc keyEventFor(scancode, key, modifiers: int32): KeyEvent =
   case scancode
   of ScanEnter, ScanKeypadEnter: result.kind = kevEnter
   of ScanEscape: result.kind = kevEscape
+  of ScanTab: result.kind = kevTab
   of ScanBackspace: result.kind = kevBackspace
   of ScanDelete: result.kind = kevDelete
   of ScanHome: result.kind = kevHome

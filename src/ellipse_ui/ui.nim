@@ -11,6 +11,9 @@ import ellipse/platform/renderer
 import ./theme
 export theme
 
+import ./focus
+export focus
+
 ## --- wheel feel ----------------------------------------------------------------
 ##
 ## Scroll feel borrowed from the gothivania HUD (`src/hud/gui.cpp`): a fast
@@ -138,6 +141,9 @@ proc updateUI*(skipWheel: bool = false) =
   # Fold this frame's press edge into the held-press snapshot (see above).
   notePressState()
 
+  # Tab / Shift+Tab walk the focus chain the last frame registered.
+  stepFocus(keyEvents())
+
   # Wheel-driven scrolling for the widget set's clip containers (page and
   # panels, dropdown lists etc), through the accel/glide filter above.
   # Drag-scrolling stays off: widgets claim press themselves, and the
@@ -175,6 +181,15 @@ proc text*(value: string, fontSize: uint16 = activeTheme.text.control,
   ## (from `TextSizes`) to step off the default voice.
   textElement(value, TextConfig(fontSize: fontSize, color: color))
 
+proc focusRing*(decl: ElementDeclaration, id: ElementId): ElementDeclaration =
+  ## `decl` ringed in the accent colour while `id` holds keyboard focus --
+  ## the one-liner a focusable widget adds to its frame:
+  ## `.bg(...).corner(...).focusRing(id)`. Unfocused, `decl` is unchanged.
+  if focused(id):
+    let t = activeTheme
+    return decl.border(max(t.metrics.borderRaised, 2), t.palette.accent)
+  return decl
+
 proc shade*(over: bool): Color =
   if over:
     return buttonHoverBg
@@ -189,22 +204,26 @@ proc shade*(over: bool, idle: Color, hover = buttonHoverBg): Color =
   return idle
 
 proc button*(id: ElementId, label: string, width = fit(), height = fit(),
-             fontSize: uint16 = 0): bool =
+             fontSize: uint16 = 0, tabIndex: int = 0): bool =
   ## A themed push button: the three-way raised surface (`shade`), the
   ## compressed hold state (`squeeze`), and the label centred in it.
   ## `fontSize` overrides the theme's button size -- dialogs pass the
-  ## smaller `control` size so compact footers fit their labels.
+  ## smaller `control` size so compact footers fit their labels. A Tab
+  ## stop at `tabIndex`; Enter or Space presses it while focused.
   let t = activeTheme
   let fs = if fontSize > 0: fontSize else: t.text.button
+  registerFocus(id, tabIndex)
   let over = pointerOver(id)
   let press = pressing(id)
-  result = over and currentContext().pointerData().state == pressedThisFrame
+  result = (over and currentContext().pointerData().state == pressedThisFrame) or
+    keyActivated(id)
   openElement(id)
   configureOpenElement(col(width = width, height = height, alignX = centerX,
       alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
       .bg(shade(over, press))
       .corner(t.radii.button)
-      .border(t.metrics.borderRaised, t.palette.panelBorder))
+      .border(t.metrics.borderRaised, t.palette.panelBorder)
+      .focusRing(id))
   textElement(label, TextConfig(fontSize: fs, color: t.palette.textColor))
   closeElement()
 
@@ -283,17 +302,90 @@ template listCard*(label: untyped, index: untyped, width: untyped,
 
 type MenuBody* = proc() {.closure.}
 
+## Menus are Tab stops too. On a focused menu button Enter, Space or Down
+## opens it; in an open menu Up/Down move the highlight, Enter picks,
+## Escape closes, and Left/Right step to the neighbouring menu of the bar
+## (staying open). Focus leaving the button -- Tab, a click elsewhere --
+## closes its menu.
+
 var
   openMenuId = 0'u32
   menuPress = false
   menuSelected = false
+  menuCursor = -1          ## keyboard-highlighted item of the open menu
+  menuItemIdx = 0          ## items declared so far by the open menu
+  menuItemCount = 0        ## items the open menu declared last frame
+  menuEnter = false        ## Enter picks the highlighted item this frame
+  menuBarNow: seq[uint32] = @[]   ## menu buttons of the bar being laid out
+  menuBarLast: seq[uint32] = @[]  ## ... and of the previous frame
+  menuKeysGen = 0'u32      ## frame whose keys a menu already handled
 
 proc menuPressed(): bool =
   currentContext().pointerData().state == pressedThisFrame
 
+proc openMenu(id: uint32, cursor = -1) =
+  ## Open menu `id`; a keyboard open passes `cursor = 0` to highlight the
+  ## first item, a click leaves the highlight to the pointer.
+  openMenuId = id
+  menuCursor = cursor
+  menuItemCount = 0
+
+proc stepMenuBar(id: uint32, dir: int, wasOpen: bool) =
+  ## Left/Right: hand focus (and the open state) to the neighbouring menu.
+  var at = -1
+  for i in 0 ..< menuBarLast.len:
+    if menuBarLast[i] == id:
+      at = i
+  if at < 0 or menuBarLast.len < 2:
+    return
+  let next = menuBarLast[(at + dir + menuBarLast.len) mod menuBarLast.len]
+  setFocus(ElementId(id: next))
+  if wasOpen:
+    openMenu(next, 0)
+
+proc menuKeys(btnId: ElementId) =
+  ## Fold the focused menu button's keys into the open-menu state. Once
+  ## per frame: a Left/Right hands focus to a menu laid out later in the
+  ## same frame, which must not see the key again.
+  let gen = currentContext().generation
+  if menuKeysGen == gen:
+    return
+  menuKeysGen = gen
+  let evs = keyEvents()
+  for ev in evs:
+    let isOpen = openMenuId == btnId.id
+    case ev.kind
+    of kevEnter:
+      if not isOpen:
+        openMenu(btnId.id, 0)
+      elif menuCursor >= 0:
+        menuEnter = true
+      else:
+        openMenuId = 0'u32
+    of kevDown:
+      if not isOpen:
+        openMenu(btnId.id, 0)
+      elif menuItemCount > 0:
+        menuCursor = (menuCursor + 1) mod menuItemCount
+    of kevUp:
+      if isOpen and menuItemCount > 0:
+        menuCursor = if menuCursor <= 0: menuItemCount - 1 else: menuCursor - 1
+    of kevEscape:
+      if isOpen:
+        openMenuId = 0'u32
+    of kevLeft:
+      stepMenuBar(btnId.id, -1, isOpen)
+    of kevRight:
+      stepMenuBar(btnId.id, 1, isOpen)
+    else:
+      if isSpace(ev) and not isOpen:
+        openMenu(btnId.id, 0)
+
 proc toolBar*(id: string, blk: MenuBody) =
   let t = activeTheme
   menuPress = false
+  menuBarLast = menuBarNow
+  menuBarNow = @[]
   openElement(elementId(id))
   configureOpenElement(row(width = grow(), height = fixedPx(t.metrics.toolbarHeight),
                            gap = t.metrics.padToolbar,
@@ -305,14 +397,21 @@ proc menu*(label: string, blk: MenuBody) =
   let t = activeTheme
   let btnId = elementId("menu." & label)
   let popId = elementId("menu." & label & ".pop")
+  menuBarNow.add btnId.id
+  registerFocus(btnId, 0, popId)
   let clicked = menuPressed()
   if clicked:
     if pointerOver(btnId):
-      openMenuId = if openMenuId == btnId.id: 0'u32 else: btnId.id
+      if openMenuId == btnId.id: openMenuId = 0'u32
+      else: openMenu(btnId.id)
       menuPress = true
     elif openMenuId == btnId.id:
       if pointerOver(popId): menuPress = true   # press inside the popover
       else: openMenuId = 0'u32                  # press elsewhere: dismiss
+  if focused(btnId):
+    menuKeys(btnId)
+  elif openMenuId == btnId.id:
+    openMenuId = 0'u32                          # focus left: close
   let isOpen = openMenuId == btnId.id
 
   let over = pointerOver(btnId)
@@ -322,7 +421,8 @@ proc menu*(label: string, blk: MenuBody) =
       alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
       .bg(shade(over, press))
       .corner(t.radii.button)
-      .border(t.metrics.borderHairline, t.palette.panelBorder))
+      .border(t.metrics.borderHairline, t.palette.panelBorder)
+      .focusRing(btnId))
   textElement(label, TextConfig(fontSize: t.text.menu, color: t.palette.textColor))
   closeElement()
 
@@ -339,6 +439,7 @@ proc menu*(label: string, blk: MenuBody) =
                   parentId = btnId.id,
                   fitViewport = true))
     menuSelected = false
+    menuItemIdx = 0
     if elementData(popId).found:
       # The shadow attaches to the popover's last-frame box; on the popover's
       # very first frame no box is published yet, so paint it transparent for
@@ -356,6 +457,10 @@ proc menu*(label: string, blk: MenuBody) =
       configureOpenElement(sh)
       closeElement()
     blk()
+    menuItemCount = menuItemIdx
+    if menuCursor >= menuItemCount:
+      menuCursor = menuItemCount - 1
+    menuEnter = false
     if menuSelected:
       openMenuId = 0'u32
     closeElement()
@@ -363,15 +468,18 @@ proc menu*(label: string, blk: MenuBody) =
 proc menuItem*(label: string, shortcut = ""): bool =
   let t = activeTheme
   openElement()
+  let idx = menuItemIdx
+  inc menuItemIdx
+  let cursor = idx == menuCursor
   let press = pressing()
-  result = menuPressed() and hovered()
+  result = (menuPressed() and hovered()) or (menuEnter and cursor)
   if result:
     menuSelected = true
   var d = row(width = grow(), height = fit(), gap = 16,
               padding = squeeze(padAll(t.metrics.padMenuItem), press))
   if press:
     d.background = buttonPressBg
-  elif hovered():
+  elif hovered() or cursor:
     d.background = buttonHoverBg
   d.corner = allCorners(t.radii.inner)
   configureOpenElement(d)
@@ -422,6 +530,22 @@ proc menuSeparator*() =
 ## locals. One Nimony constraint still applies inside a widget body: a
 ## `do:` literal there cannot reference the widget's own slots (plain
 ## `do:` procs don't capture); pass the slot as an argument instead.
+##
+## Keyboard focus is opt-in per widget with the `focusable` modifier:
+##
+##   widget focusable Chip(label: string):
+##     item(id, row(padding = padAll(6)).bg(panelBg).focusRing(id)):
+##       text(label)
+##     if clickedIn(id) or keyActivated(id):
+##       ...
+##
+##   Chip(id = hashId("save"), label = "Save", tabIndex = 1)
+##
+## The widget gains an `id: ElementId` parameter (first) and a
+## `tabIndex: int = 0` one (last before the block slot), and registers on
+## the Tab chain before its body runs: click focuses it, Tab / Shift+Tab
+## walk the chain in `tabIndex` order, and the body reads `focused(id)`,
+## `gainedFocus(id)` and `keyActivated(id)`. See `ellipse_ui/focus`.
 
 proc emptySlot*() =
   ## The no-op slot: what a widget renders where a call site passed nothing.

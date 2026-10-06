@@ -8,6 +8,7 @@
 import std/syncio
 
 import clay
+import ellipse/platform/platform
 import ellipse_ui/ui
 
 var failures = 0
@@ -58,6 +59,77 @@ proc countSlot() =
 widget Twice(body: proc(): void):
   body()
   body()
+
+# focusable widgets: `id` and `tabIndex` are injected, registration is
+# automatic, the body reads the focus edges
+var gains = 0
+var activations = 0
+
+widget focusable Chip(label: string):
+  openElement(id)
+  configureOpenElement(row(width = fixedPx(40), height = fixedPx(20))
+    .focusRing(id))
+  if gainedFocus(id):
+    gains += 1
+  if keyActivated(id):
+    activations += 1
+  closeElement()
+
+# a block slot still binds after an explicit `tabIndex`
+widget focusable FocusPanel(title: string, body: proc(): void):
+  openElement(id)
+  configureOpenElement(col(width = fixedPx(60), height = fixedPx(20)))
+  body()
+  closeElement()
+
+# a declared `id` is reused, not duplicated
+widget focusable OwnId(id: ElementId, label: string):
+  openElement(id)
+  configureOpenElement(row(width = fixedPx(20), height = fixedPx(20)))
+  closeElement()
+
+var panelBodyRan = false
+
+proc chips(ctx: Context) =
+  beginLayout()
+  clay "chips", row(width = grow(), height = fit(), gap = 4):
+    Chip(id = hashId("c1"), label = "a")
+    Chip(id = hashId("c2"), label = "b", tabIndex = 2)
+    Chip(id = hashId("c3"), label = "c", tabIndex = 1)
+    Chip(id = hashId("c4"), label = "d", tabIndex = -1)
+    FocusPanel(id = hashId("p1"), title = "t", tabIndex = -1):
+      panelBodyRan = true
+    OwnId(id = hashId("o1"), label = "o", tabIndex = -1)
+  endLayout(ctx)
+
+proc keyFrame(ctx: Context, ev: KeyEvent) =
+  ## One frame with `ev` queued: Tab folded in before layout, as `updateUI`.
+  pushKeyEvent ev
+  beginInputFrame()
+  stepFocus(keyEvents())
+  chips(ctx)
+
+proc tab(ctx: Context, shift = false) =
+  keyFrame(ctx, KeyEvent(kind: kevTab, shift: shift))
+
+var picked = ""
+
+proc bar(ctx: Context) =
+  beginLayout()
+  toolBar("bar") do():
+    menu("File") do():
+      if menuItem("Open"): picked = "Open"
+      menuSeparator()
+      if menuItem("Save"): picked = "Save"
+    menu("View") do():
+      if menuItem("Zoom"): picked = "Zoom"
+  endLayout(ctx)
+
+proc barKey(ctx: Context, kind: KeyEventKind, shift = false) =
+  pushKeyEvent KeyEvent(kind: kind, shift: shift)
+  beginInputFrame()
+  stepFocus(keyEvents())
+  bar(ctx)
 
 proc renderAct() =
   clay "act", row(width = fixedPx(20), height = fixedPx(20)):
@@ -134,6 +206,113 @@ proc main() {.raises.} =
   Spacer()
   endLayout(ctx)
   expect(elementData(hashId("spacer")).found, "widget: parameterless definition")
+
+  # 7. focusable: Tab order = positive tabIndex ascending, then 0s in
+  #    layout order; negatives stay off the chain; the chain wraps.
+  let c1 = hashId("c1")
+  let c2 = hashId("c2")
+  let c3 = hashId("c3")
+  let c4 = hashId("c4")
+  # settle clay's pointer state machine (it starts at `pressedThisFrame`)
+  setPointerState(vec2(-100.0, -100.0), false)
+  setPointerState(vec2(-100.0, -100.0), false)
+  blur()
+  chips(ctx)
+  expect(panelBodyRan, "focusable: block slot binds after tabIndex")
+  expect(elementData(hashId("o1")).found, "focusable: declared id is used")
+  expect(focusedId() == 0'u32, "focusable: nothing focused to start")
+  gains = 0
+  tab(ctx)
+  expect(focused(c3), "focusable: Tab from nowhere -> tabIndex 1")
+  expect(gains == 1, "focusable: gainedFocus fires on arrival, got " & $gains)
+  chips(ctx)
+  expect(gains == 1, "focusable: gainedFocus is a one-frame edge")
+  let ring = elementData(c3)
+  expect(ring.found, "focusable: focused chip laid out")
+  tab(ctx)
+  expect(focused(c2), "focusable: Tab -> tabIndex 2")
+  tab(ctx)
+  expect(focused(c1), "focusable: Tab -> tabIndex 0 after the positives")
+  tab(ctx)
+  expect(focused(c3), "focusable: Tab wraps past the negative-index chip")
+  tab(ctx, shift = true)
+  expect(focused(c1), "focusable: Shift+Tab walks back, wrapping")
+  tab(ctx, shift = true)
+  expect(focused(c2), "focusable: Shift+Tab steps back once more")
+
+  # Enter / Space activate the focused widget only
+  activations = 0
+  keyFrame(ctx, KeyEvent(kind: kevEnter))
+  keyFrame(ctx, KeyEvent(kind: kevText, text: " "))
+  keyFrame(ctx, KeyEvent(kind: kevText, text: "x"))
+  expect(activations == 2, "focusable: Enter and Space activate, got " &
+    $activations)
+
+  # click focuses a negative-index chip; Tab moves on from the chain start
+  let b4 = elementData(c4).box
+  setPointerState(vec2(b4.x + 2.0, b4.y + 2.0), true)
+  chips(ctx)
+  setPointerState(vec2(b4.x + 2.0, b4.y + 2.0), false)
+  chips(ctx)
+  expect(focused(c4), "focusable: click focuses a tabIndex -1 widget")
+  # a press outside every focusable lets go
+  setPointerState(vec2(390.0, 290.0), true)
+  chips(ctx)
+  setPointerState(vec2(390.0, 290.0), false)
+  chips(ctx)
+  expect(focusedId() == 0'u32, "focusable: click outside blurs")
+
+  # a holder that never registered (a hand-focused editor) keeps its Tab
+  setFocus(hashId("editor"))
+  tab(ctx)
+  expect(focused(hashId("editor")), "focusable: off-chain holder keeps Tab")
+  blur()
+
+  # a frame without focusables leaves an empty chain
+  beginLayout()
+  Spacer()
+  endLayout(ctx)
+  stepFocus(@[KeyEvent(kind: kevTab)])
+  expect(focusedId() == 0'u32, "focusable: empty chain, Tab is a no-op")
+
+  # 8. toolbar menus: Tab stops; Down opens, arrows walk, Enter picks,
+  #    Left/Right hop menus, Tab away closes
+  let fileId = elementId("menu.File")
+  let viewMenuId = elementId("menu.View")
+  let filePop = elementId("menu.File.pop")
+  let viewPop = elementId("menu.View.pop")
+  blur()
+  bar(ctx)
+  barKey(ctx, kevTab)
+  expect(focused(fileId), "menu: Tab focuses the first menu")
+  barKey(ctx, kevDown)
+  expect(elementData(filePop).found, "menu: Down opens it")
+  barKey(ctx, kevDown)                   # Open -> Save (separator skipped)
+  barKey(ctx, kevEnter)
+  expect(picked == "Save", "menu: Enter picks the highlighted item, got " &
+    picked)
+  beginInputFrame()                      # the pick closes it next frame
+  bar(ctx)
+  expect(not elementData(filePop).found, "menu: picking closes it")
+  barKey(ctx, kevEnter)
+  barKey(ctx, kevRight)
+  expect(focused(viewMenuId), "menu: Right moves to the next menu")
+  expect(elementData(viewPop).found and not elementData(filePop).found,
+    "menu: Right carries the open state over")
+  barKey(ctx, kevEnter)
+  expect(picked == "Zoom", "menu: the hopped-to menu highlights its first item")
+  beginInputFrame()
+  bar(ctx)
+  barKey(ctx, kevTab, shift = true)
+  expect(focused(fileId), "menu: Shift+Tab walks back along the bar")
+  barKey(ctx, kevEnter)
+  expect(elementData(filePop).found, "menu: Enter opens it")
+  barKey(ctx, kevEscape)
+  expect(not elementData(filePop).found and focused(fileId),
+    "menu: Escape closes it, focus stays")
+  barKey(ctx, kevEnter)
+  barKey(ctx, kevTab)
+  expect(not elementData(filePop).found, "menu: Tab away closes it")
 
   echo "widget_test: ", passed, " passed, ", failures, " failed"
   if failures > 0:

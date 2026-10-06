@@ -10,7 +10,8 @@
 ##   module         provides
 ##   -------------+----------------------------------------------------------
 ##   theme          `Theme` tokens + `activeTheme`, push/pop/`withTheme`
-##   common         click edges, the focus/caret edit engine, the shared
+##   common         click edges, the caret edit engine (on the shared
+##                  focus slot of `ellipse_ui/focus`), the shared
 ##                  scaffold layer -- `container`/`item` brackets,
 ##                  `spacer`/`chevron`/`tickBox`/`textLine` parts,
 ##                  `fieldDecl`/`shadeDecl`/`toggleRowDecl`/`optionRowDecl`

@@ -47,10 +47,25 @@
 ## `NifCursor`s into the (refcounted) input tree, never as copied buffers.
 ## `NifCursor` copies are cheap and safe.
 ##
+## Focusable widgets: a `focusable` modifier before the name
+##
+##   widget focusable Toggle(label: string, on: bool):
+##     ...
+##
+## makes the widget a keyboard-focus stop (`ellipse_ui/focus`). The
+## generated proc and template gain an `id: ElementId` parameter (first)
+## and a `tabIndex: int = 0` parameter (last before the block slot) unless
+## the definition declares either itself, and the implementation opens with
+## `registerFocus(id, tabIndex)` -- so the body can ask `focused(id)`,
+## `gainedFocus(id)`, `keyActivated(id)` or paint `.focusRing(id)`.
+##
 ## Input shape (verified against nifler output):
 ##   (stmts widget (oconstr Name (kv pname ptype)...) (stmts impl...))
 ## or, for `widget Name():`, the head is `(call Name)`; for `widget Name:`
-## it is a bare atom.
+## it is a bare atom. A modifier wraps the head in a command:
+##   (cmd focusable (oconstr Name ...))
+## (A `{.focusable.}` pragma would read better, but Nimony sem-checks a
+## `pragmax` argument even for an `untyped` parameter and asserts on it.)
 
 import plugins
 import std/[syncio, envvars]
@@ -60,6 +75,8 @@ type
     name: string
     typ: NifCursor  ## the declared type, a value in the input tree
     isSlot: bool    ## declared type is a proc type
+    injected: string  ## non-empty: a macro-added param of this type ident
+    zeroDefault: bool ## defaults to `0` (the injected `tabIndex`)
 
 proc atomText(n: NifCursor): string =
   case n.kind
@@ -187,26 +204,33 @@ proc emitParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam) =
   dest.withTree ParamU, info:
     dest.addIdent p.name
     dest.addEmptyNode2 info          # exported, pragmas
-    dest.emitType(p.typ, p.isSlot)
+    if p.injected.len > 0:
+      dest.addIdent p.injected
+    else:
+      dest.emitType(p.typ, p.isSlot)
     if p.isSlot:
       dest.addIdent "emptySlot"      # value default: a no-op closure
+    elif p.zeroDefault:
+      dest.addIntLit 0
     else:
       dest.addEmptyNode info
 
-proc emitSlotParam(dest: var NifBuilder; info: LineInfo; name: string;
-                   isSlot: bool; isBlockSlot: bool) =
+proc emitSlotParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam;
+                   isBlockSlot: bool) =
   ## untyped parameter of the generated wrapper template. The block slot
   ## defaults to a *statement* (`emptySlot()`), since its argument lands
   ## in the closure proc's body; every other slot defaults to the bare
   ## `emptySlot` ident, a valid proc value. Non-slot parameters get
   ## `emptySlot()` so that omitting a required data argument fails with a
   ## type mismatch at the implementation call instead of silently
-  ## binding the trailing block.
+  ## binding the trailing block. The injected `tabIndex` defaults to `0`.
   dest.withTree ParamU, info:
-    dest.addIdent name
+    dest.addIdent p.name
     dest.addEmptyNode2 info          # exported, pragmas
     dest.addIdent "untyped"
-    if isSlot and not isBlockSlot:
+    if p.zeroDefault:
+      dest.addIntLit 0
+    elif p.isSlot and not isBlockSlot:
       dest.addIdent "emptySlot"
     else:
       dest.addEmptyCall(info, "emptySlot")
@@ -226,6 +250,13 @@ proc parseParams(head: NifCursor): seq[WidgetParam] =
       result.add p
     skip c
 
+
+proc hasParam(params: seq[WidgetParam]; name: string): bool =
+  for p in params:
+    if p.name == name:
+      return true
+  return false
+
 proc headName(n: NifCursor): string =
   if n.kind == TagLit:
     result = firstChild(n).atomText
@@ -240,7 +271,20 @@ proc transform(n: NifCursor): NifBuilder =
   if not args.hasMore:
     return errorTree("widget: expected `widget Name(params): body`", n)
 
-  let head = args
+  var head = args
+  var focusable = false
+  if head.kind == TagLit and head.tagText == "cmd":
+    # `widget focusable Name(...)`: the modifier, then the real head
+    var mc = firstChild(head)
+    if not mc.eqIdent("focusable"):
+      return errorTree("widget: unknown modifier `" & mc.atomText &
+        "` (supported: focusable)", mc)
+    focusable = true
+    skip mc
+    if not mc.hasMore:
+      return errorTree("widget: expected `widget focusable Name(params)`",
+        head)
+    head = mc
   let name = headName(head)
   if name.len == 0:
     return errorTree("widget: expected `widget Name(params): body`", head)
@@ -267,6 +311,23 @@ proc transform(n: NifCursor): NifBuilder =
   if params.len > 0 and params[^1].isSlot:
     blockSlot = params[^1].name
 
+  # focusable: `id` leads, `tabIndex` sits right before the block slot so
+  # `W(id = x, ..., tabIndex = 2): body` still hands the block to the slot
+  if focusable:
+    var full: seq[WidgetParam] = @[]
+    if not hasParam(params, "id"):
+      full.add WidgetParam(name: "id", injected: "ElementId")
+    let addTab = not hasParam(params, "tabIndex")
+    for i in 0 ..< params.len:
+      if addTab and blockSlot.len > 0 and i == params.len - 1:
+        full.add WidgetParam(name: "tabIndex", injected: "int",
+                             zeroDefault: true)
+      full.add params[i]
+    if addTab and blockSlot.len == 0:
+      full.add WidgetParam(name: "tabIndex", injected: "int",
+                           zeroDefault: true)
+    params = full
+
   # --- (proc NameImpl* <params> = impl) ---------------------------------
   result.withTree StmtsS, info:
     result.withTree ProcS, info:
@@ -278,7 +339,16 @@ proc transform(n: NifCursor): NifBuilder =
           emitParam(result, info, p)
       result.addEmptyNode3 info           # result, pragmas, effects
       var ci = impl
-      result.takeTree ci
+      if focusable:
+        # registerFocus(id, tabIndex) ahead of the body
+        result.withTree StmtsS, info:
+          result.withTree CallS, info:
+            result.addIdent "registerFocus"
+            result.addIdent "id"
+            result.addIdent "tabIndex"
+          result.takeTree ci
+      else:
+        result.takeTree ci
 
     # --- (template Name* <untyped params> = ...closure wrapper...) ------
     result.withTree TemplateS, info:
@@ -287,7 +357,7 @@ proc transform(n: NifCursor): NifBuilder =
       result.addEmptyNode2 info           # pattern, typevars
       result.withTree ParamsU, info:
         for p in params:
-          emitSlotParam(result, info, p.name, p.isSlot, p.name == blockSlot)
+          emitSlotParam(result, info, p, p.name == blockSlot)
       result.addEmptyNode3 info           # result, pragmas, effects
       var slotSym = default(SymId)
       if blockSlot.len > 0:

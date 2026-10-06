@@ -1,6 +1,6 @@
 ## Text entry fields. `textField` edits a caller-owned string through the
-## shared caret/selection engine in `common`: click focuses (the
-## `fieldFocus` pair of edges), typing mutates, Enter commits (leaves the
+## shared caret/selection engine in `common`: click or Tab focuses (see
+## `fieldFocus`; `tabIndex` places the field on the Tab chain), typing mutates, Enter commits (leaves the
 ## field), Escape reverts to the value the field was focused with. Editing
 ## keys follow the Emacs/readline default map -- C-a/C-e, C-b/C-f, M-b/M-f,
 ## C-k/C-u/C-w/C-y, C-g -- see `common`.
@@ -18,9 +18,10 @@ import ./common
 
 proc textField*(id: ElementId, text: string, placeholder = "",
                 fontSize: uint16 = activeTheme.text.control, width = grow(),
-                height = fixedPx(activeTheme.metrics.controlHeight)): string =
+                height = fixedPx(activeTheme.metrics.controlHeight),
+                tabIndex: int = 0): string =
   var edited = text
-  if fieldFocus(id, text):
+  if fieldFocus(id, text, tabIndex):
     let step = editStep(text)
     edited = step.text
     if step.outcome == eoCommit or step.outcome == eoCancel:
@@ -38,11 +39,12 @@ proc textField*(id: ElementId, text: string, placeholder = "",
 
 proc multilineField*(id: ElementId, text: string, placeholder = "",
                      fontSize: uint16 = activeTheme.text.control, rows: int = 4,
-                     width = grow()): string =
+                     width = grow(), tabIndex: int = 0): string =
   ## The same edit engine over a taller, word-wrapped box. Enter inserts a
-  ## newline instead of committing; a click outside leaves the field.
+  ## newline instead of committing; a click outside (or Tab) leaves the
+  ## field.
   var edited = text
-  if fieldFocus(id, text):
+  if fieldFocus(id, text, tabIndex):
     # Remap Enter (and C-m) to a newline so the shared engine treats it as
     # text; everything else -- Emacs chords included -- flows through.
     var frame: seq[KeyEvent] = @[]

@@ -86,15 +86,19 @@ type
 
 proc acceptAll*(c: char): bool = true
 
+## Which element holds the caret is the widget set's one keyboard focus
+## (`ellipse_ui/focus`, re-exported by `ui`): `focused`, `blur` and the Tab
+## chain live there. The caret, selection and Escape snapshot here belong
+## to one *focus session* -- `caretSerial` records the session they were
+## seeded for, so a field reached by Tab (rather than by click or
+## `focus`) seeds its own in `fieldFocus`.
+
 var
   bootTime = getMonoTime().ticks
-  focusId = 0'u32        ## the field holding the caret, 0 = none
   snapshot = ""          ## the text as it was when focused (Escape target)
   caret = 0
   selAnchor = 0
-
-proc focused*(id: ElementId): bool =
-  focusId == id.id
+  caretSerial = 0'u32    ## the focus session the caret state belongs to
 
 proc snapshotValue*(): string =
   snapshot
@@ -104,7 +108,8 @@ proc caretPos*(): int =
 
 proc focus*(id: ElementId, text: string) =
   ## Move caret and selection to the end; remember the Escape snapshot.
-  focusId = id.id
+  setFocus(id)
+  caretSerial = focusSerial()
   snapshot = text
   caret = text.len
   selAnchor = caret
@@ -114,25 +119,30 @@ proc focusAt*(id: ElementId, text: string, pos: int, extend = false) =
   ## click inside a bigger editing surface (see `widgets/editor`) wants:
   ## the press maps a pointer position to a character index, and focus
   ## lands there. With `extend` the anchor stays put, growing a selection.
-  focusId = id.id
+  setFocus(id)
+  caretSerial = focusSerial()
   snapshot = text
   caret = min(max(pos, 0), text.len)
   if not extend:
     selAnchor = caret
 
-proc blur*() =
-  focusId = 0'u32
-
 proc refocus*(id: ElementId, text: string) =
   ## Take back the caret without moving it: what a menu action or a closing
   ## dialog does to return focus to the field it had stolen -- the caret
   ## and selection the engine still holds belong to this widget's text.
-  focusId = id.id
+  setFocus(id)
+  caretSerial = focusSerial()
   snapshot = text
 
 proc focusIdOf*(): uint32 =
   ## The element id holding the caret now, 0 for none.
-  focusId
+  focusedId()
+
+proc caretSeeded*(id: ElementId): bool =
+  ## `id` holds focus and the caret state was seeded for this focus
+  ## session. False on the frame Tab lands on a field: it must `focus`
+  ## itself to place the caret and take its Escape snapshot.
+  focused(id) and caretSerial == focusSerial()
 
 proc fieldBorder*(id: ElementId): Color =
   ## Focused (or hovered) fields get the accent ring; idle ones the plain
@@ -521,7 +531,7 @@ proc editStep*(text: sink string, valid: ValidCharFn = acceptAll): EditResult =
   ## Apply *this frame's* key events to `text` through the shared caret
   ## state. Only the focused widget's caller should invoke it.
   result = EditResult(text: text)
-  if focusId == 0'u32:
+  if focusedId() == 0'u32:
     return
   result = applyKeys(text, frameKeys(), valid)
 
@@ -529,7 +539,7 @@ proc editStepWith*(text: sink string, evs: seq[KeyEvent],
                    valid: ValidCharFn = acceptAll): EditResult =
   ## `editStep` over a caller-supplied (remapped) event list.
   result = EditResult(text: text)
-  if focusId == 0'u32 or evs.len == 0:
+  if focusedId() == 0'u32 or evs.len == 0:
     return
   result = applyKeys(text, evs, valid)
 
@@ -642,7 +652,7 @@ proc caretOverlay*(textElId: uint32, text: string, cfg: TextConfig,
   ## Call right after the field's `textElement`, still inside the field,
   ## only while the field holds focus. Geometry comes from `caretGeom` --
   ## Clay's own wrapping pass over the text box's previous-frame width.
-  if focusId == 0'u32 or not caretVisible():
+  if focusedId() == 0'u32 or not caretVisible():
     return
   let prev = elementData(ElementId(id: textElId))
   if not prev.found:
@@ -740,17 +750,15 @@ proc fieldText*(text, placeholder: string, isFocused: bool): (string, Color) =
     return (placeholder, dimColor)
   return (text, textColor)
 
-proc fieldFocus*(id: ElementId, text: string): bool =
-  ## The click side of the edit engine for one field: a click inside
-  ## focuses it (seeding `text` as the Escape snapshot), a click anywhere
-  ## else while it holds focus blurs it. Returns whether the field is
-  ## focused *after* this frame's click.
-  let was = focused(id)
-  if clickedIn(id):
-    if not was:
-      focus(id, text)
-  elif was and clickedOut(id):
-    blur()
+proc fieldFocus*(id: ElementId, text: string, tabIndex: int = 0): bool =
+  ## The focus side of the edit engine for one field: registers it on the
+  ## Tab chain at `tabIndex` (see `ellipse_ui/focus`), so a click inside
+  ## or a Tab landing on it focuses it -- seeding the caret at the end and
+  ## `text` as the Escape snapshot -- and a click anywhere else lets go.
+  ## Returns whether the field is focused *after* this frame's input.
+  registerFocus(id, tabIndex)
+  if focused(id) and not caretSeeded(id):
+    focus(id, text)
   focused(id)
 
 ## --- declaration builders ----------------------------------------------------------
@@ -769,10 +777,10 @@ proc toggleRowDecl*(over: bool, press = false, showBg = true): ElementDeclaratio
     pad = squeeze(pad, press)
   result = row(gap = 10, width = fit(), height = fit(), alignY = centerY,
     padding = pad)
+  result = result.corner(t.radii.button)   # shapes the focus ring, too
   if showBg:
     result = result.bg(if press: t.palette.buttonPressBg
       elif over: t.palette.buttonBg else: Color())
-      .corner(t.radii.button)
 
 proc fieldPad*(): Padding =
   ## A field's standard inset: `padFieldX` across, `padFieldY` down.
@@ -850,9 +858,35 @@ proc toggleDropdown*(id, popId: ElementId): bool =
       openDropdownId = 0'u32
   openDropdownId == id.id
 
+proc dropdownIsOpen*(id: ElementId): bool =
+  ## `id`'s dropdown is the open one.
+  openDropdownId == id.id
+
 proc closeDropdown*() =
   ## Dismiss the open dropdown (an option click usually does this).
   openDropdownId = 0'u32
+
+proc dropdownFocus*(id, popId: ElementId, tabIndex: int): bool =
+  ## `toggleDropdown` for a Tab stop: registers `id` at `tabIndex` (its
+  ## popover counts as inside, so picking an option keeps focus), and while
+  ## focused Enter toggles the popover, Space opens it, Escape closes it.
+  ## Focus leaving -- Tab, a click elsewhere -- closes it. Returns whether
+  ## `id`'s dropdown is open after this frame's input.
+  registerFocus(id, tabIndex, popId)
+  discard toggleDropdown(id, popId)
+  if focused(id):
+    let evs = keyEvents()
+    for ev in evs:
+      let isOpen = openDropdownId == id.id
+      if ev.kind == kevEnter:
+        openDropdownId = if isOpen: 0'u32 else: id.id
+      elif ev.kind == kevEscape and isOpen:
+        openDropdownId = 0'u32
+      elif isSpace(ev) and not isOpen:
+        openDropdownId = id.id
+  elif openDropdownId == id.id:
+    openDropdownId = 0'u32
+  openDropdownId == id.id
 
 proc dropdownField*(id: ElementId, isOpen: bool, shown: string,
                     shownColor: Color, width: SizingAxis, height: SizingAxis) =
@@ -868,7 +902,8 @@ proc dropdownField*(id: ElementId, isOpen: bool, shown: string,
     .bg(shade(pointerOver(id), press))
     .corner(t.radii.field)
     .border(t.metrics.borderHairline,
-      if isOpen: t.palette.accent else: t.palette.panelBorder))
+      if isOpen: t.palette.accent else: t.palette.panelBorder)
+    .focusRing(id))
   textElement(shown, TextConfig(fontSize: t.text.control,
     color: shownColor, wrap: noWrap))
   spacer()

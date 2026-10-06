@@ -1,30 +1,9 @@
-## Card containers: the framed surface panes of content sit on. All three
-## are `widget` definitions -- `Card` is the general container with an
-## optional header, `StatCard` a compact metric tile, `CardRow` the row
-## that spreads sibling cards evenly -- framed by `common.container` and
-## spread by its `spacer`.
-##
-## Cards take no id and use clay's auto ids, so any number repeat inside
-## one parent; interactive content inside them carries its own ids.
-
 import clay
 import ../ui
 
 import ./common
 
 widget Card(title: string, actions: proc(): void, body: proc(): void):
-  ## A padded panel -- background, border, rounded corners -- holding
-  ## `body`, with an optional header row:
-  ##
-  ##   Card(title = "Network", actions = renderRefresh):
-  ##     bodyText("Linked at 1 Gb/s")
-  ##
-  ## An empty `title` drops the header; `actions` renders at the
-  ## header's right edge (it needs the title to be shown). The trailing
-  ## block fills the slot *after the last named argument*, so a call
-  ## without actions must name the default explicitly:
-  ## `Card(title = "Status", actions = emptySlot): ...`. The card hugs
-  ## its content vertically and grows to its container's width.
   let t = activeTheme
   container(col(width = grow(), height = fit(), gap = t.metrics.gapCard,
       padding = padAll(t.metrics.padCard))
@@ -41,9 +20,6 @@ widget Card(title: string, actions: proc(): void, body: proc(): void):
     body()
 
 widget StatCard(label: string, value: string, hint: string):
-  ## A centred metric tile: dim caption, large value, optional footnote
-  ## (pass `""` to omit the hint). Grows to share its row's width --
-  ## natural inside `CardRow`.
   let t = activeTheme
   container(col(width = grow(), height = fit(), gap = t.metrics.gapList,
       padding = padAll(t.metrics.padStat), alignX = centerX)
@@ -56,14 +32,6 @@ widget StatCard(label: string, value: string, hint: string):
       textElement(hint, TextConfig(fontSize: t.text.statHint, color: t.palette.labelColor))
 
 widget CardRow(body: proc(): void):
-  ## A row that spreads its cards evenly: children grow to equal widths
-  ## with one gap between them, heights hugging the tallest.
-  ##
-  ##   CardRow:
-  ##     StatCard(label = "Up", value = "4d", hint = "since boot")
-  ##     StatCard(label = "Pings", value = "12", hint = "")
-  ##
-  ## `Card`s work here too, and nest the same way.
   container(row(width = grow(), height = fit(),
       gap = activeTheme.metrics.gapCardRow)):
     body()

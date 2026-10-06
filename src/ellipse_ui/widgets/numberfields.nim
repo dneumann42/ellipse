@@ -3,8 +3,8 @@
 ## While unfocused the field shows the caller's value formatted plainly;
 ## focusing it seeds an editable digit buffer (the shared caret engine, with
 ## a `0-9 . -` filter). Enter commits the parse + clamp, Escape discards the
-## buffer, and a click outside commits too. Up/Down arrows and the hover
-## steppers add/subtract `step` immediately.
+## buffer, and leaving the field (a click outside, Tab) commits too.
+## Up/Down arrows and the hover steppers add/subtract `step` immediately.
 ##
 ## The field box is `ui.item` over `common.fieldDecl`; the steppers are
 ## plain items over `shadeDecl`, so they share the small-button look with
@@ -110,24 +110,26 @@ proc stepper(id: ElementId, glyph: string) =
 proc numberField*(id: ElementId, value: float, step = 1.0,
                   minVal = -1.0e9, maxVal = 1.0e9, whole = false,
                   width = grow(),
-                  height = fixedPx(activeTheme.metrics.controlHeight)): float =
+                  height = fixedPx(activeTheme.metrics.controlHeight),
+                  tabIndex: int = 0): float =
   result = value
-  let wasFocused = focused(id)
 
   let decId = localId("num.dec", id.id)
   let incId = localId("num.inc", id.id)
 
-  if clickedIn(id):
-    if not wasFocused:
-      numBuffer = fmtVal(value, whole)
-      numBufferId = id.id
-      focus(id, numBuffer)
-  elif wasFocused and clickedOut(id):
-    if numBufferId == id.id:
-      let p = parseNum(numBuffer)
-      if p.ok:
-        result = clampTo(p.value, minVal, maxVal)
-    blur()
+  # Click or Tab focuses (see `ellipse_ui/focus`). Focus leaving while the
+  # digit buffer is live -- a click elsewhere, Tab -- commits it; focus
+  # arriving seeds it from the caller's value.
+  registerFocus(id, tabIndex)
+  if numBufferId == id.id and not focused(id):
+    let p = parseNum(numBuffer)
+    if p.ok:
+      result = clampTo(p.value, minVal, maxVal)
+    numBufferId = 0'u32
+  if focused(id) and (numBufferId != id.id or not caretSeeded(id)):
+    numBuffer = fmtVal(value, whole)
+    numBufferId = id.id
+    focus(id, numBuffer)
 
   if focused(id) and numBufferId == id.id:
     let step0 = editStep(numBuffer, validDigitChar)
@@ -146,9 +148,11 @@ proc numberField*(id: ElementId, value: float, step = 1.0,
       if p.ok:
         result = clampTo(p.value, minVal, maxVal)
         numBuffer = fmtVal(result, whole)
+      numBufferId = 0'u32
       blur()
     elif step0.outcome == eoCancel:
       numBuffer = fmtVal(value, whole)
+      numBufferId = 0'u32
       blur()
 
   # steppers: children of the field box, so a click on them is also a click
@@ -180,9 +184,10 @@ proc numberField*(id: ElementId, value: float, step = 1.0,
 proc intNumberField*(id: ElementId, value: int, step = 1,
                      minVal = -1000000000, maxVal = 1000000000,
                      width = grow(),
-                     height = fixedPx(activeTheme.metrics.controlHeight)): int =
+                     height = fixedPx(activeTheme.metrics.controlHeight),
+                     tabIndex: int = 0): int =
   ## Whole-number view of `numberField`: formats without a fraction and
   ## rounds what comes back.
   let raw = numberField(id, float(value), float(step), float(minVal),
-    float(maxVal), true, width, height)
+    float(maxVal), true, width, height, tabIndex)
   result = roundToInt(raw)

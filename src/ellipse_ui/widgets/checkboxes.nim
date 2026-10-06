@@ -5,6 +5,9 @@
 ## That square is `common.tickBox`; both widgets here hang it in a
 ## `ui.item` over a `common.toggleRowDecl` frame. All geometry and colour
 ## comes from the live theme (see `ellipse_ui/theme`).
+##
+## Both are Tab stops at `tabIndex`; Space or Enter flips them while
+## focused.
 
 import clay
 import ../ui
@@ -12,27 +15,32 @@ import ../ui
 import ./common
 
 proc checkbox*(id: ElementId, label: string, checked: bool,
-               fontSize: uint16 = activeTheme.text.control): bool =
+               fontSize: uint16 = activeTheme.text.control,
+               tabIndex: int = 0): bool =
   ## A labelled tick box. Returns the state to store back: `checked` flipped
-  ## when the user clicked it this frame. A held press compresses the row.
+  ## when the user clicked it (or pressed Space/Enter on it) this frame. A
+  ## held press compresses the row.
   let t = activeTheme
+  registerFocus(id, tabIndex)
   let over = pointerOver(id)
   let press = pressing(id)
-  let clicked = clickedIn(id)
-  item(id, toggleRowDecl(over, press)):
+  let clicked = clickedIn(id) or keyActivated(id)
+  item(id, toggleRowDecl(over, press).focusRing(id)):
     tickBox(checked)
     textElement(label, TextConfig(fontSize: fontSize, color: t.palette.textColor))
   result = if clicked: not checked else: checked
 
-proc switch*(id: ElementId, label: string, on: bool): bool =
+proc switch*(id: ElementId, label: string, on: bool,
+             tabIndex: int = 0): bool =
   ## The same control dressed as an on/off slider: the knob rides on the
   ## left edge off, the right edge on. Returns the state to store back.
   ## The track squeezes its knob down while a press is held.
   let t = activeTheme
+  registerFocus(id, tabIndex)
   let over = pointerOver(id)
   let press = pressing(id)
-  let clicked = clickedIn(id)
-  item(id, toggleRowDecl(over, press, showBg = false)):
+  let clicked = clickedIn(id) or keyActivated(id)
+  item(id, toggleRowDecl(over, press, showBg = false).focusRing(id)):
     openElement()
     configureOpenElement(row(width = fixedPx(t.metrics.switchWidth),
         height = fixedPx(t.metrics.switchHeight),

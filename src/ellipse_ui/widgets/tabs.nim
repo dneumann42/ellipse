@@ -18,11 +18,16 @@
 ## between frames are clamped by the view). For callers who own the
 ## selection themselves, `tabStrip` is the standalone checkbox-style
 ## piece: `tab = tabStrip(id, labels, tab)`.
+##
+## The strip is one Tab stop (`tabStripId(id)`); while it holds focus
+## Left/Right step the selection (wrapping) and Home/End jump to the ends.
 
 import std/tables
 
 import clay
 import ../ui
+
+import ellipse/platform/platform
 
 import ./common
 
@@ -58,19 +63,35 @@ proc tabButtonDecl*(th: Theme, over: bool, selected: bool,
     d.background = th.palette.buttonBg
   result = d
 
-proc tabStrip*(id: ElementId, labels: seq[string], selected: int): int =
+proc tabStripId*(id: ElementId): ElementId =
+  ## The focusable strip element of `id`'s tabs.
+  localId("tabs.strip", id.id)
+
+proc tabStrip*(id: ElementId, labels: seq[string], selected: int,
+               tabIndex: int = 0): int =
   ## Draw a tab strip as a child of `id`'s element and return the index
-  ## of a tab clicked this frame, else `selected`. The strip and its
-  ## buttons take ids local to `id`, so several strips can share a
-  ## screen.
+  ## of a tab clicked (or arrow-stepped) this frame, else `selected`. The
+  ## strip and its buttons take ids local to `id`, so several strips can
+  ## share a screen.
   result = selected
   let th = activeTheme
+  let stripId = tabStripId(id)
+  registerFocus(stripId, tabIndex)
+  if focused(stripId) and labels.len > 0:
+    let evs = keyEvents()
+    for ev in evs:
+      case ev.kind
+      of kevLeft: result = (result - 1 + labels.len) mod labels.len
+      of kevRight: result = (result + 1) mod labels.len
+      of kevHome: result = 0
+      of kevEnd: result = labels.len - 1
+      else: discard
   var d = row(width = grow(), height = fit(), gap = th.metrics.padToolbar,
       padding = Padding(left: th.metrics.padToolbar, right: th.metrics.padToolbar,
                         top: th.metrics.padToolbar, bottom: 0))
   d.border = BorderConfig(color: th.palette.panelBorder,
     width: BorderWidth(bottom: th.metrics.borderHairline))
-  openElement(localId("tabs.strip", id.id))
+  openElement(stripId)
   configureOpenElement(d)
   var i = 0
   while i < labels.len:
@@ -78,9 +99,12 @@ proc tabStrip*(id: ElementId, labels: seq[string], selected: int): int =
     let over = pointerOver(tabId)
     let press = pressing(tabId)
     let clicked = clickedIn(tabId)
-    item(tabId, tabButtonDecl(th, over, i == selected, press)):
+    var decl = tabButtonDecl(th, over, i == result, press)
+    if i == result:
+      decl = decl.focusRing(stripId)    # the ring marks the selected tab
+    item(tabId, decl):
       textElement(labels[i], TextConfig(fontSize: th.text.option,
-        color: if i == selected or over: th.palette.textColor
+        color: if i == result or over: th.palette.textColor
                else: th.palette.dimColor))
     if clicked:
       result = i
