@@ -45,12 +45,12 @@ proc badge*(text: string) =
     .corner(t.radii.pill)):
     textElement(text, TextConfig(fontSize: t.text.badge, color: t.palette.onAccent))
 
-proc textLink*(id: ElementId, text: string, tabIndex: int = 0): bool =
+widget focusable textLink(text: string) -> bool:
   ## Accent text that lights up and underlines on hover, sinks onto a dim
-  ## fill while a press is held; true on click, or on Enter/Space while it
-  ## holds focus (a Tab stop at `tabIndex`).
+  ## fill while a press is held; true -- and a `Pressed` event -- on click,
+  ## or on Enter/Space while it holds focus (a Tab stop at `tabIndex`).
+  emits Pressed
   let t = activeTheme
-  registerFocus(id, tabIndex)
   let over = pointerOver(id)
   let press = pressing(id)
   var d = row(width = fit(), height = fit())
@@ -63,6 +63,8 @@ proc textLink*(id: ElementId, text: string, tabIndex: int = 0): bool =
   item(id, d.focusRing(id)):
     textElement(text, TextConfig(fontSize: t.text.control, color: t.palette.accent))
   result = clickedIn(id) or keyActivated(id)
+  if result:
+    emit Pressed(id: id)
 
 widget Prose(body: proc(): void):
   ## A column sized for reading: full-width flow with comfortable gaps,

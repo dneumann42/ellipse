@@ -206,30 +206,6 @@ proc shade*(over: bool, idle: Color, hover = buttonHoverBg): Color =
     return hover
   return idle
 
-proc button*(id: ElementId, label: string, width = fit(), height = fit(),
-             fontSize: uint16 = 0, tabIndex: int = 0): bool =
-  ## A themed push button: the three-way raised surface (`shade`), the
-  ## compressed hold state (`squeeze`), and the label centred in it.
-  ## `fontSize` overrides the theme's button size -- dialogs pass the
-  ## smaller `control` size so compact footers fit their labels. A Tab
-  ## stop at `tabIndex`; Enter or Space presses it while focused.
-  let t = activeTheme
-  let fs = if fontSize > 0: fontSize else: t.text.button
-  registerFocus(id, tabIndex)
-  let over = pointerOver(id)
-  let press = pressing(id)
-  result = (over and currentContext().pointerData().state == pressedThisFrame) or
-    keyActivated(id)
-  openElement(id)
-  configureOpenElement(col(width = width, height = height, alignX = centerX,
-      alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
-      .bg(shade(over, press))
-      .corner(t.radii.button)
-      .border(t.metrics.borderRaised, t.palette.panelBorder)
-      .focusRing(id))
-  textElement(label, TextConfig(fontSize: fs, color: t.palette.textColor))
-  closeElement()
-
 ## --- items: bracketed child elements ------------------------------------------
 ##
 ## The low-level clay rhythm -- `openElement` / `configureOpenElement` /
@@ -468,32 +444,6 @@ proc menu*(label: string, blk: MenuBody) =
       openMenuId = 0'u32
     closeElement()
 
-proc menuItem*(label: string, shortcut = ""): bool =
-  let t = activeTheme
-  openElement()
-  let idx = menuItemIdx
-  inc menuItemIdx
-  let cursor = idx == menuCursor
-  let press = pressing()
-  result = (menuPressed() and hovered()) or (menuEnter and cursor)
-  if result:
-    menuSelected = true
-  var d = row(width = grow(), height = fit(), gap = 16,
-              padding = squeeze(padAll(t.metrics.padMenuItem), press))
-  if press:
-    d.background = buttonPressBg
-  elif hovered() or cursor:
-    d.background = buttonHoverBg
-  d.corner = allCorners(t.radii.inner)
-  configureOpenElement(d)
-  textElement(label, TextConfig(fontSize: t.text.menu, color: t.palette.textColor))
-  if shortcut.len > 0:
-    openElement()
-    configureOpenElement(row(width = grow(), height = fit(), alignX = right))
-    textElement(shortcut, TextConfig(fontSize: t.text.menu, color: t.palette.dimColor))
-    closeElement()
-  closeElement()
-
 proc menuSeparator*() =
   let t = activeTheme
   openElement()
@@ -533,6 +483,20 @@ proc menuSeparator*() =
 ## locals. One Nimony constraint still applies inside a widget body: a
 ## `do:` literal there cannot reference the widget's own slots (plain
 ## `do:` procs don't capture); pass the slot as an argument instead.
+##
+## A widget may produce a value -- `-> T` after the parameters -- and give
+## parameters defaults with `name = value` (the type is inferred from the
+## value, as for a proc parameter):
+##
+##   widget focusable checkbox(label: string, checked: bool,
+##                             fontSize = activeTheme.text.control) -> bool:
+##     ...
+##     result = if clicked: not checked else: checked
+##
+##   agree = checkbox(hashId("agree"), "Agree", agree)
+##
+## The default is repeated in the wrapper template and evaluated at the
+## call site, so it should only name things every caller can see.
 ##
 ## Keyboard focus is opt-in per widget with the `focusable` modifier:
 ##
@@ -579,3 +543,83 @@ proc emptySlot*() =
 template widget*(head: untyped, body: untyped) {.
   plugin: "ellipse_ui/deps/mwidget".}
 
+## --- standard widget events ----------------------------------------------------
+##
+## What the stock widgets emit, each tagged with the emitter's element id so
+## one handler can serve several controls (`if e.id == saveId: ...`). The
+## widgets still return their value too -- `checked = checkbox(...)` keeps
+## working -- the event is the same news for code further up the tree.
+
+## `button` / `textLink` clicked, or Enter/Space on it while focused.
+defineEvent Pressed(id: ElementId)
+## `checkbox` / `switch` flipped; `on` is the new state.
+defineEvent Toggled(id: ElementId, on: bool)
+## A single choice moved: `comboBox` selection, `tabStrip` tab.
+defineEvent Picked(id: ElementId, index: int)
+## A text widget's contents changed this frame (`textField`,
+## `multilineField`, `editor`); `text` is the new value.
+defineEvent TextChanged(id: ElementId, text: string)
+## Enter in a `textField`: the value the field is left with.
+defineEvent TextCommitted(id: ElementId, text: string)
+## `numberField` produced a new value (typed, stepped or committed).
+defineEvent NumberChanged(id: ElementId, value: float)
+## A `menuItem` was chosen; menu items are identified by their label.
+defineEvent MenuPicked(label: string)
+
+widget focusable button(label: string, width = fit(), height = fit(),
+                        fontSize = 0'u16) -> bool:
+  ## A themed push button: the three-way raised surface (`shade`), the
+  ## compressed hold state (`squeeze`), and the label centred in it.
+  ## `fontSize` overrides the theme's button size -- dialogs pass the
+  ## smaller `control` size so compact footers fit their labels. A Tab
+  ## stop at `tabIndex`; Enter or Space presses it while focused. Returns
+  ## true and emits `Pressed` on the press.
+  emits Pressed
+  let t = activeTheme
+  let fs = if fontSize > 0: fontSize else: t.text.button
+  let over = pointerOver(id)
+  let press = pressing(id)
+  result = (over and currentContext().pointerData().state == pressedThisFrame) or
+    keyActivated(id)
+  openElement(id)
+  configureOpenElement(col(width = width, height = height, alignX = centerX,
+      alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
+      .bg(shade(over, press))
+      .corner(t.radii.button)
+      .border(t.metrics.borderRaised, t.palette.panelBorder)
+      .focusRing(id))
+  textElement(label, TextConfig(fontSize: fs, color: t.palette.textColor))
+  closeElement()
+  if result:
+    emit Pressed(id: id)
+
+widget menuItem(label: string, shortcut = "") -> bool:
+  ## One row of an open `menu`: true -- and a `MenuPicked` event carrying
+  ## `label` -- when it is clicked or Enter picks it from the keyboard.
+  emits MenuPicked
+  let t = activeTheme
+  openElement()
+  let idx = menuItemIdx
+  inc menuItemIdx
+  let cursor = idx == menuCursor
+  let press = pressing()
+  result = (menuPressed() and hovered()) or (menuEnter and cursor)
+  if result:
+    menuSelected = true
+  var d = row(width = grow(), height = fit(), gap = 16,
+              padding = squeeze(padAll(t.metrics.padMenuItem), press))
+  if press:
+    d.background = buttonPressBg
+  elif hovered() or cursor:
+    d.background = buttonHoverBg
+  d.corner = allCorners(t.radii.inner)
+  configureOpenElement(d)
+  textElement(label, TextConfig(fontSize: t.text.menu, color: t.palette.textColor))
+  if shortcut.len > 0:
+    openElement()
+    configureOpenElement(row(width = grow(), height = fit(), alignX = right))
+    textElement(shortcut, TextConfig(fontSize: t.text.menu, color: t.palette.dimColor))
+    closeElement()
+  closeElement()
+  if result:
+    emit MenuPicked(label: label)

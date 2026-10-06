@@ -7,21 +7,21 @@
 ## comes from the live theme (see `ellipse_ui/theme`).
 ##
 ## Both are Tab stops at `tabIndex`; Space or Enter flips them while
-## focused.
+## focused. Each returns the state to store back and emits `Toggled` (with
+## its id and the new state) when it flips.
 
 import clay
 import ../ui
 
 import ./common
 
-proc checkbox*(id: ElementId, label: string, checked: bool,
-               fontSize: uint16 = activeTheme.text.control,
-               tabIndex: int = 0): bool =
+widget focusable checkbox(label: string, checked: bool,
+                          fontSize = activeTheme.text.control) -> bool:
   ## A labelled tick box. Returns the state to store back: `checked` flipped
   ## when the user clicked it (or pressed Space/Enter on it) this frame. A
   ## held press compresses the row.
+  emits Toggled
   let t = activeTheme
-  registerFocus(id, tabIndex)
   let over = pointerOver(id)
   let press = pressing(id)
   let clicked = clickedIn(id) or keyActivated(id)
@@ -29,14 +29,15 @@ proc checkbox*(id: ElementId, label: string, checked: bool,
     tickBox(checked)
     textElement(label, TextConfig(fontSize: fontSize, color: t.palette.textColor))
   result = if clicked: not checked else: checked
+  if clicked:
+    emit Toggled(id: id, on: result)
 
-proc switch*(id: ElementId, label: string, on: bool,
-             tabIndex: int = 0): bool =
+widget focusable switch(label: string, on: bool) -> bool:
   ## The same control dressed as an on/off slider: the knob rides on the
   ## left edge off, the right edge on. Returns the state to store back.
   ## The track squeezes its knob down while a press is held.
+  emits Toggled
   let t = activeTheme
-  registerFocus(id, tabIndex)
   let over = pointerOver(id)
   let press = pressing(id)
   let clicked = clickedIn(id) or keyActivated(id)
@@ -60,3 +61,5 @@ proc switch*(id: ElementId, label: string, on: bool,
     textElement(label, TextConfig(fontSize: t.text.control,
       color: t.palette.textColor))
   result = if clicked: not on else: on
+  if clicked:
+    emit Toggled(id: id, on: result)

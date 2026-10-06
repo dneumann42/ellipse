@@ -9,6 +9,9 @@
 ## The field box is `ui.item` over `common.fieldDecl`; the steppers are
 ## plain items over `shadeDecl`, so they share the small-button look with
 ## the multiselect footer.
+##
+## Events: `numberField` emits `NumberChanged` whenever its value moves;
+## `intNumberField` catches that and emits `IntChanged` instead.
 
 import clay
 import ../ui
@@ -107,20 +110,20 @@ proc stepper(id: ElementId, glyph: string) =
     textElement(glyph, TextConfig(fontSize: t.text.control,
       color: t.palette.textColor))
 
-proc numberField*(id: ElementId, value: float, step = 1.0,
+widget focusable numberField(value: float, step = 1.0,
                   minVal = -1.0e9, maxVal = 1.0e9, whole = false,
                   width = grow(),
-                  height = fixedPx(activeTheme.metrics.controlHeight),
-                  tabIndex: int = 0): float =
+                  height = fixedPx(activeTheme.metrics.controlHeight)) -> float:
+  emits NumberChanged
   result = value
 
   let decId = localId("num.dec", id.id)
   let incId = localId("num.inc", id.id)
 
-  # Click or Tab focuses (see `ellipse_ui/focus`). Focus leaving while the
-  # digit buffer is live -- a click elsewhere, Tab -- commits it; focus
-  # arriving seeds it from the caller's value.
-  registerFocus(id, tabIndex)
+  # Click or Tab focuses (see `ellipse_ui/focus`; the `focusable` widget
+  # registers before this body). Focus leaving while the digit buffer is
+  # live -- a click elsewhere, Tab -- commits it; focus arriving seeds it
+  # from the caller's value.
   if numBufferId == id.id and not focused(id):
     let p = parseNum(numBuffer)
     if p.ok:
@@ -180,14 +183,20 @@ proc numberField*(id: ElementId, value: float, step = 1.0,
         caretOverlay(textChildId(textChildId(id.id)), numBuffer, cfg)
     stepper(decId, "-")
     stepper(incId, "+")
+  if result != value:
+    emit NumberChanged(id: id, value: result)
 
-proc intNumberField*(id: ElementId, value: int, step = 1,
+widget intNumberField(id: ElementId, value: int, step = 1,
                      minVal = -1000000000, maxVal = 1000000000,
                      width = grow(),
                      height = fixedPx(activeTheme.metrics.controlHeight),
-                     tabIndex: int = 0): int =
+                     tabIndex = 0) -> int:
   ## Whole-number view of `numberField`: formats without a fraction and
-  ## rounds what comes back.
+  ## rounds what comes back. The inner field's `NumberChanged` is
+  ## translated into an `IntChanged` for code further up.
+  emits IntChanged(id: ElementId, value: int)
+  event NumberChanged(e):
+    emit IntChanged(id: e.id, value: roundToInt(e.value))
   let raw = numberField(id, float(value), float(step), float(minVal),
     float(maxVal), true, width, height, tabIndex)
   result = roundToInt(raw)

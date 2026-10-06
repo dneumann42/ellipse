@@ -9,6 +9,9 @@
 ## intermediate edits are already visible in it; commit only moves focus.
 ## The field box itself is `ui.item` over `common.fieldDecl`, the
 ## placeholder pick is `common.fieldText`.
+##
+## Events: `TextChanged` whenever the value differs from what came in,
+## and -- for `textField` -- `TextCommitted` when Enter leaves the field.
 
 import clay
 import ../ui
@@ -16,14 +19,18 @@ import ../ui
 import ellipse/platform/platform   ## KeyEvent/kevEnter for the multiline remap
 import ./common
 
-proc textField*(id: ElementId, text: string, placeholder = "",
-                fontSize: uint16 = activeTheme.text.control, width = grow(),
+widget textField(id: ElementId, text: string, placeholder = "",
+                fontSize = activeTheme.text.control, width = grow(),
                 height = fixedPx(activeTheme.metrics.controlHeight),
-                tabIndex: int = 0): string =
+                tabIndex = 0) -> string:
+  emits TextChanged
+  emits TextCommitted
   var edited = text
+  var committed = false
   if fieldFocus(id, text, tabIndex):
     let step = editStep(text)
     edited = step.text
+    committed = step.outcome == eoCommit
     if step.outcome == eoCommit or step.outcome == eoCancel:
       if step.outcome == eoCancel:
         edited = snapshotValue()
@@ -35,14 +42,20 @@ proc textField*(id: ElementId, text: string, placeholder = "",
     textElement(shown, cfg)
     if focused(id):
       caretOverlay(textChildId(id.id), edited, cfg)
+  # emit before `result = edited`: that assignment may move `edited` out
+  if edited != text:
+    emit TextChanged(id: id, text: edited)
+  if committed:
+    emit TextCommitted(id: id, text: edited)
   result = edited
 
-proc multilineField*(id: ElementId, text: string, placeholder = "",
-                     fontSize: uint16 = activeTheme.text.control, rows: int = 4,
-                     width = grow(), tabIndex: int = 0): string =
+widget multilineField(id: ElementId, text: string, placeholder = "",
+                      fontSize = activeTheme.text.control, rows = 4,
+                      width = grow(), tabIndex = 0) -> string:
   ## The same edit engine over a taller, word-wrapped box. Enter inserts a
   ## newline instead of committing; a click outside (or Tab) leaves the
   ## field.
+  emits TextChanged
   var edited = text
   if fieldFocus(id, text, tabIndex):
     # Remap Enter (and C-m) to a newline so the shared engine treats it as
@@ -67,4 +80,6 @@ proc multilineField*(id: ElementId, text: string, placeholder = "",
     textElement(shown, TextConfig(fontSize: fontSize, color: color))
     if focused(id):
       caretOverlay(textChildId(id.id), edited, cfg)
+  if edited != text:
+    emit TextChanged(id: id, text: edited)
   result = edited

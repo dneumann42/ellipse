@@ -8,6 +8,8 @@
 ##
 ## Keyboard: a Tab stop at `tabIndex`; Enter toggles the list, Space opens
 ## it, Escape closes it, and Up/Down step the selection open or closed.
+##
+## A selection change emits `Picked` with the new index.
 
 import clay
 import ../ui
@@ -17,12 +19,13 @@ import ellipse/platform/platform
 import ./common
 import ./scrollbars
 
-proc comboBox*(id: ElementId, options: seq[string], selected: int,
+widget comboBox(id: ElementId, options: seq[string], selected: int,
                placeholder = "", width = grow(),
                height = fixedPx(activeTheme.metrics.controlHeight),
-               tabIndex: int = 0): int =
+               tabIndex = 0) -> int:
   ## Returns the selection index to store back -- the clicked row, the
   ## arrow-stepped one, or `selected` unchanged. -1 shows `placeholder`.
+  emits Picked
   result = selected
   let t = activeTheme
   let popId = localId("combo.pop", id.id)
@@ -55,3 +58,5 @@ proc comboBox*(id: ElementId, options: seq[string], selected: int,
             closeDropdown()
         inc i
       scrollbar(popId, popId)
+  if result != selected:
+    emit Picked(id: id, index: result)

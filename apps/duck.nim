@@ -8,6 +8,12 @@
 ## close prompts) mirrors the original app as closely as this platform
 ## allows.
 ##
+## Input reaches the app as widget events: the menu bar (`DuckMenus`)
+## catches `MenuPicked`, the document (`DocArea`) the editor's
+## `TextChanged`, and each dialog in `duck/session` the `Pressed` /
+## `TextChanged` / `Toggled` / `Picked` of its controls. Only the raw
+## keyboard chords (`appChords`) are read outside the widget tree.
+##
 ## Run:            make run_duck [path/to/file.txt]
 ## Chords:         Ctrl+N/O/S, Ctrl+Shift+S, Ctrl+F/H/G, Ctrl+Z/Y,
 ##                 Ctrl+X/C/V/A, F3/F5, Ctrl+wheel or Ctrl+Plus/Minus/0
@@ -115,64 +121,96 @@ proc ghostMenu(label: string) =
     color: t.palette.dimColor))
   closeElement()
 
-proc menuActions() =
-  ## Every menu item hands its act to the session/editor API. The acts
-  ## that change the text mark the document dirty by hand: the editor
-  ## widget's `edited` flag only covers keystrokes and pointer edits it
-  ## sees itself, while these run between its frames.
-  menu("File") do():
-    if menuItem("New", "Ctrl+N"): beginNew()
-    if menuItem("Open...", "Ctrl+O"): beginOpen()
-    if menuItem("Save", "Ctrl+S"): quickSave()
-    if menuItem("Save As...", "Ctrl+Shift+S"): beginSave()
-    menuSeparator()
-    if menuItem("Exit", "Alt+F4"): beginExit()
-  menu("Edit") do():
-    if menuItem("Undo", "Ctrl+Z"):
+proc editCut() =
+  let (lo, hi) = editorSel(editorId, document.text)
+  if hi > lo:
+    editorCut(editorId, document.text)
+    noteEdited()
+  else:
+    editorCopy(editorId, document.text)   # Notepad: Cut with no selection copies
+
+proc editDelete() =
+  let (lo, hi) = editorSel(editorId, document.text)
+  if hi > lo:
+    editorDelete(editorId, document.text)
+    noteEdited()
+
+proc editPaste() =
+  let c = getClipboard()
+  if c.len > 0:
+    editorPaste(editorId, document.text)
+    noteEdited()
+
+widget DuckMenus():
+  ## The menu bar. Every item reports through `MenuPicked`, which this
+  ## widget catches and hands to the session/editor API. The acts that
+  ## change the text mark the document dirty by hand: the editor widget's
+  ## `TextChanged` only covers keystrokes and pointer edits it sees
+  ## itself, while these run between its frames.
+  event MenuPicked(e):
+    case e.label
+    of "New": beginNew()
+    of "Open...": beginOpen()
+    of "Save": quickSave()
+    of "Save As...": beginSave()
+    of "Exit": beginExit()
+    of "Undo":
       if editorUndo(editorId, document.text): noteEdited()
-    if menuItem("Redo", "Ctrl+Y"):
+    of "Redo":
       if editorRedo(editorId, document.text): noteEdited()
+    of "Cut": editCut()
+    of "Copy": editorCopy(editorId, document.text)
+    of "Delete": editDelete()
+    of "Paste": editPaste()
+    of "Find...": beginFind()
+    of "Find Next": doFind()
+    of "Replace...": beginReplace()
+    of "Go To...": beginGoto()
+    of "Select All": editorSelectAll(editorId, document.text)
+    of "Time/Date": doStamp()
+    of "Word Wrap": wrapOn = not wrapOn
+    of "Font...": beginFont()
+    of "Zoom In": zoomBy(2)
+    of "Zoom Out": zoomBy(-2)
+    of "Restore Zoom": zoomSize = baseZoom
+    of "Status Bar": statusOn = not statusOn
+    of "View Help", "About Duck": beginAbout()
+    else: discard
+  menu("File") do():
+    discard menuItem("New", "Ctrl+N")
+    discard menuItem("Open...", "Ctrl+O")
+    discard menuItem("Save", "Ctrl+S")
+    discard menuItem("Save As...", "Ctrl+Shift+S")
     menuSeparator()
-    if menuItem("Cut", "Ctrl+X"):
-      let (lo, hi) = editorSel(editorId, document.text)
-      if hi > lo:
-        editorCut(editorId, document.text)
-        noteEdited()
-      else:
-        editorCopy(editorId, document.text)   # Notepad: Cut with no selection copies
-    if menuItem("Copy", "Ctrl+C"): editorCopy(editorId, document.text)
-    if menuItem("Delete", "Del"):
-      let (lo, hi) = editorSel(editorId, document.text)
-      if hi > lo:
-        editorDelete(editorId, document.text)
-        noteEdited()
-    if menuItem("Paste", "Ctrl+V"):
-      let c = getClipboard()
-      if c.len > 0:
-        editorPaste(editorId, document.text)
-        noteEdited()
+    discard menuItem("Exit", "Alt+F4")
+  menu("Edit") do():
+    discard menuItem("Undo", "Ctrl+Z")
+    discard menuItem("Redo", "Ctrl+Y")
     menuSeparator()
-    if menuItem("Find...", "Ctrl+F"): beginFind()
-    if menuItem("Find Next", "F3"): doFind()
-    if menuItem("Replace...", "Ctrl+H"): beginReplace()
+    discard menuItem("Cut", "Ctrl+X")
+    discard menuItem("Copy", "Ctrl+C")
+    discard menuItem("Delete", "Del")
+    discard menuItem("Paste", "Ctrl+V")
     menuSeparator()
-    if menuItem("Go To...", "Ctrl+G"): beginGoto()
-    if menuItem("Select All", "Ctrl+A"): editorSelectAll(editorId, document.text)
-    if menuItem("Time/Date", "F5"): doStamp()
+    discard menuItem("Find...", "Ctrl+F")
+    discard menuItem("Find Next", "F3")
+    discard menuItem("Replace...", "Ctrl+H")
+    menuSeparator()
+    discard menuItem("Go To...", "Ctrl+G")
+    discard menuItem("Select All", "Ctrl+A")
+    discard menuItem("Time/Date", "F5")
   menu("Format") do():
-    if menuItem("Word Wrap", if wrapOn: "✓" else: ""):
-      wrapOn = not wrapOn
-    if menuItem("Font...", ""): beginFont()
+    discard menuItem("Word Wrap", if wrapOn: "✓" else: "")
+    discard menuItem("Font...", "")
   menu("View") do():
-    if menuItem("Zoom In", "Ctrl+Plus"): zoomBy(2)
-    if menuItem("Zoom Out", "Ctrl+Minus"): zoomBy(-2)
-    if menuItem("Restore Zoom", "Ctrl+0"): zoomSize = baseZoom
+    discard menuItem("Zoom In", "Ctrl+Plus")
+    discard menuItem("Zoom Out", "Ctrl+Minus")
+    discard menuItem("Restore Zoom", "Ctrl+0")
     menuSeparator()
-    if menuItem("Status Bar", if statusOn: "✓" else: ""):
-      statusOn = not statusOn
+    discard menuItem("Status Bar", if statusOn: "✓" else: "")
   menu("Help") do():
-    if menuItem("View Help", "F1"): beginAbout()
-    if menuItem("About Duck", ""): beginAbout()
+    discard menuItem("View Help", "F1")
+    discard menuItem("About Duck", "")
 
 proc menuStrip() =
   if open():
@@ -182,7 +220,7 @@ proc menuStrip() =
     ghostMenu("View")
     ghostMenu("Help")
   else:
-    menuActions()
+    DuckMenus()
 
 ## --- status bar ---------------------------------------------------------------------
 
@@ -207,13 +245,15 @@ proc drawStatus() =
 
 ## --- the frame ------------------------------------------------------------------------
 
-proc drawDoc() =
-  let opts = EditorOpts(wrap: wrapOn, fontSize: zoomSize,
-                        blocked: open())
-  let st = editor(editorId, document.text, opts)
-  if st.edited:
-    noteEdited()
-  document.text = st.text
+widget DocArea():
+  ## The document: the editor's `TextChanged` is the edit, so it both
+  ## stores the text and marks the document dirty.
+  event TextChanged(e):
+    if e.id == editorId:
+      document.text = e.text
+      noteEdited()
+  discard editor(editorId, document.text,
+    EditorOpts(wrap: wrapOn, fontSize: zoomSize, blocked: open()))
 
 proc update() {.raises.} =
   let mods = keyMods()
@@ -228,7 +268,7 @@ proc update() {.raises.} =
     clay "app", col(width = grow(), height = grow(), gap = 0)
         .bg(bgColor):
       toolBar("bar", menuStrip)
-      drawDoc()
+      DocArea()
       if statusOn:
         drawStatus()
       draw()

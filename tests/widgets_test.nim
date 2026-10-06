@@ -3,7 +3,8 @@
 ## Lays the widgets out in a clay context frame by frame, drives them with
 ## pointer presses (last-frame boxes, as the frame contract wants) and with
 ## synthetic key events through the platform queue, and checks the values
-## they hand back to their callers.
+## they hand back to their callers -- and the events they emit, which a
+## root `handleEvents` block records alongside.
 
 import std/syncio
 
@@ -70,12 +71,74 @@ let refreshId = hashId("refresh")
 let cardHostId = hashId("cardhost")
 let cardRowId = hashId("cardrow")
 
+# --- events: everything the widgets emit, as "Kind id value" lines --------------
+
+var seen: seq[string] = @[]
+
+proc idName(id: ElementId): string =
+  if id == cbId: "cb"
+  elif id == swId: "sw"
+  elif id == comboId: "combo"
+  elif id == multiId: "multi"
+  elif id == tfId: "tf"
+  elif id == mlId: "ml"
+  elif id == nfId: "qty"
+  elif id == noteId: "note"
+  elif id == viewId: "view"
+  elif id == refreshId: "refresh"
+  else: "?" & $id.id
+
+proc saw(line: string): bool =
+  ## `line` was emitted (and reached the root) since the last `clearSeen`.
+  for x in seen:
+    if x == line:
+      return true
+  return false
+
+proc sawKind(prefix: string): bool =
+  for x in seen:
+    if x.len >= prefix.len and substr(x, 0, prefix.len - 1) == prefix:
+      return true
+  return false
+
+proc clearSeen() =
+  seen = @[]
+
+proc shownSeen(): string =
+  result = ""
+  for x in seen:
+    result.add " | "
+    result.add x
+
 proc cardActions() =
   if button(refreshId, "Refresh"):
     refreshClicked = true
 
+proc drawWidgets()
+
 proc draw() =
   beginLayout()
+  handleEvents:
+    event Pressed(e):
+      seen.add "Pressed " & idName(e.id)
+    event Toggled(e):
+      seen.add "Toggled " & idName(e.id) & " " & $e.on
+    event Picked(e):
+      seen.add "Picked " & idName(e.id) & " " & $e.index
+    event SelectionChanged(e):
+      seen.add "SelectionChanged " & idName(e.id) & " " & $e.selection
+    event TextChanged(e):
+      seen.add "TextChanged " & idName(e.id) & " " & e.text
+    event TextCommitted(e):
+      seen.add "TextCommitted " & idName(e.id) & " " & e.text
+    event NumberChanged(e):
+      seen.add "NumberChanged " & idName(e.id)
+    event IntChanged(e):
+      seen.add "IntChanged " & idName(e.id) & " " & $e.value
+    drawWidgets()
+  endLayout()
+
+proc drawWidgets() =
   clay "root", col(width = grow(), height = grow(), gap = 8,
                    padding = padAll(16)):
     heading("Widgets", 1)
@@ -100,7 +163,6 @@ proc draw() =
       CardRow:
         StatCard(label = "Up", value = "4d", hint = "since boot")
         StatCard(label = "Pings", value = "12", hint = "")
-  endLayout()
 
 proc frame() =
   notePressState()   # apps fold the press claim inside updateUI; step it here
@@ -154,10 +216,16 @@ proc main() {.raises.} =
   expect(takeErrors().len == 0, "widgets: frame reports no clay errors")
 
   # --- checkbox + switch -----------------------------------------------------------
+  clearSeen()
   click(cbId)
   expect(agree, "checkbox: click toggles on")
+  expect(saw("Toggled cb true"), "events: checkbox emits Toggled," &
+    shownSeen())
+  clearSeen()
   click(swId)
   expect(wifi, "switch: click toggles on")
+  expect(saw("Toggled sw true") and not saw("Toggled cb false"),
+    "events: switch emits Toggled with its own id," & shownSeen())
   click(cbId)
   expect(not agree, "checkbox: second click toggles off")
 
@@ -183,16 +251,21 @@ proc main() {.raises.} =
   expect(elementData(popId).found, "comboBox: click opens the popover")
   let opt0 = localIdWithIndex("combo.opt", 0'u32, comboId.id)
   expect(elementData(opt0).found, "comboBox: options laid out in the popover")
+  clearSeen()
   click(opt0)
   expect(comboSel == 0, "comboBox: row click selects, got " & $comboSel)
+  expect(saw("Picked combo 0"), "events: comboBox emits Picked," & shownSeen())
   expect(not elementData(popId).found, "comboBox: selecting closes the popover")
 
   # --- multiselect -------------------------------------------------------------------
   click(multiId)
   let mpop = localId("multi.pop", multiId.id)
   expect(elementData(mpop).found, "multiSelect: click opens the popover")
+  clearSeen()
   click(localIdWithIndex("multi.opt", 0'u32, multiId.id))
   expect(isSet(multiSel, 0), "multiSelect: row toggles its bit")
+  expect(saw("SelectionChanged multi 1"),
+    "events: multiSelect emits SelectionChanged," & shownSeen())
   click(localIdWithIndex("multi.opt", 2'u32, multiId.id))
   expect(isSet(multiSel, 0) and isSet(multiSel, 2),
     "multiSelect: rows accumulate")
@@ -206,12 +279,18 @@ proc main() {.raises.} =
 
   # --- text field ---------------------------------------------------------------------
   click(tfId)
+  clearSeen()
   typeStr("Lace")
   expect(nameText == "AdaLace", "textField: typing appends at the caret, got " &
     $nameText)
+  expect(saw("TextChanged tf AdaLace"),
+    "events: textField emits TextChanged with the new text," & shownSeen())
   pressKey(kevBackspace)
   expect(nameText == "AdaLac", "textField: backspace deletes one char")
+  clearSeen()
   pressKey(kevEnter)
+  expect(saw("TextCommitted tf AdaLac") and not sawKind("TextChanged"),
+    "events: Enter emits TextCommitted, no change," & shownSeen())
   pressKey(kevText)           # (ignored: no focus anymore)
   typeStr("x")
   expect(nameText == "AdaLac", "textField: Enter commits and blurs")
@@ -262,8 +341,12 @@ proc main() {.raises.} =
   let decId = localId("num.dec", nfId.id)
   expect(elementData(incId).found and elementData(decId).found,
     "numberField: steppers laid out")
+  clearSeen()
   click(incId)
   expect(qty == 4, "numberField: stepper click steps, got " & $qty)
+  expect(saw("IntChanged qty 4") and not sawKind("NumberChanged"),
+    "events: intNumberField translates NumberChanged to IntChanged," &
+    shownSeen())
   pressKey(kevEnter)                     # commit + blur the number field
   pressKey(kevUp)                        # unfocused: must not step
   expect(qty == 4, "numberField: arrows only act while focused")
@@ -281,7 +364,10 @@ proc main() {.raises.} =
   pressKey(kevUp)                        # to the end of line two
   pressChord('a')                        # C-a: start of "cd"
   typeStr("X")                           # "ab\nXcd\nef"
+  clearSeen()
   pressKey(kevEnter)                     # a plain newline, not a commit
+  expect(saw("TextChanged ml ab\nX\ncd\nef"),
+    "events: multilineField emits TextChanged," & shownSeen())
   expect(noteText == "ab\nX\ncd\nef",
     "multilineField: Enter inserts a newline, got " & $noteText)
   pressKey(kevUp)                        # back to the "X" line
@@ -323,8 +409,10 @@ proc main() {.raises.} =
 
   # button: Enter presses it
   refreshClicked = false
+  clearSeen()
   pressKey(kevEnter)
   expect(refreshClicked, "focus: Enter presses a focused button")
+  expect(saw("Pressed refresh"), "events: button emits Pressed," & shownSeen())
 
   # checkbox: Space flips it; switch: Enter flips it
   pressKey(kevTab)                       # wraps to the checkbox
@@ -400,8 +488,10 @@ proc main() {.raises.} =
   # tab strip: Left/Right switch tabs, wrapping
   pressKey(kevTab)
   setActiveTab(viewId, 0)
+  clearSeen()
   pressKey(kevRight)
   expect(activeTab(viewId) == 1, "focus: Right selects the next tab")
+  expect(saw("Picked view 1"), "events: tabStrip emits Picked," & shownSeen())
   pressKey(kevLeft)
   pressKey(kevLeft)
   expect(activeTab(viewId) == viewTabs.len - 1, "focus: Left wraps")
@@ -410,8 +500,10 @@ proc main() {.raises.} =
   pressKey(kevEscape)                    # settle a frame with nothing focused
 
   # --- text link ---------------------------------------------------------------------
+  clearSeen()
   click(noteId)
   expect(noteClicked, "textLink: click reports true for the frame")
+  expect(saw("Pressed note"), "events: textLink emits Pressed," & shownSeen())
 
   # --- tabbed view -------------------------------------------------------------------
   let strip = localId("tabs.strip", viewId.id)

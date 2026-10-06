@@ -31,14 +31,18 @@
 ##       evOnToggled(cast[ptr Toggled](evPayloadArg)[])
 ##     elif ...
 ##   pushEventFrame("Name", uint32(<hash>), <id>, evHandler, @[ToggledKind, ...])
-##   defer: popEventFrame()
-##   <remaining statements>
-##   discard                   # see `emitStmts`
+##   try:
+##     <remaining statements>
+##     discard                 # see `emitStmts`
+##   finally:
+##     popEventFrame()
 ##
 ## The payload reaches the handler as a `var` parameter: Nimony does not
 ## auto-dereference `ptr` on field access, and `e.field = x` must write
 ## through to the payload a `reemit` passes on. A `return` in a handler
-## ends just that handler. `defer` closes the frame however the body exits.
+## ends just that handler. `finally` closes the frame however the body
+## exits (`try/finally`, not `defer`: under a `defer` Nimony cannot prove an
+## `let x = if c: a else: b` initialized).
 ##
 ## Generated names (`evHandler`, `evOn<Name>`, `evKindArg`, `evPayloadArg`)
 ## are plain identifiers no widget would pick, so a widget's own `kind` or
@@ -402,9 +406,9 @@ proc copyBody(dest: var NifBuilder; n: NifCursor) =
   dest.closeTree()
 
 proc emitStmts(dest: var NifBuilder; info: LineInfo; stmts: seq[NifCursor]) =
-  ## The statements plus a closing `discard`: Nimony types the block a
-  ## `defer` guards by its last statement, so a trailing discardable call
-  ## -- `emit ...` -- would otherwise be a value that must be used.
+  ## The statements plus a closing `discard`: Nimony types a `try` by its
+  ## body's last statement, so a trailing discardable call -- `emit ...` --
+  ## would otherwise make the `try` a value that must be used.
   for s in stmts:
     copyBody(dest, s)
   dest.openTree("discard", info)
@@ -414,8 +418,8 @@ proc emitStmts(dest: var NifBuilder; info: LineInfo; stmts: seq[NifCursor]) =
 proc emitEventFrame*(dest: var NifBuilder; info: LineInfo;
                      s: EventSections; frameName: string;
                      idIdent: string) =
-  ## The handler closure (when there are handlers), `pushEventFrame`, a
-  ## `defer: popEventFrame()`, then the remaining statements. `idIdent`
+  ## The handler closure (when there are handlers), `pushEventFrame`, then
+  ## the remaining statements in `try ... finally: popEventFrame()`. `idIdent`
   ## names an `ElementId` in scope keying the frame, "" for none.
   if s.handlers.len > 0:
     dest.openTree("proc", info)
@@ -522,12 +526,17 @@ proc emitEventFrame*(dest: var NifBuilder; info: LineInfo;
     dest.closeTree()
   dest.closeTree()
 
-  # defer: popEventFrame()
-  dest.openTree("defer", info)
+  # try: <rest> finally: popEventFrame() -- not `defer`: under a `defer`
+  # Nimony cannot prove `let x = if c: a else: b` initialized
+  dest.openTree("try", info)
+  dest.openTree("stmts", info)
+  emitStmts(dest, info, s.rest)
+  dest.closeTree()
+  dest.openTree("fin", info)
   dest.openTree("stmts", info)
   dest.openTree("call", info)
   dest.addIdent "popEventFrame"
   dest.closeTree()
   dest.closeTree()
   dest.closeTree()
-  emitStmts(dest, info, s.rest)
+  dest.closeTree()

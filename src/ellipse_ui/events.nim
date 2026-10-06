@@ -53,6 +53,10 @@
 ## sections an event invalidates. `eventLog()` is the last complete frame's
 ## log; records with `consumed == false` reached the root unhandled.
 ##
+## In a valued widget (`-> T`), emit before the final `result = x`: Nimony
+## may move `x` into `result`, and an emit after it would carry -- or
+## compare -- an emptied value.
+##
 ## Widget identity: each frame gets a `WidgetKey` derived from its parent's
 ## key, the widget's name and its position among the parent's widget
 ## children (a focusable widget's element id replaces the position), so a
@@ -98,6 +102,12 @@ proc `==`*(a, b: EventKind): bool {.borrow.}
 proc `==`*(a, b: WidgetKey): bool {.borrow.}
 proc `$`*(k: EventKind): string = $uint32(k)
 proc `$`*(k: WidgetKey): string = $uint64(k)
+
+proc `==`*(a, b: ElementId): bool =
+  ## Element ids are equal when their hashes are: what a handler means by
+  ## `if e.id == saveId`. (The debug `label` may differ between an id
+  ## built by `hashId` and one rebuilt from its hash.)
+  a.id == b.id
 
 proc noHandler(kind: EventKind, payload: pointer): EventFlow = efPass
 

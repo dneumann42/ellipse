@@ -11,6 +11,8 @@
 ## Keyboard: a Tab stop at `tabIndex`; Enter toggles the list, Space opens
 ## it, Escape closes it. In the open list Up/Down move a highlight and
 ## Space ticks the highlighted option.
+##
+## A changed mask emits `SelectionChanged` with the widget's id.
 
 import clay
 import ../ui
@@ -65,12 +67,13 @@ func selectionSummary*(sel: Selection, options: seq[string]): string =
       result.add options[i]
     inc i
 
-proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
+widget multiSelect(id: ElementId, options: seq[string], selection: Selection,
                   placeholder = "Select...", width = grow(),
                   height = fixedPx(activeTheme.metrics.controlHeight),
-                  tabIndex: int = 0): Selection =
+                  tabIndex = 0) -> Selection:
   ## Returns the selection mask to store back. The popover stays open while
   ## the user ticks items; a click outside it closes.
+  emits SelectionChanged(id: ElementId, selection: Selection)
   result = selection
   let t = activeTheme
   let popId = localId("multi.pop", id.id)
@@ -132,3 +135,5 @@ proc multiSelect*(id: ElementId, options: seq[string], selection: Selection,
       closeElement()
 
       scrollbar(popId, popId)
+  if result != selection:
+    emit SelectionChanged(id: id, selection: result)

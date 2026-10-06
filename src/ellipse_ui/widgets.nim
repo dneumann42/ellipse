@@ -36,7 +36,13 @@
 ##                  with its bar attached, `ScrollbarStyle`
 ##
 ## Immediate-mode contract: pass the current value in, store the return
-## value back -- `checked = checkbox(id, "Wifi", checked)`. Transient state
+## value back -- `checked = checkbox(id, "Wifi", checked)`. Every input
+## widget also emits an event carrying its id (`Pressed`, `Toggled`,
+## `Picked`, `TextChanged`, `TextCommitted`, `NumberChanged` from `ui`;
+## `SelectionChanged`, `IntChanged` from their modules), so code further
+## up the tree can catch the change instead -- see `ellipse_ui/events`.
+## The input widgets are `widget` definitions, so each call opens an event
+## frame (its `WidgetKey`) whether or not anything listens. Transient state
 ## (which field has the caret, which dropdown is open) lives in the widget
 ## modules -- the dropdown slot in `common` -- keyed by element id, like
 ## `ui.menu` already does.

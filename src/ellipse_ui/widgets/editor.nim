@@ -12,6 +12,11 @@
 ##
 ##   doc = editor(hashId("doc"), doc).text
 ##
+## or, event-driven, catch the `TextChanged` it emits on every edit:
+##
+##   event TextChanged(e):
+##     if e.id == docId: doc = e.text
+##
 ## The widget's transient state (undo history, the position mirror below)
 ## lives here, keyed by element id like the dropdown slot in `common`.
 ## The menu-side entry points (`editorUndo`, `editorCut`, `editorSelect`,
@@ -567,8 +572,8 @@ proc pageStep(s: string, cfg: TextConfig, id, textEl: ElementId,
 
 ## --- the widget -------------------------------------------------------------------
 
-proc editor*(id: ElementId, text: string,
-             opts = EditorOpts()): EditorStats =
+widget editor(id: ElementId, text: string,
+             opts = EditorOpts()) -> EditorStats:
   ## The document area: `text` in, `EditorStats.text` back. A sunken,
   ## scrollable page (vertical always; horizontal too when `wrap` is off)
   ## holding one word-wrapped -- or endlessly wide -- text element, with
@@ -582,6 +587,8 @@ proc editor*(id: ElementId, text: string,
   ## redo and PageUp/PageDown -- consumed here before the shared map
   ## sees them. While `blocked` the widget paints as normal but hears no
   ## keys and takes no clicks: a modal dialog owns the session meanwhile.
+  ## Emits `TextChanged` with the new text when this frame edited it.
+  emits TextChanged
   let t = activeTheme
   var s = text
   let size =
@@ -704,6 +711,10 @@ proc editor*(id: ElementId, text: string,
 
   let moved = editorCaret(id, s) != caretBefore or
     editorAnchor(id, s) != anchorBefore
+  # emit before building the result: Nimony moves `s` into it, and a
+  # later `s != text` would compare an emptied string
+  if s != text:
+    emit TextChanged(id: id, text: s)
   result = EditorStats(text: s, edited: s != text, caretMoved: moved,
                        undoable: editorUndoable(),
                        redoable: editorRedoable())

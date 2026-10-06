@@ -21,6 +21,8 @@
 ##
 ## The strip is one Tab stop (`tabStripId(id)`); while it holds focus
 ## Left/Right step the selection (wrapping) and Home/End jump to the ends.
+##
+## A selection change emits `Picked` with the view's `id` and the new tab.
 
 import std/tables
 
@@ -67,12 +69,13 @@ proc tabStripId*(id: ElementId): ElementId =
   ## The focusable strip element of `id`'s tabs.
   localId("tabs.strip", id.id)
 
-proc tabStrip*(id: ElementId, labels: seq[string], selected: int,
-               tabIndex: int = 0): int =
+widget tabStrip(id: ElementId, labels: seq[string], selected: int,
+               tabIndex = 0) -> int:
   ## Draw a tab strip as a child of `id`'s element and return the index
   ## of a tab clicked (or arrow-stepped) this frame, else `selected`. The
   ## strip and its buttons take ids local to `id`, so several strips can
   ## share a screen.
+  emits Picked
   result = selected
   let th = activeTheme
   let stripId = tabStripId(id)
@@ -110,6 +113,8 @@ proc tabStrip*(id: ElementId, labels: seq[string], selected: int,
       result = i
     inc i
   closeElement()
+  if result != selected:
+    emit Picked(id: id, index: result)
 
 widget TabbedView(id: ElementId, tabs: seq[string], body: proc(): void):
   ## The full container: tab strip plus the page panel `body` renders

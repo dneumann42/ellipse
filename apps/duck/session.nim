@@ -75,6 +75,32 @@ var
   fdSel = -1
   fdEntries: seq[FEntry] = @[]
 
+# the dialogs' controls, by id: their events are told apart by these
+let
+  queryId = hashId("s.query")
+  replId = hashId("s.repl")
+  caseId = hashId("s.case")
+  nextId = hashId("s.next")
+  replBtnId = hashId("s.replb")
+  allId = hashId("s.allb")
+  findCancelId = hashId("s.cancel")
+  gotoId = hashId("s.goto")
+  gotoBtnId = hashId("s.gotob")
+  gotoCancelId = hashId("s.goc")
+  famId = hashId("s.fam")
+  szId = hashId("s.sz")
+  fontOkId = hashId("s.fok")
+  fontCancelId = hashId("s.fc")
+  aboutOkId = hashId("s.aboutok")
+  askYesId = hashId("s.askyes")
+  askNoId = hashId("s.askno")
+  askCancelId = hashId("s.askcancel")
+  infoOkId = hashId("s.iok")
+  dirId = hashId("s.dir")
+  nameId = hashId("s.name")
+  fdOkId = hashId("s.fdok")
+  fdCancelId = hashId("s.fdc")
+
 proc open*(): bool = kind != kNone
 
 proc initLists*() =
@@ -446,7 +472,7 @@ proc primary*() =
   of kFind: doFind()
   of kReplace:
     # Enter in "Replace with" replaces; anywhere else it finds next.
-    if focusIdOf() == hashId("s.repl").id:
+    if focusIdOf() == replId.id:
       doReplace()
     else:
       doFind()
@@ -492,70 +518,92 @@ proc beginAbout*() =
   show(kAbout)
 
 ## --- drawing ---------------------------------------------------------------------------
+##
+## Each dialog is a widget that catches what its controls emit: buttons
+## `Pressed`, fields `TextChanged`, the checkbox `Toggled`, the font combos
+## `Picked`, the file list's rows `RowPressed`. The controls draw from the
+## session state and the handlers write it back -- synchronously, so a
+## handler's change shows in the rest of the same frame.
 
-proc fieldRow(id: ElementId, labelText, value: string): string =
-  ## One dialog form row: right-labelled text field; returns the edited
-  ## value (the immediate-mode round trip on `value`). Auto-id brackets
-  ## (`container`), because a dialog declares several of these in one
-  ## parent -- fixed labels would collide.
+proc fieldRow(id: ElementId, labelText, value: string) =
+  ## One dialog form row: a right-labelled text field. Its edits arrive
+  ## as `TextChanged` at the dialog. Auto-id brackets (`container`),
+  ## because a dialog declares several of these in one parent -- fixed
+  ## labels would collide.
   let t = activeTheme
-  var outp = value
   container(row(width = grow(), height = fit(),
                 gap = t.metrics.gapProse, alignY = centerY)):
     container(col(width = fixedPx(110), height = fit(), alignX = right,
                   alignY = centerY)):
       text(labelText, t.text.label, t.palette.labelColor)
-    outp = textField(id, value, "")
-  result = outp
+    discard textField(id, value, "")
 
-proc footerButton(id: ElementId, label: string, width = 120.0'f32): bool =
-  button(id, label, width = fixedPx(width), height = fixedPx(38),
+proc footerButton(id: ElementId, label: string, width = 120.0'f32) =
+  ## A dialog footer button; the press arrives as `Pressed` at the dialog.
+  discard button(id, label, width = fixedPx(width), height = fixedPx(38),
     fontSize = activeTheme.text.control)
 
-proc drawFind(replacing: bool) =
-  let t = activeTheme
+widget FindDialog(replacing: bool):
+  event Pressed(e):
+    if e.id == nextId: doFind()
+    elif e.id == replBtnId: doReplace()
+    elif e.id == allId: doReplaceAll()
+    elif e.id == findCancelId: dismiss()
+  event TextChanged(e):
+    if e.id == queryId: query = e.text
+    elif e.id == replId: replText = e.text
+  event Toggled(e):
+    if e.id == caseId: matchCase = e.on
   label(if replacing: "Find and Replace" else: "Find")
-  query = fieldRow(hashId("s.query"), "Find what:", query)
+  fieldRow(queryId, "Find what:", query)
   if replacing:
-    replText = fieldRow(hashId("s.repl"), "Replace with:", replText)
+    fieldRow(replId, "Replace with:", replText)
   clay "fopts", row(width = grow(), height = fit(), gap = 24,
                     alignY = centerY):
-    matchCase = checkbox(hashId("s.case"), "Match case", matchCase)
+    discard checkbox(caseId, "Match case", matchCase)
     if findStatus.len > 0:
       clay "fst", row(width = grow(), height = fit(), alignY = centerY):
         caption(findStatus)
   clay "fbtns", row(width = grow(), height = fit(), gap = 10,
                     alignY = centerY):
     spacer()
-    if footerButton(hashId("s.next"), "Find Next"):
-      doFind()
+    footerButton(nextId, "Find Next")
     if replacing:
-      if footerButton(hashId("s.replb"), "Replace"):
-        doReplace()
-      if footerButton(hashId("s.allb"), "Replace All"):
-        doReplaceAll()
-    if footerButton(hashId("s.cancel"), "Cancel"):
-      dismiss()
+      footerButton(replBtnId, "Replace")
+      footerButton(allId, "Replace All")
+    footerButton(findCancelId, "Cancel")
 
-proc drawGoto() =
+widget GotoDialog():
+  event Pressed(e):
+    if e.id == gotoBtnId: doGoto()
+    elif e.id == gotoCancelId: dismiss()
+  event TextChanged(e):
+    if e.id == gotoId: gotoText = e.text
   label("Go To Line")
-  gotoText = fieldRow(hashId("s.goto"), "Line number:", gotoText)
+  fieldRow(gotoId, "Line number:", gotoText)
   if gotoStatus.len > 0:
     caption(gotoStatus)
   clay "gbtns", row(width = grow(), height = fit(), gap = 10,
                     alignY = centerY):
     spacer()
-    if footerButton(hashId("s.gotob"), "Go To"):
-      doGoto()
-    if footerButton(hashId("s.goc"), "Cancel"):
-      dismiss()
+    footerButton(gotoBtnId, "Go To")
+    footerButton(gotoCancelId, "Cancel")
 
-proc drawFont() =
+widget FontDialog():
+  event Picked(e):
+    if e.id == famId: famIdx = e.index
+    elif e.id == szId: szIdx = e.index
+  event Pressed(e):
+    if e.id == fontOkId:
+      zoomSize = fontPx()
+      dismiss()
+    elif e.id == fontCancelId:
+      dismiss()
   label("Choose Font")
   clay "frow1", row(width = grow(), height = fit(), gap = 10,
                     alignY = centerY):
-    famIdx = comboBox(hashId("s.fam"), fontFams, famIdx, "Family")
-    szIdx = comboBox(hashId("s.sz"), fontSz, szIdx, "Size")
+    discard comboBox(famId, fontFams, famIdx, "Family")
+    discard comboBox(szId, fontSz, szIdx, "Size")
   clay "fprev", col(width = grow(), height = fixedPx(76), gap = 4,
       padding = padAll(10), alignY = centerY)
       .bg(fieldBg).border(hairline, panelBorder).corner(panelRadius):
@@ -563,48 +611,74 @@ proc drawFont() =
   clay "fbtns2", row(width = grow(), height = fit(), gap = 10,
                      alignY = centerY):
     spacer()
-    if footerButton(hashId("s.fok"), "OK"):
-      zoomSize = fontPx()
-      dismiss()
-    if footerButton(hashId("s.fc"), "Cancel"):
-      dismiss()
+    footerButton(fontOkId, "OK")
+    footerButton(fontCancelId, "Cancel")
 
-proc drawAbout() =
+widget AboutDialog():
+  event Pressed(e):
+    if e.id == aboutOkId: dismiss()
   heading("Duck", 3)
   bodyText("A Notepad clone built on ellipse_ui: clay layout, the standard widget set, SDL3. Every menu item, chord and dialog here really works -- find, replace, wrap, zoom, undo, the file pickers.")
   caption("Documents keep the line endings they came in with; new files write CRLF like the original.")
   clay "abtns", row(width = grow(), height = fit(), alignX = right,
                     alignY = centerY):
-    if footerButton(hashId("s.aboutok"), "OK"):
-      dismiss()
+    footerButton(aboutOkId, "OK")
 
-proc drawAsk() =
+widget AskDialog():
+  event Pressed(e):
+    if e.id == askYesId: doAskYes()
+    elif e.id == askNoId: doAskNo()
+    elif e.id == askCancelId: askBack()
   label(askMsg)
   clay "abtns2", row(width = grow(), height = fit(), gap = 10,
                      alignY = centerY):
     spacer()
-    if footerButton(hashId("s.askyes"), "Yes", 90):
-      doAskYes()
-    if footerButton(hashId("s.askno"), "No", 90):
-      doAskNo()
-    if footerButton(hashId("s.askcancel"), "Cancel", 90):
-      askBack()
+    footerButton(askYesId, "Yes", 90)
+    footerButton(askNoId, "No", 90)
+    footerButton(askCancelId, "Cancel", 90)
 
-proc drawInfo() =
+widget InfoDialog():
+  event Pressed(e):
+    if e.id == infoOkId: dismiss()
   label(infoMsg)
   clay "ibtns", row(width = grow(), height = fit(), alignX = right,
                     alignY = centerY):
-    if footerButton(hashId("s.iok"), "OK"):
-      dismiss()
+    footerButton(infoOkId, "OK")
 
-proc drawFile(isOpen: bool) =
+widget FileRow(index: int, caption: string, selected: bool):
+  ## One row of the file list -- `index` -1 is the ".." row. A click
+  ## emits `RowPressed` (with whether it completed a double click).
+  emits RowPressed(index: int, double: bool)
+  let rowId =
+    if index < 0: localIdWithIndex("fd.up", 0'u32)
+    else: localIdWithIndex("fd.row", uint32(index))
+  item(rowId, optionRowDecl(hovered(), selected, pressing())):
+    text(caption, activeTheme.text.option)
+  if clickedIn(rowId):
+    emit RowPressed(index: index, double: doubleClick())
+
+widget FileDialog(isOpen: bool):
+  event TextChanged(e):
+    if e.id == dirId: fdDir = e.text
+    elif e.id == nameId: fdName = e.text
+  event RowPressed(e):
+    if e.index < 0:
+      fdDir = parentOf(fdDir)
+      refreshList()
+    elif e.index < fdEntries.len:
+      fdSel = e.index
+      if isOpen:
+        fdName = fdEntries[e.index].name
+      if e.double:
+        fdActivate(e.index)
+  event Pressed(e):
+    if e.id == fdOkId: fdAccept()
+    elif e.id == fdCancelId: dismiss()
   label(if isOpen: "Open" else: "Save As")
-  let editedDir = fieldRow(hashId("s.dir"), "Directory:", fdDir)
-  if editedDir != fdDir:
-    fdDir = editedDir
+  fieldRow(dirId, "Directory:", fdDir)
   if fdDir != fdLoaded:
     refreshList()
-  fdName = fieldRow(hashId("s.name"), "File name:", fdName)
+  fieldRow(nameId, "File name:", fdName)
   if fdError.len > 0:
     caption(fdError)
   scrollPanel "fd.list", col(width = grow(), height = fixedPx(200), gap = 2,
@@ -613,31 +687,19 @@ proc drawFile(isOpen: bool) =
       .clip(horizontal = false, vertical = true,
             childOffset = currentScrollOffset()):
     if not isRoot(fdDir):
-      item("fd.up", 0, optionRowDecl(hovered(), false, pressing())):
-        text("..", activeTheme.text.option)
-      if clickedIn(localIdWithIndex("fd.up", 0'u32)):
-        fdDir = parentOf(fdDir)
-        refreshList()
+      FileRow(index = -1, caption = "..", selected = false)
     var i = 0
     while i < fdEntries.len:
       let e = fdEntries[i]
-      item("fd.row", i, optionRowDecl(hovered(), i == fdSel, pressing())):
-        text((if e.isDir: "[ ]  " else: "     ") & e.name,
-             activeTheme.text.option)
-      if clickedIn(localIdWithIndex("fd.row", uint32(i))):
-        fdSel = i
-        if isOpen:
-          fdName = e.name
-        if doubleClick():
-          fdActivate(i)
+      FileRow(index = i,
+              caption = (if e.isDir: "[ ]  " else: "     ") & e.name,
+              selected = i == fdSel)
       inc i
   clay "fdbtns", row(width = grow(), height = fit(), gap = 10,
                      alignY = centerY):
     spacer()
-    if footerButton(hashId("s.fdok"), if isOpen: "Open" else: "Save", 110):
-      fdAccept()
-    if footerButton(hashId("s.fdc"), "Cancel"):
-      dismiss()
+    footerButton(fdOkId, if isOpen: "Open" else: "Save", 110)
+    footerButton(fdCancelId, "Cancel")
 
 proc draw*() =
   ## The modal overlay: a floating panel centred across the window, with
@@ -679,25 +741,25 @@ proc draw*() =
     .border(hairline, panelBorder)
     .corner(panelRadius))
   case kind
-  of kFind: drawFind(false)
-  of kReplace: drawFind(true)
-  of kGoto: drawGoto()
-  of kFont: drawFont()
-  of kAbout: drawAbout()
-  of kAsk: drawAsk()
-  of kInfo: drawInfo()
-  of kOpen: drawFile(true)
-  of kSave: drawFile(false)
+  of kFind: FindDialog(replacing = false)
+  of kReplace: FindDialog(replacing = true)
+  of kGoto: GotoDialog()
+  of kFont: FontDialog()
+  of kAbout: AboutDialog()
+  of kAsk: AskDialog()
+  of kInfo: InfoDialog()
+  of kOpen: FileDialog(isOpen = true)
+  of kSave: FileDialog(isOpen = false)
   of kNone: discard
   if fresh:
     fresh = false
     # Notepad drops the caret in the first field on opening.
     if kind == kFind or kind == kReplace:
-      focusAt(hashId("s.query"), query, query.len)
+      focusAt(queryId, query, query.len)
     elif kind == kGoto:
-      focusAt(hashId("s.goto"), gotoText, gotoText.len)
+      focusAt(gotoId, gotoText, gotoText.len)
     elif kind == kOpen or kind == kSave:
-      focusAt(hashId("s.name"), fdName, fdName.len)
+      focusAt(nameId, fdName, fdName.len)
   closeElement()   # panel
   closeElement()   # center
   closeElement()   # backdrop

@@ -59,6 +59,14 @@
 ## `registerFocus(id, tabIndex)` -- so the body can ask `focused(id)`,
 ## `gainedFocus(id)`, `keyActivated(id)` or paint `.focusRing(id)`.
 ##
+## Values and defaults: `widget Name(params) -> T:` gives the proc a
+## return type and the template an `untyped` one, so `x = Name(...)` reads
+## the widget's `result` (head shape `(infix -> <head> T)`). A parameter
+## written `name = value` -- `(vv name value)` -- gets an inferred type and
+## that default in both the proc and the template. A valued widget with a
+## block slot leaves its slot proc in the caller's scope instead of a
+## `block:`, which Nimony cannot prove initializes a `let`.
+##
 ## Events (`ellipse_ui/events`): the body's top-level `emits Name(...)`
 ## lines and `event Name(e): ...` sections are lifted out (`meventgen`).
 ## Declared event types are generated ahead of the proc; every widget body
@@ -95,6 +103,8 @@ type
     isSlot: bool    ## declared type is a proc type
     injected: string  ## non-empty: a macro-added param of this type ident
     zeroDefault: bool ## defaults to `0` (the injected `tabIndex`)
+    default: NifCursor ## `name = value`: the default (type inferred)
+    hasDefault: bool
 
 proc atomText(n: NifCursor): string =
   case n.kind
@@ -224,12 +234,17 @@ proc emitParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam) =
     dest.addEmptyNode2 info          # exported, pragmas
     if p.injected.len > 0:
       dest.addIdent p.injected
+    elif p.hasDefault:
+      dest.addEmptyNode info         # `name = value`: inferred from it
     else:
       dest.emitType(p.typ, p.isSlot)
     if p.isSlot:
       dest.addIdent "emptySlot"      # value default: a no-op closure
     elif p.zeroDefault:
       dest.addIntLit 0
+    elif p.hasDefault:
+      var d = p.default
+      dest.takeTree d
     else:
       dest.addEmptyNode info
 
@@ -241,31 +256,64 @@ proc emitSlotParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam;
   ## `emptySlot` ident, a valid proc value. Non-slot parameters get
   ## `emptySlot()` so that omitting a required data argument fails with a
   ## type mismatch at the implementation call instead of silently
-  ## binding the trailing block. The injected `tabIndex` defaults to `0`.
+  ## binding the trailing block. The injected `tabIndex` defaults to `0`;
+  ## a `name = value` parameter repeats its default here, so an omitted
+  ## argument reaches the implementation as that value (evaluated at the
+  ## call site -- defaults should name things every caller can see).
   dest.withTree ParamU, info:
     dest.addIdent p.name
     dest.addEmptyNode2 info          # exported, pragmas
     dest.addIdent "untyped"
     if p.zeroDefault:
       dest.addIntLit 0
+    elif p.hasDefault:
+      var d = p.default
+      dest.takeTree d
     elif p.isSlot and not isBlockSlot:
       dest.addIdent "emptySlot"
     else:
       dest.addEmptyCall(info, "emptySlot")
+
+proc emitSlotProcAndCall(dest: var NifBuilder; info: LineInfo; name: string;
+                         params: seq[WidgetParam]; blockSlot: string;
+                         slotSym: SymId) =
+  ## `proc slot() {.closure.} = <block param>` then `NameImpl(..., slot)`.
+  dest.withTree ProcS, info:
+    dest.addSymDef slotSym, info
+    dest.addEmptyNode3 info         # export, pattern, typevars
+    dest.withTree ParamsU, info:    # ()
+      discard
+    dest.addEmptyNode info          # result (void)
+    emitPragmasClosure(dest, info)  # {.closure.}
+    dest.addEmptyNode info          # effects
+    dest.withTree StmtsS, info:     # body = the block param
+      dest.addIdent blockSlot
+  dest.withTree CallS, info:
+    dest.addIdent name & "Impl"
+    for p in params:
+      if p.name != blockSlot:
+        dest.addIdent p.name
+    dest.addSymUse slotSym, info
 
 proc parseParams(head: NifCursor): seq[WidgetParam] =
   result = @[]
   var c = firstChild(head)
   skip c                        # the widget name
   while c.hasMore:
-    if c.kind != TagLit or c.tagText != "kv":
-      result.add WidgetParam(name: "")   # validation below rejects it
-    else:
+    if c.kind == TagLit and c.tagText == "kv":         # name: Type
       var kv = firstChild(c)
       let pname = kv.atomText
       skip kv
       var p = WidgetParam(name: pname, typ: kv, isSlot: isSlotType(kv))
       result.add p
+    elif c.kind == TagLit and c.tagText == "vv":       # name = default
+      var vv = firstChild(c)
+      let pname = vv.atomText
+      skip vv
+      result.add WidgetParam(name: pname, typ: vv, default: vv,
+                             hasDefault: true)
+    else:
+      result.add WidgetParam(name: "")   # validation below rejects it
     skip c
 
 
@@ -303,6 +351,23 @@ proc transform(n: NifCursor): NifBuilder =
       return errorTree("widget: expected `widget focusable Name(params)`",
         head)
     head = mc
+  # `Name(params) -> T`: a widget with a value, returned by both the
+  # implementation proc and the wrapper template
+  var retType = default(NifCursor)
+  var hasRet = false
+  if head.kind == TagLit and head.tagText == "infix":
+    var ic = firstChild(head)
+    if not ic.eqIdent("->"):
+      return errorTree("widget: expected `Name(params)` or " &
+        "`Name(params) -> T`", head)
+    skip ic
+    let h = ic
+    skip ic
+    if not ic.hasMore:
+      return errorTree("widget: expected a type after `->`", head)
+    retType = ic
+    hasRet = true
+    head = h
   let name = headName(head)
   if name.len == 0:
     return errorTree("widget: expected `widget Name(params): body`", head)
@@ -316,7 +381,7 @@ proc transform(n: NifCursor): NifBuilder =
     for p in params:
       if p.name.len == 0 or not p.typ.hasMore or p.typ.kind == DotToken:
         return errorTree("widget `" & name & "`: every parameter needs a " &
-          "type: `name: Type`", head)
+          "type or a default: `name: Type` / `name = value`", head)
   skip args                     # -> the implementation (stmts ...)
 
   if not args.hasMore or args.kind != TagLit or args.tagText != "stmts":
@@ -375,7 +440,11 @@ proc transform(n: NifCursor): NifBuilder =
       result.withTree ParamsU, info:
         for p in params:
           emitParam(result, info, p)
-      result.addEmptyNode3 info           # result, pragmas, effects
+      if hasRet:
+        result.emitType(retType, false)
+        result.addEmptyNode2 info         # pragmas, effects
+      else:
+        result.addEmptyNode3 info         # result, pragmas, effects
       result.withTree StmtsS, info:
         if focusable:
           # registerFocus(id, tabIndex) ahead of the body
@@ -394,7 +463,11 @@ proc transform(n: NifCursor): NifBuilder =
       result.withTree ParamsU, info:
         for p in params:
           emitSlotParam(result, info, p, p.name == blockSlot)
-      result.addEmptyNode3 info           # result, pragmas, effects
+      if hasRet:
+        result.addIdent "untyped"         # the call's value
+        result.addEmptyNode2 info         # pragmas, effects
+      else:
+        result.addEmptyNode3 info         # result, pragmas, effects
       var slotSym = default(SymId)
       if blockSlot.len > 0:
         slotSym = genSym()
@@ -408,25 +481,18 @@ proc transform(n: NifCursor): NifBuilder =
           # block:
           #   proc slot(): void {.closure.} = <block stmts>
           #   NameImpl(args..., slot)
-          result.withTree BlockS, info:
-            result.addEmptyNode info      # unnamed block
-            result.withTree StmtsS, info:
-              result.withTree ProcS, info:
-                result.addSymDef slotSym, info
-                result.addEmptyNode3 info         # export, pattern, typevars
-                result.withTree ParamsU, info:    # ()
-                  discard
-                result.addEmptyNode info          # result (void)
-                emitPragmasClosure(result, info)  # {.closure.}
-                result.addEmptyNode info          # effects
-                result.withTree StmtsS, info:     # body = the block param
-                  result.addIdent blockSlot
-              result.withTree CallS, info:
-                result.addIdent name & "Impl"
-                for p in params:
-                  if p.name != blockSlot:
-                    result.addIdent p.name
-                result.addSymUse slotSym, info
+          # A valued widget drops the `block:` -- Nimony cannot prove a
+          # `let x = block: ...` initialized -- and leaves the slot proc
+          # in the caller's scope; its gensym name cannot collide.
+          if hasRet:
+            emitSlotProcAndCall(result, info, name, params, blockSlot,
+                                slotSym)
+          else:
+            result.withTree BlockS, info:
+              result.addEmptyNode info      # unnamed block
+              result.withTree StmtsS, info:
+                emitSlotProcAndCall(result, info, name, params, blockSlot,
+                                    slotSym)
 
   # WIDGET_DSL_DEBUG=1 dumps to /tmp/opencode, =<dir> into that directory
   let debugDir = getEnv("WIDGET_DSL_DEBUG")
