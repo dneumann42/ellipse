@@ -2,7 +2,9 @@
 ##
 ## Every widget the library ships, on one scrolling page that drives
 ## module-owned state through the immediate-mode round trip, plus a modal
-## form (`gallery/memberform`) that puts most of them in a dialog at once.
+## form (`gallery/memberform`) that puts most of them in a dialog at once,
+## and the quick popups of `ellipse_ui/dialogs` -- each of which can open
+## over the page or in a window of its own.
 ##
 ## Run:   make run_gallery
 ##        F1 in the window for the debug overlay
@@ -33,6 +35,9 @@ var quantity = 2
 var volume = 0.5
 
 var themeIndex = 0
+
+var ownWindow = false      ## dialogs open as their own windows
+var lastAnswer = ""
 
 var backends: seq[string] = @[]
 var moduleNames: seq[string] = @[]
@@ -169,6 +174,39 @@ proc memberLine(m: Member): string =
     teamNames[m.team] & ", " & $m.hours & " h/wk"
   if m.admin: result.add ", admin"
   if m.remote: result.add ", remote"
+
+proc dialogMode(): DialogMode =
+  if ownWindow: dmWindow else: dmInline
+
+proc alertDone(r: DialogResult) =
+  lastAnswer = "alert closed"
+
+proc confirmDone(yes: bool) =
+  lastAnswer = if yes: "confirm: deleted" else: "confirm: kept"
+
+proc askDone(i: int) =
+  lastAnswer = "ask: answer #" & $i
+
+proc promptDone(s: string) =
+  lastAnswer = "prompt: \"" & s & "\""
+
+proc popupButtons() =
+  let m = dialogMode()
+  if button(hashId("pop-alert"), "Alert", height = fixedPx(40)):
+    alert("The build finished without warnings.", title = "Build",
+          detail = "412 files, 3.1 s", mode = m, onDone = alertDone)
+  if button(hashId("pop-confirm"), "Confirm", height = fixedPx(40)):
+    confirm("Delete the 3 selected files?", confirmDone, title = "Delete",
+            yes = "Delete", mode = m)
+  if button(hashId("pop-ask"), "Ask", height = fixedPx(40)):
+    ask("Save changes to notes.txt before closing?",
+        ["Save", "Don't save", "Cancel"], askDone,
+        title = "Unsaved changes", cancelIndex = 2, mode = m)
+  if button(hashId("pop-prompt"), "Prompt", height = fixedPx(40)):
+    prompt("Name the new folder:", promptDone, title = "New folder",
+           text = "Untitled", mode = m)
+  if button(hashId("pop-toast"), "Toast", height = fixedPx(40)):
+    toast("Copied to clipboard")
 
 proc tabActions() =
   if button(hashId("btn-tab-reset"), "Reset all"):
@@ -319,13 +357,22 @@ proc drawGallery() =
               inc c
 
     Section(title = "Dialogs"):
-      caption("A modal form over the page: text, combos, a multiselect, number fields, switches and checkboxes in one dialog, validated on submit. Escape, Cancel or a click on the backdrop discards the draft; Enter (outside the bio) submits.")
+      caption("A modal form: text, combos, a multiselect, number fields, switches and checkboxes in one dialog, validated on submit. Escape, Cancel or a click on the backdrop discards the draft; Enter (outside the bio) submits.")
+      caption("With the switch on, every dialog here opens as a window of its own: a child process parented to this window, whose answer comes back serialized.")
+      ownWindow = switch(hashId("sw-ownwin"), "Open dialogs in their own window",
+                         ownWindow)
       clay "dlgrow", row(width = grow(), height = fit(), gap = 16,
                          alignY = centerY):
         if button(hashId("btn-member"), "Add team member...",
                   height = fixedPx(44)):
-          memberform.begin()
+          memberform.begin(dialogMode())
         badge($members.len & " added")
+      label("Quick popups")
+      clay "poprow", row(width = grow(), height = fit(), gap = 10,
+                         alignY = centerY):
+        popupButtons()
+      if lastAnswer.len > 0:
+        caption("Last answer -- " & lastAnswer)
       if members.len == 0:
         caption("Nobody yet -- members you add show up here.")
       else:
@@ -356,12 +403,15 @@ proc view() {.raises.} =
         if menuItem("Intro text"): showIntro = not showIntro
         if menuItem("Large count"): largeCount = not largeCount
     drawGallery()
-  memberform.draw()
+
+proc prepare() {.raises.} =
+  ## Every process -- the gallery and its dialog windows -- needs the
+  ## form's lists; the dialogs themselves are defined at module level.
+  memberform.fillLists()
 
 proc setup() {.raises.} =
   fillLists()
-  memberform.installKeys()
 
 when isMainModule:
-  run App(window: WindowConfig(title: "Widget Gallery"), setup: setup,
-          view: view)
+  run App(window: WindowConfig(title: "Widget Gallery"), prepare: prepare,
+          setup: setup, view: view)

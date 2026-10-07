@@ -249,6 +249,16 @@ proc SDL_CreateRenderer(win: ptr SDL_Window; name: nil cstring): nil ptr SDL_Ren
   importc: "SDL_CreateRenderer", header: "<SDL3/SDL.h>".}
 proc SDL_SetWindowSize(win: ptr SDL_Window; w, h: int32): bool {.
   importc: "SDL_SetWindowSize", header: "<SDL3/SDL.h>".}
+proc SDL_ShowWindow(win: ptr SDL_Window): bool {.
+  importc: "SDL_ShowWindow", header: "<SDL3/SDL.h>".}
+proc SDL_RaiseWindow(win: ptr SDL_Window): bool {.
+  importc: "SDL_RaiseWindow", header: "<SDL3/SDL.h>".}
+proc SDL_SetWindowPosition(win: ptr SDL_Window; x, y: int32): bool {.
+  importc: "SDL_SetWindowPosition", header: "<SDL3/SDL.h>".}
+proc SDL_GetWindowPosition(win: ptr SDL_Window; x, y: ptr int32): bool {.
+  importc: "SDL_GetWindowPosition", header: "<SDL3/SDL.h>".}
+proc SDL_GetWindowSize(win: ptr SDL_Window; w, h: ptr int32): bool {.
+  importc: "SDL_GetWindowSize", header: "<SDL3/SDL.h>".}
 proc SDL_GetWindowSizeInPixels(win: ptr SDL_Window; w, h: ptr int32): bool {.
   importc: "SDL_GetWindowSizeInPixels", header: "<SDL3/SDL.h>".}
 proc SDL_GetPrimaryDisplay(): uint32 {.importc: "SDL_GetPrimaryDisplay", header: "<SDL3/SDL.h>".}
@@ -392,6 +402,7 @@ type
     width*: int32 = 1280
     height*: int32 = 720
     resizable*: bool = true
+    hidden*: bool = false      ## start unmapped; `showWindow` maps it
     layer*: LayerConfig
 
 proc createPlainWindow(app: var PlatformApplication; cfg: WindowConfig;
@@ -489,8 +500,10 @@ proc initialize*(cfg: WindowConfig) {.raises.} =
         "): opening a plain borderless window; it will not dock or reserve space"
       createPlainWindow(activeApp, cfg, w, h, WindowBorderless or WindowAlwaysOnTop)
   else:
-    createPlainWindow(activeApp, cfg, cfg.width, cfg.height,
-      if cfg.resizable: WindowResizable else: 0'u32)
+    var flags = if cfg.resizable: WindowResizable else: 0'u32
+    if cfg.hidden:
+      flags = flags or WindowHidden
+    createPlainWindow(activeApp, cfg, cfg.width, cfg.height, flags)
   # NOTE: text input (SDL_StartTextInput / the IME path) is deliberately NOT
   # started here. SDL >= 3.4 only emits SDL_EVENT_TEXT_INPUT once it is on --
   # and while it is on, active input methods (X11/ibus, Wayland text-input-v3)
@@ -498,7 +511,7 @@ proc initialize*(cfg: WindowConfig) {.raises.} =
   # default mode derives printable characters from the keydown events'
   # keycodes themselves (see keyEventFor); `setTextInputEnabled(true)` opts
   # into the IME path when full international composition is wanted.
-  activeApp.visible = true
+  activeApp.visible = not cfg.hidden
   # Present on vsync: frames that run at all run at the display rate, and the
   # swap paces them. Drivers without it (offscreen) fall back to a timer.
   activeApp.vsync = SDL_SetRenderVSync(activeApp.renderer.raw, 1)
@@ -782,6 +795,60 @@ proc pumpLayer(app: var PlatformApplication) =
     app.height = float32(ph)
     noteResize(monoNow())
 
+proc videoDriver*(): string =
+  ## SDL's video backend: "wayland", "x11", "windows", "offscreen", ...
+  let d = SDL_GetCurrentVideoDriver()
+  if d.isNil: "" else: fromCString(d)
+
+proc sdlWindow*(): pointer =
+  ## The live `SDL_Window*`, for native glue (see `transient`). Nil before
+  ## `initialize`.
+  activeApp.window.raw
+
+proc showWindow*() =
+  ## Map a window opened with `WindowConfig.hidden`.
+  if activeApp.window.raw != nil:
+    discard SDL_ShowWindow(activeApp.window.raw)
+    activeApp.visible = true
+
+proc raiseWindow*() =
+  ## Ask the window manager to bring the window to the front and focus it.
+  if activeApp.window.raw != nil:
+    discard SDL_RaiseWindow(activeApp.window.raw)
+
+proc windowBounds*(): tuple[x, y, width, height: int32] =
+  ## The window's position and size in screen coordinates (not pixels).
+  ## Wayland never reports a position: x and y read 0 there.
+  var x, y, w, h = 0'i32
+  if activeApp.window.raw != nil:
+    discard SDL_GetWindowPosition(activeApp.window.raw, addr x, addr y)
+    discard SDL_GetWindowSize(activeApp.window.raw, addr w, addr h)
+  (x, y, w, h)
+
+proc setWindowSize*(width, height: int32) =
+  ## Resize the window (screen coordinates). The layout follows from the
+  ## next frame, through the resize event.
+  if activeApp.window.raw != nil:
+    discard SDL_SetWindowSize(activeApp.window.raw, width, height)
+
+proc setWindowPosition*(x, y: int32) =
+  ## Move the window (screen coordinates). Ignored on Wayland, where only
+  ## the compositor places windows.
+  if activeApp.window.raw != nil:
+    discard SDL_SetWindowPosition(activeApp.window.raw, x, y)
+
+proc windowPixelScale*(): float32 =
+  ## Renderer pixels per screen coordinate: layout sizes divide by this to
+  ## become window sizes.
+  var w, h, pw, ph = 0'i32
+  if activeApp.window.raw == nil:
+    return 1.0'f32
+  discard SDL_GetWindowSize(activeApp.window.raw, addr w, addr h)
+  discard SDL_GetWindowSizeInPixels(activeApp.window.raw, addr pw, addr ph)
+  if w <= 0 or pw <= 0:
+    return 1.0'f32
+  float32(pw) / float32(w)
+
 proc pointerState*(): PointerState =
   ## The pointer as of the most recent event pump; feed it to
   ## `clay.setPointerState` once per update tick.
@@ -881,6 +948,12 @@ proc pushKeyEvent*(ev: KeyEvent) =
   ## keyboards and gamepad text input.
   activeApp.keyPending.add ev
   wake()
+
+proc setPointer*(x, y: float32; down: bool) =
+  ## Put the primary pointer at (x, y), button `down` -- what the next
+  ## input frame reads, as if the event pump had seen it. The seam for
+  ## tests and scripted drags (`pushKeyEvent`'s pointer twin).
+  activeApp.pointer = PointerState(x: x, y: y, down: down)
 
 proc pushDoubleClick*() =
   ## Mark a double-click edge on the next input frame -- the same seam

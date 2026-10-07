@@ -3,16 +3,16 @@
 ## number fields, switches and checkboxes -- with validation and a
 ## draft/commit round trip.
 ##
-## The form edits `draft`, a private copy; nothing the gallery shows
-## changes until Submit validates it and appends it to `members`. Cancel,
-## Escape or a click on the backdrop throw the draft away. Errors stay
-## hidden until the first submit attempt, then track every edit live.
-##
-## The overlay is the same shape as duck's dialogs (apps/duck/session): a
-## floating backdrop at the root that captures the pointer, a centred
-## panel, and a modal keymap that kills the app's chords while it's up.
-## The panel's header and footer stay put; the form between them scrolls
-## when the window is too short for it.
+## It is an `ellipse_ui/dialogs` dialog, so it opens either over the
+## gallery or in a window of its own (a child process): `begin(mode)`.
+## The form edits `draft`, a private copy seeded on the dialog's first
+## frame; nothing the gallery shows changes until Submit validates it.
+## The accepted draft travels back as `Fields` (`toFields`/`fromFields`)
+## -- across the process boundary in window mode -- and is appended to
+## `members`. Cancel, Escape or a click on the backdrop throw the draft
+## away. Errors stay hidden until the first submit attempt, then track
+## every edit live. The title and footer stay put; the form between them
+## scrolls when the window is too short for it.
 
 import std/strutils
 
@@ -30,8 +30,6 @@ type
 var
   members*: seq[Member] = @[]
 
-  showing = false
-  fresh = false        ## just opened: drop the caret in the first field
   tried = false        ## a submit was attempted: show the errors
   agreed = false
   draft: Member
@@ -57,7 +55,11 @@ let
   cancelId = hashId("mf.cancel")
   submitId = hashId("mf.submit")
 
-proc fillLists() =
+proc fillLists*() =
+  ## The choice lists. Run from the app's `prepare`: a dialog process
+  ## needs them too.
+  if roleNames.len > 0:
+    return
   roleNames.add "Engineer"
   roleNames.add "Designer"
   roleNames.add "Product manager"
@@ -76,6 +78,27 @@ proc fillLists() =
 proc blank(): Member =
   Member(role: 0, team: -1, access: bit(0), hours: 40, rate: 85.0,
          welcome: true)
+
+proc toFields(m: Member): Fields =
+  result = Fields()
+  result.put("name", m.name)
+  result.put("email", m.email)
+  result.put("bio", m.bio)
+  result.put("role", m.role)
+  result.put("team", m.team)
+  result.put("access", int(m.access))
+  result.put("hours", m.hours)
+  result.put("rate", m.rate)
+  result.put("admin", m.admin)
+  result.put("remote", m.remote)
+  result.put("welcome", m.welcome)
+
+proc fromFields(f: Fields): Member =
+  Member(name: f.get("name"), email: f.get("email"), bio: f.get("bio"),
+         role: f.getInt("role"), team: f.getInt("team", -1),
+         access: Selection(f.getInt("access")), hours: f.getInt("hours"),
+         rate: f.getFloat("rate"), admin: f.getBool("admin"),
+         remote: f.getBool("remote"), welcome: f.getBool("welcome"))
 
 ## --- validation ------------------------------------------------------------------
 
@@ -118,45 +141,15 @@ proc valid(): bool =
 
 ## --- verbs -------------------------------------------------------------------------
 
-proc isOpen*(): bool = showing
-
-proc begin*() =
-  ## Open the dialog on a fresh draft.
-  draft = blank()
-  agreed = false
-  tried = false
-  showing = true
-  fresh = true
-
-proc dismiss*() =
-  showing = false
-  closeDropdown()
-
-proc submit*() =
+proc submit() =
   tried = true
   if valid():
-    members.add draft
-    dismiss()
+    accept(toFields(draft), "add")
 
 proc resetForm() =
   draft = blank()
   agreed = false
   tried = false
-
-proc installKeys*() =
-  ## The dialog's modal keymap: while it's up nothing installed before it
-  ## (the gallery's own chords) sees a key.
-  fillLists()
-  var esc = Keymap(name: "gallery.form", modal: true,
-                   active: proc (): bool {.closure.} = showing)
-  esc.bindKey("Escape", dismiss)
-  installKeymap(esc)
-  # Enter submits -- except in the bio, where it breaks the line.
-  var enter = Keymap(name: "gallery.form.enter",
-                     active: proc (): bool {.closure.} =
-                       showing and focusIdOf() != bioId.id)
-  enter.bindKey("Enter", submit)
-  installKeymap(enter)
 
 ## --- drawing -------------------------------------------------------------------------
 
@@ -221,58 +214,42 @@ proc formBody() =
                       agreed)
     fieldError(agreeError())
 
-proc footer() =
-  clay "mf.foot", row(width = grow(), height = fit(), gap = 10,
-                      alignY = centerY):
-    if textLink(resetId, "Reset form"):
-      resetForm()
-    spacer()
-    if tried and not valid():
-      text("Fix the errors above", activeTheme.text.caption, errColor)
-    let fs = activeTheme.text.control
-    if button(cancelId, "Cancel", width = fixedPx(110), height = fixedPx(38),
-              fontSize = fs):
-      dismiss()
-    if button(submitId, "Add member", width = fixedPx(130),
-              height = fixedPx(38), fontSize = fs):
-      submit()
-
-proc draw*() =
-  ## The modal overlay. Declare it last so its floating boxes land on top
-  ## of the page (zIndex 30000: over scrollbars and menus, under the
-  ## dropdowns and carets that float out of its own fields).
-  if not showing:
-    return
-  let t = activeTheme
-  let backId = elementId("mf.back")
-  let panelId = elementId("mf.panel")
-  openElement(backId)
-  configureOpenElement(row(width = grow(), height = grow(),
-      padding = padAll(24), alignX = centerX, alignY = centerY)
-    .bg(rgb(0, 0, 0, 110))
-    .floating(attachRoot, zIndex = 30000,
-              points = AttachPoints(element: pointLeftTop,
-                                    parent: pointLeftTop)))
-  if clickedIn(backId) and not pointerOver(panelId):
-    dismiss()
-  openElement(panelId)
-  configureOpenElement(col(width = grow(max = 680), height = fit(max = 680),
-      gap = t.metrics.gapCard, padding = padAll(18))
-    .bg(panelBg)
-    .border(hairline, panelBorder)
-    .corner(panelRadius))
-  heading("Add team member", 3)
-  caption("Everything below is a draft until you press Add member.")
-  # the right gutter keeps the floating scrollbar off the fields
-  scrollPanel "mf.body", col(width = grow(), height = grow(),
-      gap = t.metrics.gapTight,
-      padding = Padding(right: t.scrollbar.width.int + 6))
-      .clip(horizontal = false, vertical = true,
-            childOffset = currentScrollOffset()):
-    formBody()
-  footer()
-  closeElement()   # panel
-  closeElement()   # backdrop
-  if fresh:
-    fresh = false
+proc body() {.raises.} =
+  if dialogOpened():
+    draft = blank()
+    agreed = false
+    tried = false
     focusAt(nameId, draft.name, draft.name.len)
+  # Enter submits -- except in the bio, where it breaks the line
+  if focusIdOf() == bioId.id:
+    passEnter()
+  if dialogEnter():
+    submit()
+  caption("Everything below is a draft until you press Add member.")
+  formBody()
+
+proc footer() {.raises.} =
+  if textLink(resetId, "Reset form"):
+    resetForm()
+  spacer()
+  if tried and not valid():
+    text("Fix the errors above", activeTheme.text.caption, errColor)
+  let fs = activeTheme.text.control
+  if button(cancelId, "Cancel", width = fixedPx(110), height = fixedPx(38),
+            fontSize = fs):
+    cancel()
+  if button(submitId, "Add member", width = fixedPx(130),
+            height = fixedPx(38), fontSize = fs):
+    submit()
+
+let memberDialog = defineDialog("gallery.member", DialogSpec(
+  title: "Add team member", width: 680, maxHeight: 680, scroll: true,
+  header: DialogHeader(enabled: true, fullscreen: true),
+  body: body, footer: footer))
+
+proc begin*(mode = dmInline) =
+  ## Open the form -- over the gallery, or in a window of its own.
+  memberDialog.open(mode = mode,
+    onDone = proc (r: DialogResult) {.closure.} =
+      if r.accepted:
+        members.add fromFields(r.fields))

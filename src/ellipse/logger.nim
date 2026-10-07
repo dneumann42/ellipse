@@ -67,7 +67,17 @@ template error*(): LogResult {.varargs.} =
     data.add x
   callHandlers(Error, data)
 
-proc initStandardLogger*(): LogHandler =
+proc initStandardLogger*(toStderr = false): LogHandler =
+  ## Log lines to stdout -- or stderr, for a process whose stdout is a
+  ## channel (a dialog process answers on it).
+  if toStderr:
+    proc emitErr(level: LogLevel; data: openArray[string]): LogResult {.closure.} =
+      stderr.write tag(level)
+      for line in data:
+        stderr.write line
+      stderr.write '\n'
+      Ok
+    return LogHandler(onLog: emitErr)
   proc emit(level: LogLevel; data: openArray[string]): LogResult {.closure.} =
     stdout.write tag(level)
     for line in data:

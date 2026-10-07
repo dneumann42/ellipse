@@ -58,6 +58,9 @@ test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/pacing_loop_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/damage_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/debug_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/fields_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/dialogs_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/dialog_header_test.nim
 
 bin/bar: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./apps/bar.nim
