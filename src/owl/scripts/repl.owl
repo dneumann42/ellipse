@@ -2,16 +2,31 @@ use io
 use base
 use math
 use strings
-use iterators
 use cmdline
 use ansi
 use term
 use editor
 use program
+use fs
+use modules
+use source
+use live
+use projects
+use tui
 
-; An interactive read-eval-print loop. Each input is parsed and its forms are
-; evaluated in the session scope, so bindings, funs and commands made at the
-; prompt stay around for later inputs.
+; An interactive read-eval-print loop over documents. A document is an owl
+; module: its text and the live module it runs. One document is active; code
+; you type runs in its module and is written into its text (a definition or
+; binding replaces the one of the same name, a use joins the other uses,
+; anything else is appended), so the session builds up a module you can save.
+;
+; An input whose first word is a repl command (see `help`) is not code: it is
+; run by the repl and never written to a document. `x = 1` is still code even
+; when x is a command name.
+;
+; On a terminal, F1 or M-x opens a menu of the commands, and a command
+; missing its argument offers a list to pick it from (modules, documents,
+; items), then shows the command you could have typed. `settings` is a form.
 ;
 ; On a terminal input comes from the editor module: a multi-line buffer with
 ; emacs keys, where RET adds a line and C-RET (or M-RET, C-j) runs it. When
@@ -20,9 +35,31 @@ use program
 
 interactive = (is-terminal)
 
-; Inputs are evaluated here, a scope of their own that lasts the whole
-; session, so definitions carry over and never touch the repl's own names.
-session = (new-scope)
+; The prelude a new document starts with, so arithmetic and echo work from
+; the first input. It is ordinary text in the document and can be dropped.
+prelude = concat "use io" newline "use base" newline "use math" newline "use strings" newline "use iterators" newline
+
+project = nothing
+; Project roots visited this session, for the project picker.
+known-projects = ([])
+docs = ([])
+active = nothing
+
+; Text the editor held when the menu key was pressed; the next prompt starts
+; with it.
+pending = ""
+
+; The values printed so far, newest last: records of the input and the value.
+results = ([])
+results-limit = 100
+
+; Settings, changed with the `settings` form.
+record-statements = true
+show-changes = true
+confirm-exit = true
+
+fun at xs i:
+    index xs (+ i 0)
 
 ; Styles text only on a terminal, so piped output stays plain.
 fun styled f text:
@@ -31,48 +68,118 @@ fun styled f text:
         text
 
 fun prompt:
-    styled bold (fg "blue" "owl> ")
+    text = concat active "> "
+    if interactive:
+        concat (project-tag) (bold (fg "blue" text))
+        text
+
+fun project-tag:
+    if (= project nothing):
+        ""
+        dim (concat project.name " ")
 
 fun continuation:
     styled dim "...  "
 
 fun is-blank s:
+    = (length (trim s)) 0
+
+fun trim s:
+    a = 0
+    b = length s
+    while (and (< a b) (is-space (index s (+ a 0)))):
+        set a (+ a 1)
+    while (and (> b a) (is-space (index s (- b 1)))):
+        set b (- b 1)
+    slice s a b
+
+fun is-space c:
+    or (= c " ") (= c (char 9))
+
+; The words of a line, split at spaces; a word in double quotes may hold
+; spaces and loses its quotes.
+fun words s:
+    out = ([])
     i = 0
-    blank = true
-    while (< i (length s)):
-        if (= (index s (+ i 0)) " "):
+    n = length s
+    while (< i n):
+        c = index s (+ i 0)
+        if (is-space c):
             set i (+ i 1)
             do:
-                set blank false
-                set i (length s)
-    blank
+                quoted = = c (char 34)
+                from = if quoted:
+                    + i 1
+                    i
+                stop = word-end s from quoted
+                append out (slice s from stop)
+                set i (+ stop 1)
+    out
+
+fun word-end s from quoted:
+    stop = from
+    n = length s
+    while (and (< stop n) (not (ends-word (index s (+ stop 0)) quoted))):
+        set stop (+ stop 1)
+    stop
+
+fun ends-word c quoted:
+    if quoted:
+        = c (char 34)
+        is-space c
 
 fun is-done input:
-    or (= input nothing) (or (= input "exit") (= input "quit"))
+    = input nothing
 
 fun read-block first:
     text = first
-    line = readline "...  "
+    line = readline (continuation)
     while (and (<> line nothing) (not (is-blank line))):
         do:
             set text (concat text newline line)
-            set line (readline "...  ")
+            set line (readline (continuation))
     text
 
 fun read-plain:
-    first = readline "owl> "
+    first = readline (prompt)
     if (or (= first nothing) (not (ends-with first ":"))):
         first
         read-block first
 
+; The next input: text, nothing at end of input, or a record when a menu key
+; left the editor (see escape-keys in editor.owl).
 fun read-input:
     if interactive:
-        read-code (prompt) (continuation)
+        do:
+            r = read-code (prompt) (continuation) pending
+            set pending ""
+            when (= (type-of r) "record"):
+                set pending r.text
+            r
         (read-plain)
 
+; Results print as owl code (see to-code), so a value can be pasted back in
+; or written into a module. One that needs several lines starts below the
+; arrow, at the left edge.
 fun show value:
     when (<> value nothing):
-        echo (styled dim "=>") value
+        width = if interactive:
+            max (- (terminal-size).cols 3) 40
+            77
+        text = to-code value width
+        remember-result value
+        if (= (find text newline) nothing):
+            echo (styled dim "=>") text
+            do:
+                echo (styled dim "=>")
+                echo text
+
+fun remember-result value:
+    append results ({} (input = last-input) (value = value))
+    when (> (length results) results-limit):
+        pop-front results
+
+last-input = ""
 
 fun show-error message:
     label = if interactive:
@@ -80,27 +187,755 @@ fun show-error message:
         "error:"
     echo label message
 
-fun repl:
+fun note text:
+    echo (styled dim text)
+
+; documents ---------------------------------------------------------------
+
+fun is-open name:
+    found = false
+    i = 0
+    while (< i (length docs)):
+        when (= (at docs i) name):
+            set found true
+        set i (+ i 1)
+    found
+
+fun activate name:
+    when (not (is-open name)):
+        append docs name
+    set active name
+
+fun fresh-name base:
+    name = base
+    n = 1
+    while (has-module name):
+        set n (+ n 1)
+        set name (concat base (to-string n))
+    name
+
+fun new-doc (name = "scratch"):
+    doc = fresh-name name
+    new-module doc
+    patch-module doc prelude
+    activate doc
+    doc
+
+; A document is dirty when its text differs from its file, or when it has
+; no file and holds more than the prelude.
+fun is-dirty name:
+    path = module-path name
+    cond:
+        (= path nothing) = (<> (module-source name) prelude)
+        (not (file-exists path)) = true
+        true = (<> (read-file path) (module-source name))
+
+fun doc-line name:
+    mark = if (= name active):
+        "*"
+        " "
+    path = module-path name
+    where = if (= path nothing):
+        "(no file)"
+        path
+    state = if (is-dirty name):
+        " modified"
+        ""
+    concat mark " " name "  " where state
+
+; open-doc target opens a module as a document: a module name, or a path to
+; an .owl file, whose directory joins the module search paths.
+fun open-doc target:
+    name = target
+    when (ends-with target ".owl"):
+        do:
+            file = absolute-path target
+            when (not (file-exists file)):
+                error (concat "no file " file)
+            add-module-path (parent-dir file)
+            set name (slice (base-name file) 0 (- (length (base-name file)) 4))
+    load-module name
+    activate name
+    name
+
+fun default-path name:
+    if (= project nothing):
+        concat name ".owl"
+        join-path project.source (concat name ".owl")
+
+fun save-doc (path = nothing):
+    target = path
+    when (<> target nothing):
+        set target (absolute-path target)
+    when (= target nothing):
+        set target (module-path active)
+    when (= target nothing):
+        set target (default-path active)
+    dir = parent-dir target
+    when (and (<> dir "") (not (dir-exists dir))):
+        make-dir dir
+    write-file target (module-source active)
+    set-module-path active target
+    note (concat "wrote " target)
+
+; commands ------------------------------------------------------------------
+;
+; One table describes the commands: `help`, the menu and the input reader all
+; use it. arg is what the command takes ("" for nothing); required means it
+; cannot run without it; pick says how to get it on a terminal: "module",
+; "doc", "item", or "ask" (a text field, offered from the menu only).
+
+fun spec name arg help (required = false) (pick = nothing):
+    {} (name = name) (arg = arg) (help = help) (required = required) (pick = pick)
+
+specs = []:
+    spec "menu" "" "open this menu (also F1 or M-x)"
+    spec "docs" "" "list open documents (* is active)"
+    spec "new" "[name]" "start a new document" false "ask"
+    spec "open" "<module|file>" "open a module as a document" true "module"
+    spec "switch" "<name>" "make an open document active" true "doc"
+    spec "save" "[file]" "write the active document" false "ask"
+    spec "text" "" "print the active document"
+    spec "items" "[module]" "view a module's source: scroll, select, edit, copy" false "module"
+    spec "results" "" "view printed results: scroll, select, edit, copy (also F2)"
+    spec "show" "<name|#n> [module]" "print one item" true "item"
+    spec "drop" "<name|#n>" "remove an item from the active document" true "item"
+    spec "rerun" "<name|#n>" "evaluate an item of the active document again" true "item"
+    spec "reload" "[module]" "re-read a module from its file, keeping state" false "module"
+    spec "modules" "" "list loaded modules and the project's modules"
+    spec "project" "[dir]" "show the project, or switch to the one in dir" false "project"
+    spec "new-project" "<dir>" "create a project in dir and switch to it" true "ask"
+    spec "settings" "" "change repl settings"
+    spec "help" "" "show the commands"
+    spec "exit" "" "leave (also quit, or C-d)"
+    spec "quit" "" "leave"
+
+fun spec-of name:
+    found = nothing
+    i = 0
+    while (< i (length specs)):
+        when (= (index specs (+ i 0) "name") name):
+            set found (at specs i)
+        set i (+ i 1)
+    found
+
+fun pad s n:
+    out = s
+    while (< (length out) n):
+        set out (concat out " ")
+    out
+
+fun help:
+    echo "Code you type runs in the active document and is written into it."
+    echo "Commands (not written to the document):"
+    i = 0
+    while (< i (length specs)):
+        x = at specs i
+        echo (concat "  " (pad (concat x.name " " x.arg) 26) x.help)
+        set i (+ i 1)
+    when interactive:
+        echo (styled dim "F1 or M-x opens a menu of these, F2 the printed results; a command missing its argument lets you pick it.")
+
+; --- viewing source and results ------------------------------------------------
+
+fun item-key item:
+    if (= item.name nothing):
+        concat "#" (to-string item.ordinal)
+        item.name
+
+fun item-sections name:
+    out = ([])
+    xs = source-items (module-source name)
+    while (is-any xs):
+        item = pop-front xs
+        append out (section (concat "#" (to-string item.ordinal)) item.text item)
+    out
+
+fun view-rows:
+    max 5 (- (terminal-size).rows 8)
+
+; items-command ws: a module's source. On a terminal it is a view to scroll
+; and select items in, to edit, copy, drop or rerun them; piped, the source
+; is printed with each item's number in the margin.
+fun items-command ws:
+    name = module-or-active ws 0
     if interactive:
-        echo (dim "owl repl. Enter adds a line, Ctrl+Enter runs (or Alt+Enter, Ctrl+J). Ctrl+D leaves.")
-        echo "owl repl. Type exit or press ctrl-d to leave."
+        view-items name
+        print-items name
+
+fun print-items name:
+    xs = source-items (module-source name)
+    lines = split-lines (module-source name)
+    i = 0
+    while (< i (length lines)):
+        mark = ""
+        k = 0
+        while (< k (length xs)):
+            when (= (index xs (+ k 0) "head") i):
+                set mark (concat "#" (to-string (index xs (+ k 0) "ordinal")))
+            set k (+ k 1)
+        when (not (and (= (+ i 1) (length lines)) (= (at lines i) ""))):
+            echo (concat (styled dim (pad mark 5)) (at lines i))
+        set i (+ i 1)
+
+item-actions = [] (action "<RET>" "edit") (action "e" "edit") (action "c" "copy") (action "d" "drop") (action "r" "rerun")
+
+fun view-items name:
+    view = code-view (item-sections name) (view-rows) item-actions
+    picked = run-screen (concat name " · " (to-string (length (source-items (module-source name)))) " items") ([] view) "↑↓ item · PgUp PgDn scroll · enter/e edit · c copy · d drop · r rerun · esc close"
+    when (<> picked nothing):
+        item-action name picked.action picked.value
+
+fun item-action name what item:
+    cond:
+        (= what "edit") = (edit-in name item.text)
+        (= what "copy") = (copied item.text)
+        (= what "drop") = (do (drop-item name (item-key item)) (note (concat "dropped " item.header)))
+        (= what "rerun") = (show (rerun-item name (item-key item)))
+        true = nothing
+
+; edit-in name text puts text in the next prompt, with name's document
+; active, so submitting it replaces what it was copied from.
+fun edit-in name text:
+    when (<> name active):
+        open-doc name
+    set pending text
+    note (concat "editing in " name ": change it and run it to replace it")
+
+fun copied text:
+    copy-text text
+    n = length (split-lines text)
+    lines = if (= n 1):
+        "line"
+        "lines"
+    note (concat "copied " (to-string n) " " lines " to the clipboard")
+
+result-actions = [] (action "<RET>" "edit") (action "e" "edit") (action "c" "copy")
+
+; The code a result is edited as: `name = value` when it came from typing a
+; name the active document binds, so running it records that binding.
+fun result-code r:
+    name = trim r.input
+    if (and (<> name "") (and (= (length (words name)) 1) (has-own (module-scope active) name))):
+        to-code (pair (at (parse name) 0) r.value) (max (- (terminal-size).cols 8) 40)
+        to-code r.value (max (- (terminal-size).cols 8) 40)
+
+fun result-sections:
+    out = ([])
+    i = 0
+    while (< i (length results)):
+        r = at results i
+        append out (section (concat "#" (to-string (+ i 1))) (concat "; " (first-line r.input) newline (to-code r.value (max (- (terminal-size).cols 8) 40))) r)
+        set i (+ i 1)
+    out
+
+fun first-line text:
+    at-nl = find text newline
+    if (= at-nl nothing):
+        text
+        concat (slice text 0 at-nl) " …"
+
+fun results-command:
+    when (not interactive):
+        error "results needs a terminal"
+    when (is-empty results):
+        error "no results yet"
+    view = code-view (result-sections) (view-rows) result-actions true
+    picked = run-screen (concat "results · " (to-string (length results))) ([] view) "↑↓ result · PgUp PgDn scroll · enter/e edit · c copy · esc close"
+    when (<> picked nothing):
+        cond:
+            (= picked.action "copy") = (copied (to-code picked.value.value 80))
+            true = (edit-result picked.value)
+
+fun edit-result r:
+    set pending (result-code r)
+    note "editing the result: change it and run it"
+
+fun module-or-active args i:
+    if (> (length args) i):
+        ensure-loaded (at args i)
+        active
+
+fun ensure-loaded name:
+    when (not (has-module name)):
+        load-module name
+    name
+
+fun list-modules:
+    echo "loaded:" (module-names)
+    when (<> project nothing):
+        echo (concat "project " project.name ":") (project-modules project)
+
+fun show-summary s:
+    parts = ([])
+    when (is-any s.defined):
+        append parts (concat "defined " (to-string s.defined))
+    when (is-any s.bound):
+        append parts (concat "bound " (to-string s.bound))
+    when (is-any s.kept):
+        append parts (concat "kept old value of " (to-string s.kept) " (rerun to apply)")
+    when (is-any s.removed):
+        append parts (concat "removed " (to-string s.removed))
+    when (> s.ran 0):
+        append parts (concat "ran " (to-string s.ran) " statements")
+    if (is-empty parts):
+        note "no changes"
+        while (is-any parts):
+            note (pop-front parts)
+
+; An input is a command when its first word names one, unless it is a
+; binding (`new = 1`).
+fun is-command ws:
+    and (is-any ws) (and (<> (spec-of (at ws 0)) nothing) (not (and (> (length ws) 1) (= (at ws 1) "="))))
+
+; --- pickers -----------------------------------------------------------------
+
+fun contains xs x:
+    found = false
+    i = 0
+    while (< i (length xs)):
+        when (= (at xs i) x):
+            set found true
+        set i (+ i 1)
+    found
+
+; Modules to pick from: open documents, then the project's, then the rest
+; that are loaded.
+fun module-entries:
+    out = ([])
+    seen = ([])
+    i = 0
+    while (< i (length docs)):
+        append out (entry (at docs i) (at docs i) "open document")
+        append seen (at docs i)
+        set i (+ i 1)
+    when (<> project nothing):
+        xs = project-modules project
+        while (is-any xs):
+            m = pop-front xs
+            when (not (contains seen m)):
+                append out (entry m m (concat "project " project.name))
+                append seen m
+    xs = (module-names)
+    while (is-any xs):
+        m = pop-front xs
+        when (not (contains seen m)):
+            where = module-path m
+            append out (entry m m (pick-text (= where nothing) "loaded, in memory" where))
+    out
+
+fun pick-text c a b:
+    if c:
+        a
+        b
+
+fun doc-entries:
+    out = ([])
+    i = 0
+    while (< i (length docs)):
+        append out (entry (at docs i) (at docs i) (doc-line (at docs i)))
+        set i (+ i 1)
+    out
+
+fun trim-colon s:
+    if (ends-with s ":"):
+        slice s 0 (- (length s) 1)
+        s
+
+; The items of the active document; picking one gives its name, or #n for
+; an item without one.
+fun item-entries:
+    out = ([])
+    xs = source-items (module-source active)
+    while (is-any xs):
+        item = pop-front xs
+        key = pick-text (= item.name nothing) (concat "#" (to-string item.ordinal)) item.name
+        append out (entry (trim-colon item.header) key (concat "#" (to-string item.ordinal) "  line " (to-string item.line) "  " item.kind))
+    out
+
+fun ask-for name:
+    cond:
+        (= name "new") = (ask "New document" "name" (fresh-name "scratch"))
+        (= name "save") = (ask "Save the document" "file" (current-save-path))
+        (= name "new-project") = (ask "New project" "directory" "")
+        true = nothing
+
+fun current-save-path:
+    path = module-path active
+    pick-text (= path nothing) (default-path active) path
+
+; pick-arg x from-menu: the argument of command x, picked on screen, or
+; nothing when cancelled or when there is nothing to pick from.
+fun pick-arg x from-menu:
+    cond:
+        (= x.pick "module") = (choose (concat x.name ": which module?") (module-entries))
+        (= x.pick "doc") = (choose (concat x.name ": which document?") (doc-entries))
+        (= x.pick "item") = (choose (concat x.name ": which item of " active "?") (item-entries))
+        (= x.pick "project") = (pick-project)
+        (= x.pick "ask") = (ask-for x.name)
+        true = nothing
+
+; complete ws from-menu: the words of a command with its argument added when
+; it is missing and can be picked; nothing when picking was cancelled.
+fun complete ws from-menu:
+    x = spec-of (at ws 0)
+    missing = = (length ws) 1
+    wants = and interactive (and missing (or x.required (or (= x.pick "project") (and from-menu (<> x.pick nothing)))))
+    if (and wants (<> x.pick nothing)):
+        do:
+            arg = pick-arg x from-menu
+            if (= arg nothing):
+                if x.required:
+                    nothing
+                    ws
+                do:
+                    note (concat "› " x.name " " arg)
+                    concat ws ([] arg)
+        ws
+
+fun need args n what:
+    when (< (length args) n):
+        error (concat "missing " what)
+
+; run-command ws runs a repl command; false means leave the repl.
+fun run-command ws (from-menu = false):
+    full = complete ws from-menu
+    going = true
+    if (= full nothing):
+        note "cancelled"
+        set going (dispatch-command full)
+    going
+
+fun dispatch-command ws:
+    cmd = pop-front ws
+    going = true
+    cond:
+        (or (= cmd "exit") (= cmd "quit")) = (set going (not (ready-to-leave)))
+        (= cmd "help") = (help)
+        (= cmd "menu") = (set going (open-menu))
+        (= cmd "settings") = (settings)
+        (= cmd "docs") = (list-docs)
+        (= cmd "new") = (new-command ws)
+        (= cmd "open") = (do (need ws 1 "a module or file") (open-doc (at ws 0)))
+        (= cmd "switch") = (do (need ws 1 "a document name") (switch-doc (at ws 0)))
+        (= cmd "save") = (save-command ws)
+        (= cmd "text") = (write (module-source active))
+        (= cmd "items") = (items-command ws)
+        (= cmd "results") = (results-command)
+        (= cmd "show") = (do (need ws 1 "an item name or #n") (echo (index (select-item (source-items (module-source (module-or-active ws 1))) (at ws 0)) "text")))
+        (= cmd "drop") = (do (need ws 1 "an item name or #n") (note (concat "dropped " (index (drop-item active (at ws 0)) "header"))))
+        (= cmd "rerun") = (do (need ws 1 "an item name or #n") (show (rerun-item active (at ws 0))))
+        (= cmd "reload") = (show-summary (reload-module (module-or-active ws 0)))
+        (= cmd "modules") = (list-modules)
+        (= cmd "project") = (project-command ws)
+        (= cmd "new-project") = (do (need ws 1 "a directory") (new-project-command (at ws 0)))
+        true = nothing
+    going
+
+fun list-docs:
+    i = 0
+    while (< i (length docs)):
+        echo (doc-line (at docs i))
+        set i (+ i 1)
+
+fun new-command ws:
+    if (is-any ws):
+        new-doc (at ws 0)
+        (new-doc)
+
+fun save-command ws:
+    if (is-any ws):
+        save-doc (at ws 0)
+        (save-doc)
+
+fun switch-doc name:
+    when (not (is-open name)):
+        error (concat "no open document " name " (see docs)")
+    activate name
+
+; The command menu: every command with what it takes and does. Choosing one
+; runs it, picking its argument if it needs one. Gives false to leave.
+fun open-menu:
+    when (not interactive):
+        error "the menu needs a terminal; type help for the commands"
+    out = ([])
+    i = 0
+    while (< i (length specs)):
+        x = at specs i
+        when (<> x.name "menu"):
+            append out (entry (concat x.name " " x.arg) x.name x.help)
+        set i (+ i 1)
+    name = choose (concat "Commands · " active) out 12
+    if (= name nothing):
+        true
+        run-command ([] name) true
+
+fun settings:
+    if interactive:
+        do:
+            a = checkbox "Record statements in the document" record-statements
+            b = checkbox "Show what each input defined" show-changes
+            c = checkbox "Ask before leaving with unsaved documents" confirm-exit
+            choice = run-screen "Settings" ([] a b c (button-row ([] "Done" "Cancel")))
+            when (= choice "Done"):
+                set record-statements (a.value)
+                set show-changes (b.value)
+                set confirm-exit (c.value)
+                note "settings changed"
+        do:
+            echo "record-statements" record-statements
+            echo "show-changes" show-changes
+            echo "confirm-exit" confirm-exit
+
+fun dirty-docs:
+    out = ([])
+    i = 0
+    while (< i (length docs)):
+        when (is-dirty (at docs i)):
+            append out (at docs i)
+        set i (+ i 1)
+    out
+
+fun join-words xs:
+    out = ""
+    while (is-any xs):
+        set out (concat out (pop-front xs))
+        when (is-any xs):
+            set out (concat out ", ")
+    out
+
+; Whether the repl may close: on a terminal, unsaved documents are offered
+; for saving first.
+fun ready-to-leave:
+    dirty = (dirty-docs)
+    if (and interactive (and confirm-exit (is-any dirty))):
+        do:
+            choice = confirm "Leave the repl?" ([] (concat "Not saved: " (join-words dirty)) "Save all writes each to its file.") ([] "Save all" "Leave" "Stay")
+            cond:
+                (= choice "Save all") = (do (save-all dirty) true)
+                (= choice "Leave") = true
+                true = false
+        true
+
+fun save-all names:
+    keep = active
+    while (is-any names):
+        set active (pop-front names)
+        (save-doc)
+    set active keep
+
+; Code runs in the active document's module and is recorded there; with
+; record-statements off only definitions, bindings and uses are recorded.
+fun run-code input:
+    items = input-items input
+    value = nothing
+    if record-statements:
+        set value (patch-module active input)
+        while (is-any items):
+            item = pop-front items
+            if (= item.kind "statement"):
+                set value (eval-in (module-scope active) (index (parse item.code) 0))
+                set value (patch-module active item.text)
+    when show-changes:
+        report-changes (input-items input)
+    show value
+
+fun report-changes items:
+    made = ([])
+    while (is-any items):
+        item = pop-front items
+        when (and (<> item.name nothing) (<> item.kind "binding")):
+            append made item.name
+    when (is-any made):
+        note (concat "defined " (join-words made) " in " active)
+
+fun try-command input:
+    going = true
+    try (set going (run-command (words (trim input)))):
+        show-error failure
+    going
+
+fun try-code input:
+    set last-input input
+    try (run-code input):
+        show-error failure
+
+fun try-escape input:
+    going = true
+    try (set going (escape-to input.key)):
+        show-error failure
+    going
+
+; A key that left the editor: F2 shows the results, the others the menu.
+fun escape-to key:
+    if (= key "<f2>"):
+        do:
+            (results-command)
+            true
+        (open-menu)
+
+fun when-interactive-newline:
+    when interactive:
+        echo ""
+
+; Leaving at end of input (C-d) asks like exit does; staying gives a new
+; prompt.
+fun try-leave:
+    going = false
+    try (set going (not (ready-to-leave))):
+        show-error failure
+    going
+
+; --- projects ------------------------------------------------------------------
+
+fun remember-project root:
+    when (not (contains known-projects root)):
+        append known-projects root
+
+fun show-project:
+    if (= project nothing):
+        note "no project; new-project <dir> creates one, project <dir> switches to one"
+        do:
+            echo (concat "project " project.name " at " project.root)
+            echo (concat "  modules in " project.source ", main module " project.main)
+            echo "  modules:" (project-modules project)
+            echo (concat "  current directory " (current-dir))
+
+fun project-command ws:
+    if (is-empty ws):
+        (show-project)
+        switch-project (at ws 0)
+
+; Projects to pick from: the current one, the ones visited, the ones under
+; the current directory and beside the current project.
+fun pick-project:
+    roots = ([])
+    when (<> project nothing):
+        append roots project.root
+    roots = concat roots known-projects (projects-under (current-dir))
+    when (<> project nothing):
+        set roots (concat roots (projects-under (parent-dir project.root)))
+    out = ([])
+    seen = ([])
+    while (is-any roots):
+        root = absolute-path (pop-front roots)
+        when (not (contains seen root)):
+            append seen root
+            hint = if (and (<> project nothing) (= root project.root)):
+                "current project"
+                short-path root
+            append out (entry (base-name root) root hint)
+    append out (entry "another directory…" "<other>" "type a path")
+    choice = choose "Switch to which project?" out
+    if (= choice "<other>"):
+        ask "Switch project" "directory" ""
+        choice
+
+; A path as short as it reads from the current directory: ./x below it,
+; ../x beside it, or the whole path.
+fun short-path path:
+    here = (current-dir)
+    cond:
+        (starts-with path (concat here "/")) = (concat "." (slice path (length here)))
+        (= (parent-dir path) (parent-dir here)) = (concat "../" (base-name path))
+        true = path
+
+fun docs-in project:
+    out = ([])
+    when (<> project nothing):
+        i = 0
+        while (< i (length docs)):
+            when (in-project project (module-path (at docs i))):
+                append out (at docs i)
+            set i (+ i 1)
+    out
+
+; Whether unsaved documents may be left behind: on a terminal they are
+; offered for saving; piped, the switch is refused.
+fun settle-dirty dirty name:
+    cond:
+        (is-empty dirty) = true
+        (not interactive) = (error (concat "not saved: " (join-words dirty) "; save or drop them before switching to " name))
+        true = (settle-dirty-on-screen dirty name)
+
+fun settle-dirty-on-screen dirty name:
+    choice = confirm (concat "Switch to " name "?") ([] (concat "Not saved: " (join-words dirty))) ([] "Save all" "Discard" "Stay")
+    cond:
+        (= choice "Save all") = (do (save-all dirty) true)
+        (= choice "Discard") = true
+        true = false
+
+fun close-docs names:
+    kept = ([])
+    i = 0
+    while (< i (length docs)):
+        when (not (contains names (at docs i))):
+            append kept (at docs i)
+        set i (+ i 1)
+    set docs kept
+    when (not (contains docs active)):
+        if (is-any docs):
+            set active (at docs 0)
+            (new-doc)
+
+; switch-project dir makes the project in dir current: the old project's
+; documents close (unsaved ones are offered for saving), its modules unload,
+; and the current directory moves to the new project's root.
+fun switch-project dir:
+    next = project-at dir
+    if (and (<> project nothing) (= project.root next.root)):
+        note (concat "already in project " next.name)
+        do:
+            leaving = docs-in project
+            when (settle-dirty (filter-dirty leaving) next.name):
+                when (<> project nothing):
+                    close-project project
+                    close-docs leaving
+                change-dir next.root
+                set project (use-project next)
+                remember-project next.root
+                note (concat "project " next.name " (" next.root "), modules: " (to-string (project-modules next)))
+
+fun filter-dirty names:
+    out = ([])
+    i = 0
+    while (< i (length names)):
+        when (is-dirty (at names i)):
+            append out (at names i)
+        set i (+ i 1)
+    out
+
+; Relative directories are read against the current directory, which is the
+; current project's root, so `new-project ../other` makes a sibling.
+fun new-project-command dir:
+    root = absolute-path dir
+    new-project root
+    note (concat "created " root "/project.owl and src/main.owl")
+    when (and (<> project nothing) (starts-with root (concat project.root "/"))):
+        note (concat "note: it is inside project " project.name "; use ../" (base-name root) " for a sibling")
+    switch-project root
+
+fun repl:
+    set project (open-project (current-dir))
+    when (<> project nothing):
+        remember-project project.root
+    set escape-keys ([] "<f1>" "<M-x>" "<f2>")
+    if interactive:
+        echo (dim "owl repl. Enter adds a line, Ctrl+Enter runs (or Alt+Enter, Ctrl+J). F1 or M-x: menu. Ctrl+D leaves.")
+        echo "owl repl. Type help for commands, exit or ctrl-d to leave."
+    if (= project nothing):
+        note "no project here; new-project <dir> creates one, project <dir> switches to one"
+        note (concat "project " project.name " (" project.root ")")
+    (new-doc)
     running = true
-    forms = ([])
     while running:
         input = (read-input)
-        if (is-done input):
-            do:
-                when (= input nothing):
-                    echo ""
-                set running false
-            do:
-                set forms ([])
-                try (set forms (parse input)):
-                    show-error failure
-                while (is-any forms):
-                    try (show (eval-in session (pop-front forms))):
-                        show-error failure
-                        set forms ([])
+        cond:
+            (= input nothing) = (do (when-interactive-newline) (set running (try-leave)))
+            (= (type-of input) "record") = (set running (try-escape input))
+            (is-blank input) = nothing
+            (is-command (words (trim input))) = (set running (try-command input))
+            true = (try-code input)
 
 export:
     repl = repl

@@ -138,6 +138,15 @@ expect toSymbol(toSeq(fs[0])[0]) == "index", "the head is index"
 expect toSymbol(toSeq(fs[0])[2]) == "b", "the key is the name after the dot"
 expect forms("a.b.c") == forms("index (index a b) c"), "indexing chains to the left"
 expect forms("a.b.c.d") == forms("index (index (index a b) c) d"), "chains keep folding"
+expect cdr(forms("x = (w.f)")[0]) == list(@[forms("index w f")[0]]),
+  "a dotted access alone in parentheses is a call, like (f)"
+expect cdr(forms("x = (w.f.g)")[0]) == list(@[forms("index (index w f) g")[0]]),
+  "a dotted chain alone in parentheses is one call"
+expect cdr(forms("x = (w.f 1)")[0]) == list(@[forms("index w f")[0], number(1)]),
+  "with arguments it is the usual call"
+expect cdr(forms("x = w.f")[0]) == forms("index w f")[0], "without parentheses it is the field"
+expect cdr(forms("x = ((index w f))")[0]) == forms("index w f")[0],
+  "a group in parentheses stays a group, not a call"
 expect forms("a.2") == forms("index a 2"), "a dot can carry a position"
 expect forms("a.2.b") == forms("index (index a 2) b"), "positions chain with names"
 expect forms("a.(+ x 1)") == forms("index a (+ x 1)"), "a group is one key"
@@ -290,5 +299,8 @@ roundTrips("[] 1 ([] 2 3)")
 roundTrips("v2 = {}:\n  x = 100\n  y = 200")
 roundTrips("xs = []:\n  1\n  2\n  3")
 roundTrips(program)
+
+expect forms("fun f x:\r\n  g x \"a b\"\r\n\r\ny = 1\r\n") == forms("fun f x:\n  g x \"a b\"\n\ny = 1\n"),
+  "CRLF line ends read like LF ones"
 
 finish "reader"

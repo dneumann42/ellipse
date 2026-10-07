@@ -1,0 +1,236 @@
+#+TITLE: The Owl REPL
+
+* Goal
+
+A repl you can write a whole program in, from nothing to files on disk, and
+that doubles as a command line, a query tool over a codebase, and a live
+editor for a running program. Everything above a few system primitives is
+written in owl.
+
+* Concepts
+
+- Item :: a top-level piece of a module: a =fun=, =command=,
+  =dynamic-command=, a binding (=x = ...=), =use=, =export=, or a statement.
+  It has an exact line span, and the indent-0 comment directly above it
+  belongs to it. Definitions and bindings are named; every item can be named
+  by position, =#3=. See =libraries/source.owl=.
+- Document :: the text of an owl module plus the live module it evaluates
+  into. Every repl session has one active document. It starts unsaved and
+  in memory, and can be written to a path. Other documents can be opened
+  (any module of the project), but only one is active at a time.
+- Patch :: an edit to a module's items that is both written to its text and
+  applied to its live environment.
+
+* Layers
+
+| Layer       | What                                                  | Where                  | State   |
+|-------------+-------------------------------------------------------+------------------------+---------|
+| fs          | read-file, write-file (atomic), file-exists           | libraries/fs.nim       | done    |
+| source      | items of a text, update/add/put/remove, exact spans   | libraries/source.owl   | done    |
+| cli         | owl items/show/add/update/put/remove                  | scripts/cli.owl        | done    |
+| imports     | =use= shares bindings through export views, no copies | objects.nim, modules   | done    |
+| loader      | load modules from search paths; registry builtins     | modules.nim, loader.nim| done    |
+| project     | project.owl, module name <-> file, =owl new=           | libraries/projects.owl | done    |
+| live        | reload/patch/rerun/drop a loaded module, hooks        | libraries/live.owl     | done    |
+| documents   | repl document model and commands                      | scripts/repl.owl       | done    |
+| runner      | repl hosts the app; patches at a safe point           | owl + small Nim hook   | planned |
+| attach      | socket protocol to a running owl program              | Nim socket prims + owl | planned |
+| tui         | item browser, document view                           | owl (editor, ansi)     | planned |
+
+* Source items (done)
+
+Rules, enforced by =tests/source_test.nim=:
+
+- =source-items= fails unless the whole text parses, so every span agrees
+  with the evaluator.
+- Updating any item with its own text, or with its code alone, gives the file
+  back byte for byte (checked against every =.owl= file in the tree).
+- =update-item= needs the same kind and name. When the new code has no
+  leading comment, the old comment stays.
+- =add-item= appends after the last non-blank line, one blank line apart, and
+  refuses a name that already exists. =put-item= adds or updates by name.
+- =remove-item= drops the item and its comment, plus one blank line when two
+  would otherwise meet.
+- New code must be nothing but items. A loose comment between items is
+  refused rather than silently dropped.
+- A name defined twice is ambiguous and must be given by position.
+- Gap text (file header comments, blank lines between items) is never
+  touched.
+
+* Imports
+
+=use m= attaches m's export table to the user's scope instead of copying
+values. An export table maps each public name to the name of a binding in m's
+own scope, so a name is looked up in m every time it is used:
+
+- Re-making a definition in m reaches every module and scope that uses m,
+  including through renamed exports (=export: shown = secret=).
+- =set= on an imported name writes m's binding. There is one binding, not a
+  copy.
+- A scope's own bindings shadow its imports; among imports, the last =use=
+  wins.
+- An exported expression that is not a name (=export: x = (+ 1 2)=) is
+  evaluated once, into a binding of its own.
+- Exporting an unbound name is an error at load time.
+
+Values captured in data (a lambda in a record, a closure held by a running
+loop) still keep the code they captured. That's inherent, and it's what the
+lifecycle hooks are for.
+
+* Projects
+
+A project is a directory holding =project.owl=, a file of plain bindings:
+
+#+begin_src owl
+name = "demo"
+source = "src"   ; where modules live, relative to project.owl
+main = "main"    ; the module `owl run` starts
+#+end_src
+
+Module names are paths under =source= without =.owl=: =use ui/button= is
+=src/ui/button.owl=. =owl new <dir>= creates =project.owl= and
+=src/main.owl=. The CLI, the repl and =owl run= find the project from the
+current directory upwards.
+
+** Projects from the repl
+
+- =new-project <dir>= creates =project.owl= and =src/main.owl= in dir and
+  switches to it. On a terminal, a bare =new-project= asks for the directory.
+- =project= shows the current project. =project <dir>= switches to the
+  project whose =project.owl= is in dir. On a terminal, a bare =project=
+  picks from the current project, the ones visited this session, the ones
+  under the current directory, the current one's siblings, or a typed path.
+- A switch closes the old project's documents. Unsaved ones are offered for
+  saving (Save all / Discard / Stay); piped, the switch is refused. It then
+  unloads the old project's modules (each runs its =on-unload=), so a module
+  name like =main= loads afresh from the new project. It swaps the search
+  path and makes the new root the current directory, so relative paths read
+  like after =cd=: =new-project ../other= makes a sibling.
+- Documents with no file (=scratch=) stay open across switches. A scope that
+  already used a module of the old project keeps its view of it.
+- On a terminal the prompt starts with the project's name.
+
+* Live modules
+
+Every loaded module keeps the text it runs (=module-source=). =live.owl=
+changes the text and the scope together.
+
+- =reload-module name= re-reads the file and applies the difference:
+  - Definitions are always re-made; the ones the text dropped are unbound.
+  - A binding that is already bound keeps its value (state survives). A new
+    one is evaluated; a dropped one is unbound. A kept binding whose code
+    changed is reported, and =rerun-item= applies it.
+  - =use= and =export= are redone from the new text.
+  - A statement runs only if the old text did not have it.
+- =patch-module name code= is what typing at the repl does. Each item is
+  recorded in the text and evaluated, bindings and statements included. A
+  named item replaces the one of that name, even of another kind; a =use=
+  joins the other uses; anything else is appended. An item that fails to
+  evaluate is not recorded.
+- =rerun-item name key= evaluates one item again.
+- =drop-item name key= removes an item from the text and unbinds it.
+- Hooks: a module's own =on-load= fun runs after its first load, and its
+  =on-reload summary= fun after each reload or patch. Being definitions, they
+  are patched like anything else. =on-module name event fn= adds a hook from
+  outside (events "reload" and "load").
+  The summary record has =defined=, =bound=, =kept=, =removed= and =ran=.
+
+* Printing values as code
+
+=to-code value (width)= (Nim, next to =stringify= in =objects.nim=) writes a
+value as owl source that evaluates back to it:
+- On one line when it fits; otherwise as =[]:= / =\{\}:= blocks,
+  =name = value= lines, and =concat:= over filled =[] ...= rows for long
+  lists of atoms.
+- Strings are quoted. A quote or control character becomes
+  =(concat "a" (char 34) "b")=, since owl strings have no escapes.
+- A list headed by a symbol is code and keeps its =:= body, so parsed code
+  prints back as code. A fun prints as its definition.
+=tests/evaluator_test.nim= checks the round trip at widths 20 to 200. The
+repl prints every result this way; =stringify= (echo, concat) is unchanged.
+
+* The repl
+
+Each session starts a document named =scratch=, a module in memory whose
+text starts with a small prelude of =use= lines. Code runs in the active
+document's module and is recorded into its text. Inputs whose first word is a
+command run in the repl and are never recorded; =x = 1= is code even when x
+is a command name.
+
+| Command                  | Does                                              |
+|--------------------------+---------------------------------------------------|
+| =docs=                   | list open documents, * is active, shows modified |
+| =new [name]=             | start a new document                              |
+| =open <module or file>=  | open a module as a document (loads it)            |
+| =switch <name>=          | make an open document active                      |
+| =save [file]=            | write the active document (default: its file, or  |
+|                          | =<source>/<name>.owl= in a project)              |
+| =text=                   | print the active document                         |
+| =items [module]=         | list items                                        |
+| =show <key> [module]=    | print one item                                    |
+| =drop <key>=             | remove an item from the active document           |
+| =rerun <key>=            | evaluate an item again                            |
+| =reload [module]=        | re-read a module from its file, keeping state     |
+| =modules=                | loaded modules and the project's modules          |
+
+A statement is recorded by what it changed, not as history (=run-statement=
+in =live.owl=). The module's own bindings are compared before and after:
+- Nothing changed (a query such as =tasks=, or =echo=): nothing is recorded.
+- Bindings changed to data: each is written back as =name = value= in code,
+  replacing its binding, so the document holds the state.
+- A change that can't be written as code (a command or closure): the
+  statement is recorded once; an identical one is never added again.
+
+=items= shows a module's source in a scrollable view; ↑↓ select items and
+PgUp/PgDn scroll. Enter or e edits an item: its text goes into the next
+prompt, and running it replaces the item. c copies it (OSC 52), d drops it,
+r reruns it. =results= (or F2) shows the printed results the same way,
+each under its input as a =;= comment. Editing a result of a bare name the
+document binds pre-fills =name = value=, so running it records that binding.
+Piped, =items= prints the source with item numbers in the margin.
+
+Opening another module and typing a definition patches the running module,
+and since imports are live, every user of it sees the change.
+
+* TUI
+
+=libraries/tui.owl= is a small widget kit, all in owl. Widgets are records of
+closures (=draw=, =handle=, =value=) over their own state: =label=,
+=checkbox=, =button=, =button-row=, =text-input= and =menu= (filterable;
+label matches rank first, then hints; it scrolls). =run-screen= draws them in
+a box below the cursor, redraws in place, and erases itself on close. Ready
+made: =choose=, =ask=, =confirm=. Key decoding is shared with the editor
+through =libraries/keys.owl=, and the terminal is reached only through
+swappable bindings, so =tests/tui_test.nim= drives it with scripted keys.
+
+In the repl:
+- F1 or M-x leaves the editor (its buffer is kept for the next prompt) and
+  opens a filterable menu of every command.
+- A command missing its argument opens a picker on a terminal: modules for
+  =open=, =items=, =reload=; documents for =switch=; the active document's
+  items for =show=, =drop=, =rerun=. =new= and =save= ask from the menu. The
+  equivalent typed command is printed, so the menu teaches the text form.
+- =settings= is a form: record statements, show what each input defined,
+  ask before leaving with unsaved documents.
+- =exit= or C-d with unsaved documents offers Save all / Leave / Stay.
+
+* Next phases
+
+** Runner and attach
+- One protocol, two transports. A request is (module, owl text, mode: eval,
+  patch or query). A response is the printed result or the error.
+- Runner: =owl repl --run= starts the project's main module under the repl.
+  Requests queue, and the app drains them at a safe point (a frame boundary
+  or idle). The evaluator stays single-threaded, so it needs no locks.
+- Attach: the running program serves the same requests on a unix socket
+  (=$XDG_RUNTIME_DIR/owl/<pid>.sock=, mode 0600), and =owl attach [pid]= is
+  a repl whose eval goes over the socket. This needs Nim primitives for
+  non-blocking listen/accept/read/write; the protocol and server are owl.
+
+** Known gaps
+- A reload that fails part way leaves the scope partly updated and the text
+  unchanged. A dry run against a scratch scope first would make it atomic.
+- =on-unload= runs only when a project switch unloads a module; there is
+  no command to unload a single module.
+- Interpreter speed: symbol lookups hash strings, and command bodies are
+  copied per call. Listing an 826-line module takes about 0.2s.

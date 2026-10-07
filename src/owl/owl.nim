@@ -1,6 +1,6 @@
 import std/syncio
 import objects, reader, evaluator, modules
-import libraries/[base, math, io, term]
+import libraries/[base, math, io, term, fs, loader]
 
 # The owl sources are baked into the binary at build time (see
 # libraries/deps/embedFile.nim), so bin/owl runs from any directory.
@@ -43,11 +43,18 @@ proc start() {.raises.} =
   lib.add ioModule()
   lib.add programModule()
   lib.add termModule()
+  lib.add fsModule()
+  lib.add loaderModule(lib)
   lib.add newModule("iterators").addSource(embedFile("libraries/iterators.owl"))
   lib.add newModule("strings").addSource(embedFile("libraries/strings.owl"))
   lib.add newModule("ansi").addSource(embedFile("libraries/ansi.owl"))
+  lib.add newModule("keys").addSource(embedFile("libraries/keys.owl"))
   lib.add newModule("editor").addSource(embedFile("libraries/editor.owl"))
+  lib.add newModule("tui").addSource(embedFile("libraries/tui.owl"))
   lib.add newModule("cmdline").addSource(embedFile("libraries/cmdline.owl"))
+  lib.add newModule("source").addSource(embedFile("libraries/source.owl"))
+  lib.add newModule("live").addSource(embedFile("libraries/live.owl"))
+  lib.add newModule("projects").addSource(embedFile("libraries/projects.owl"))
   lib.add newModule("repl").addSource(embedFile("scripts/repl.owl"))
   lib.add newModule("cli").addSource(embedFile("scripts/cli.owl"))
   evaluate(lib)

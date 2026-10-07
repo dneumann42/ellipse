@@ -1,7 +1,13 @@
 use io
 use base
+use math
+use strings
 use cmdline
 use program
+use fs
+use modules
+use source
+use projects
 use repl
 
 ; The owl command line: `owl <command> [args]`.
@@ -10,9 +16,21 @@ fun usage:
     echo "usage: owl <command> [args]"
     echo ""
     echo "commands:"
-    echo "  repl         start an interactive session"
-    echo "  run <file>   evaluate an owl source file"
-    echo "  help         show this message"
+    echo "  new <dir>                     create a project: project.owl and src/main.owl"
+    echo "  repl                          start an interactive session"
+    echo "  run [<file>]                  evaluate an owl file, or the project's main module"
+    echo "  modules                       list the project's modules"
+    echo "  items <module>                list a module's definitions and statements"
+    echo "  show <module> <name|#n>       print one item"
+    echo "  add <module> [<file>]         append new items (from stdin without a file)"
+    echo "  update <module> <name|#n> [<file>]"
+    echo "                                replace one item"
+    echo "  put <module> [<file>]         add or replace items by name"
+    echo "  remove <module> <name|#n>     delete one item"
+    echo "  help                          show this message"
+    echo ""
+    echo "A module is a module name of the project around the current directory,"
+    echo "or a path to an owl file (the .owl may be left off)."
 
 fun fail msg:
     error (concat msg " (see 'owl help')")
@@ -23,21 +41,134 @@ fun wants-help arg:
         (= arg.type "long-flag") = (= arg.flag "help")
         true = false
 
+; The next argument as a plain word, or nothing when there is none and it is
+; optional.
+fun word next what (optional = false):
+    arg = (next)
+    when (and (= arg nothing) (not optional)):
+        fail (concat "missing " what)
+    when (and (<> arg nothing) (<> arg.type "cmd")):
+        fail (concat "expected " what ", not the option " arg.flag)
+    if (= arg nothing):
+        nothing
+        arg.name
+
+project = open-project (current-dir)
+
+fun need-project:
+    when (= project nothing):
+        fail "not inside an owl project (no project.owl here or above)"
+
 fun run-command next:
-    file = (next)
-    when (= file nothing):
-        fail "run needs a file"
-    when (<> file.type "cmd"):
-        fail (concat "run takes a file, not the option " file.flag)
-    run-file file.name
+    file = word next "a file" true
+    if (= file nothing):
+        do:
+            (need-project)
+            load-module project.main
+        run-file file
+
+fun module-file-of name:
+    cond:
+        (file-exists name) = name
+        (file-exists (concat name ".owl")) = (concat name ".owl")
+        (<> (module-file name) nothing) = (module-file name)
+        true = (fail (concat "no module " name))
+
+fun new-command next:
+    dir = word next "a directory"
+    new-project dir
+    echo (concat "created " dir "/project.owl and " dir "/src/main.owl")
+
+fun modules-command:
+    (need-project)
+    xs = project-modules project
+    while (is-any xs):
+        echo (pop-front xs)
+
+fun read-stdin:
+    out = ""
+    line = readline ""
+    while (<> line nothing):
+        do:
+            set out (concat out line newline)
+            set line (readline "")
+    out
+
+fun read-input path:
+    if (= path nothing):
+        (read-stdin)
+        read-file path
+
+fun pad s n:
+    out = s
+    while (< (length out) n):
+        set out (concat out " ")
+    out
+
+fun pad-left s n:
+    out = s
+    while (< (length out) n):
+        set out (concat " " out)
+    out
+
+fun items-command next:
+    xs = source-items (read-file (module-file-of (word next "a module")))
+    while (is-any xs):
+        item = pop-front xs
+        echo (concat (pad-left (concat "#" (to-string item.ordinal)) 5) (pad-left (to-string item.line) 6) "  " (pad item.kind 16) item.header)
+
+fun show-command next:
+    text = read-file (module-file-of (word next "a module"))
+    item = select-item (source-items text) (word next "an item name or #n")
+    echo item.text
+
+fun edit-module path edit:
+    write-file path (edit (read-file path))
+
+fun add-command next:
+    path = module-file-of (word next "a module")
+    new = read-input (word next "a file" true)
+    fun edit text:
+        add-item text new
+    edit-module path edit
+
+fun update-command next:
+    path = module-file-of (word next "a module")
+    key = word next "an item name or #n"
+    new = read-input (word next "a file" true)
+    fun edit text:
+        update-item text key new
+    edit-module path edit
+
+fun put-command next:
+    path = module-file-of (word next "a module")
+    new = read-input (word next "a file" true)
+    fun edit text:
+        put-item text new
+    edit-module path edit
+
+fun remove-command next:
+    path = module-file-of (word next "a module")
+    key = word next "an item name or #n"
+    fun edit text:
+        remove-item text key
+    edit-module path edit
 
 fun dispatch arg next:
     cond:
         (= arg nothing) = (usage)
         (wants-help arg) = (usage)
         (<> arg.type "cmd") = (fail (concat "unknown option: " arg.flag))
+        (= arg.name "new") = (new-command next)
+        (= arg.name "modules") = (modules-command)
         (= arg.name "repl") = (repl)
         (= arg.name "run") = (run-command next)
+        (= arg.name "items") = (items-command next)
+        (= arg.name "show") = (show-command next)
+        (= arg.name "add") = (add-command next)
+        (= arg.name "update") = (update-command next)
+        (= arg.name "put") = (put-command next)
+        (= arg.name "remove") = (remove-command next)
         (= arg.name "help") = (usage)
         true = (fail (concat "unknown command: " arg.name))
 

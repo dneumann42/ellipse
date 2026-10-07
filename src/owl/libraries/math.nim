@@ -35,11 +35,23 @@ proc divBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
     total = total / ns[i]
   number(total)
 
+proc floorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # floor x: the largest whole number not above x.
+  let ns = numbersIn(env, args, "floor")
+  if ns.len != 1:
+    err("floor needs one number")
+  let x = ns[0]
+  var f = float64(int64(x))
+  if f > x:
+    f -= 1.0
+  number(f)
+
 proc installMath*(env: ref Environment) =
   define(env, symbol("+"), newBuiltin("+", plusBuiltin, true))
   define(env, symbol("-"), newBuiltin("-", subBuiltin, true))
   define(env, symbol("*"), newBuiltin("*", mulBuiltin, true))
   define(env, symbol("/"), newBuiltin("/", divBuiltin, true))
+  define(env, symbol("floor"), newBuiltin("floor", floorBuiltin, true))
 
 proc mathModule*(): Module =
   result = newModule("math")

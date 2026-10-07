@@ -881,4 +881,77 @@ expect toNumber(value(eDynamic, "shown")) == 42.0, "a dynamic-command body sees 
 expect stringify(value(eDynamic, "code")) == "+ 1 2", "a dynamic-command gets bare forms"
 expect qFound.isNone, "a dynamic-command's bindings stay in its own frame"
 
+# to-code: printing a value gives owl code that evaluates back to it, at any
+# width (narrow widths force every block form), and printing parsed code
+# gives text that parses back to the same forms.
+proc evalText(text: string): Object =
+  let r = parseOwl(text)
+  expect r.isOk, "printed code parses: " & r.error("") & "\n" & text
+  result = nothing()
+  try:
+    let env = newTestEnv()
+    for f in r.get(@[]):
+      result = eval(f, env)
+  except:
+    expect false, "printed code evaluates: " & lastError() & "\n" & text
+
+let printed = runOk("""
+tasks = [] ({} (title = "Hello") (descr = "World!")) ({} (title = "Bye") (descr = ""))
+quoted = concat "say " (char 34) "hi" (char 34) newline "tab" (char 9) "end"
+nested = {} (name = "owl") (tags = ([] "lang" "repl")) (inner = ({} (a = 1) (b = ([] 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20)))) (none = ([])) (empty = ({}))
+mixed = [] 1 -2.5 true false nothing "é" ([] ([] 1) ([]))
+""", "")
+for name in ["tasks", "quoted", "nested", "mixed"]:
+  let v = value(printed, name)
+  for width in [20, 40, 80, 200]:
+    let text = toCode(v, width)
+    expect evalText(text) == v, "to-code of " & name & " at width " & $width & " reads back:\n" & text
+    if width >= 40 and name != "quoted":
+      for line in text.split("\n"):
+        expect line.len <= width or not line.contains(" = ") or line.startsWith(" "),
+          "lines stay within the width where owl can break: " & line
+
+expect toCode(value(printed, "quoted"), 80) ==
+  "(concat \"say \" (char 34) \"hi\" (char 34) (char 10) \"tab\tend\")",
+  "quotes and newlines become char codes: " & toCode(value(printed, "quoted"), 80)
+expect toCode(value(printed, "tasks"), 50) == """[]:
+    {} (title = "Hello") (descr = "World!")
+    {} (title = "Bye") (descr = "")""", "a list that does not fit breaks into a block:\n" & toCode(value(printed, "tasks"), 50)
+expect toCode(value(printed, "tasks"), 30) == """[]:
+    {}:
+        title = "Hello"
+        descr = "World!"
+    {}:
+        title = "Bye"
+        descr = """"", "records break into name = value lines:\n" & toCode(value(printed, "tasks"), 30)
+expect toCode(str("hi"), 80) == "\"hi\"", "strings are quoted"
+expect toCode(list(@[]), 80) == "([])", "the empty list"
+
+let source = """fun f x (y = 2):
+    when (> x y):
+        echo "big" x
+    + x y
+
+z = [] 1 2
+
+(g)
+"""
+let parsedSource = parseOwl(source)
+expect parsedSource.isOk, "source parses"
+for form in parsedSource.get(@[]):
+  for width in [10, 80]:
+    let text = toCode(form, width)
+    let back = parseOwl(text)
+    expect back.isOk and back.get(@[]).len == 1 and back.get(@[])[0] == form and
+      stringify(back.get(@[])[0]) == stringify(form),
+      "printed code parses back to the same form:\n" & text
+expect toCode(parsedSource.get(@[])[0], 80) == """fun f x (y = 2):
+    when (> x y):
+        echo "big" x
+    + x y""", "code keeps its blocks:\n" & toCode(parsedSource.get(@[])[0], 80)
+
+let fnEnv = runOk("fun twice x:\n  * x 2", "")
+expect toCode(value(fnEnv, "twice"), 80) == "fun twice x:\n    * x 2",
+  "a fun prints as its definition: " & toCode(value(fnEnv, "twice"), 80)
+
 finish "evaluator"

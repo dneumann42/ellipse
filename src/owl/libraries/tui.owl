@@ -1,0 +1,759 @@
+use base
+use math
+use strings
+use ansi
+use term
+use keys
+
+; A small text ui: widgets drawn in a box below the cursor, redrawn in place
+; on every key, and cleared when the screen closes, so it fits inside a repl
+; session instead of taking over the terminal.
+;
+; A widget is a record of closures over its own state:
+;   draw focused width   the lines to show, at most width columns each
+;   handle key           "close" (the screen closes with this widget's
+;                        value), "handled", or nothing to let the screen use
+;                        the key (tab and arrows move focus, esc cancels)
+;   value                the widget's current value
+; plus kind, a name, and focusable.
+;
+; run-screen title widgets shows them until a widget closes the screen (a
+; button, a menu choice, enter in a text field) and gives that widget's
+; value, or nothing when cancelled with esc, C-g or C-c. The other widgets
+; keep their state, so a form reads its checkboxes afterwards:
+;
+;     verbose = checkbox "Verbose"
+;     choice = run-screen "Options" ([] verbose (button-row ([] "OK" "Cancel")))
+;     when (and (= choice "OK") (verbose.value)): ...
+;
+; The terminal is reached only through tui-read-key, tui-write, tui-raw and
+; tui-width, which tests replace to script keys and capture output.
+
+tui-read-key = read-key
+tui-write = write
+tui-raw = raw-mode
+
+fun terminal-width:
+    (terminal-size).cols
+
+tui-width = terminal-width
+
+fun at xs i:
+    index xs (+ i 0)
+
+fun pick c a b:
+    if c:
+        a
+        b
+
+fun is-one-of key options:
+    found = false
+    while (and (not found) (is-any options)):
+        when (= (pop-front options) key):
+            set found true
+    found
+
+; --- text measure ----------------------------------------------------------------
+;
+; Widths count characters, not bytes (a UTF-8 continuation byte adds nothing)
+; and ignore ANSI styling. Wide characters count as one.
+
+fun is-cont b:
+    and (> b 127) (< b 192)
+
+fun width-of text:
+    plain = strip text
+    n = 0
+    i = 0
+    while (< i (length plain)):
+        when (not (is-cont (code plain i))):
+            set n (+ n 1)
+        set i (+ i 1)
+    n
+
+; The first count characters of plain (unstyled) text.
+fun take-chars text count:
+    seen = 0
+    i = 0
+    stop = length text
+    while (< i stop):
+        when (not (is-cont (code text i))):
+            if (= seen count):
+                set stop i
+                set seen (+ seen 1)
+        when (< i stop):
+            set i (+ i 1)
+    slice text 0 stop
+
+; Plain text cut to width, with an ellipsis when it had to be cut.
+fun fit text width:
+    if (> (width-of text) width):
+        concat (take-chars text (max (- width 1) 0)) "…"
+        text
+
+fun spaces n:
+    out = ""
+    while (< (length out) n):
+        set out (concat out " ")
+    out
+
+fun pad-to text width:
+    concat text (spaces (- width (width-of text)))
+
+fun repeat-text s n:
+    out = ""
+    i = 0
+    while (< i n):
+        set out (concat out s)
+        set i (+ i 1)
+    out
+
+fun lower text:
+    out = ""
+    i = 0
+    while (< i (length text)):
+        c = code text i
+        set out (concat out (pick (and (> c 64) (< c 91)) (char (+ (min c 200) 32)) (index text (+ i 0))))
+        set i (+ i 1)
+    out
+
+fun drop-last-char text:
+    n = length text
+    while (and (> n 0) (is-cont (code text (- n 1)))):
+        set n (- n 1)
+    slice text 0 (max (- n 1) 0)
+
+fun focus-style focused text:
+    if focused:
+        inverse text
+        text
+
+; --- widgets ----------------------------------------------------------------------
+
+fun widget kind name focusable draw handle value:
+    {} (kind = kind) (name = name) (focusable = focusable) (draw = draw) (handle = handle) (value = value)
+
+; label text: one or more lines of text; not focusable. A list gives several
+; lines.
+fun label text (style = nothing):
+    lines = if (= (type-of text) "list"):
+        text
+        [] text
+    fun draw focused width:
+        out = ([])
+        i = 0
+        while (< i (length lines)):
+            line = fit (at lines i) width
+            when (<> style nothing):
+                set line (style line)
+            append out line
+            set i (+ i 1)
+        out
+    fun handle key:
+        nothing
+    fun value:
+        nothing
+    widget "label" nothing false draw handle value
+
+; checkbox text (checked): space, enter or x toggles it; its value is the
+; state.
+fun checkbox text (checked = false) (name = nothing):
+    state = checked
+    fun draw focused width:
+        mark = if state:
+            "[x] "
+            "[ ] "
+        [] (focus-style focused (fit (concat mark text) width))
+    fun handle key:
+        if (is-one-of key ([] " " "<RET>" "x")):
+            do:
+                set state (not state)
+                "handled"
+            nothing
+    fun value:
+        state
+    widget "checkbox" name true draw handle value
+
+; button text (result): enter or space closes the screen with result (the
+; text when not given).
+fun button text (result = nothing) (name = nothing):
+    out = if (= result nothing):
+        text
+        result
+    fun draw focused width:
+        [] (focus-style focused (fit (concat "[ " text " ]") width))
+    fun handle key:
+        if (is-one-of key ([] " " "<RET>")):
+            "close"
+            nothing
+    fun value:
+        out
+    widget "button" name true draw handle value
+
+; button-row texts: buttons side by side; left and right pick one, enter or
+; space closes the screen with its text.
+fun button-row texts (selected = 0) (name = nothing):
+    at-button = selected
+    fun draw focused width:
+        line = ""
+        i = 0
+        while (< i (length texts)):
+            face = concat "[ " (at texts i) " ]"
+            when (and focused (= i at-button)):
+                set face (inverse face)
+            set line (concat line face "  ")
+            set i (+ i 1)
+        [] line
+    fun handle key:
+        cond:
+            (is-one-of key ([] "<left>" "<C-b>")) = (do (set at-button (max (- at-button 1) 0)) "handled")
+            (is-one-of key ([] "<right>" "<C-f>")) = (do (set at-button (min (+ at-button 1) (- (length texts) 1))) "handled")
+            (is-one-of key ([] " " "<RET>")) = "close"
+            true = nothing
+    fun value:
+        at texts at-button
+    widget "button-row" name true draw handle value
+
+; --- one-line editing ------------------------------------------------------------
+;
+; Positions are byte offsets that always sit on a UTF-8 character boundary.
+; The kill ring is shared by every field, so C-y yanks what C-k killed in
+; another one.
+
+kills = ([])
+
+fun next-pos text p:
+    n = length text
+    q = min (+ p 1) n
+    while (and (< q n) (is-cont (code text q))):
+        set q (+ q 1)
+    q
+
+fun prev-pos text p:
+    q = max (- p 1) 0
+    while (and (> q 0) (is-cont (code text q))):
+        set q (- q 1)
+    q
+
+fun is-word-at text p:
+    c = code text p
+    or (and (> c 47) (< c 58)) (or (and (> c 64) (< c 91)) (or (and (> c 96) (< c 123)) (or (= c 95) (> c 127))))
+
+fun word-end text p:
+    n = length text
+    q = p
+    while (and (< q n) (not (is-word-at text q))):
+        set q (next-pos text q)
+    while (and (< q n) (is-word-at text q)):
+        set q (next-pos text q)
+    q
+
+fun word-start text p:
+    q = p
+    while (and (> q 0) (not (is-word-at text (prev-pos text q)))):
+        set q (prev-pos text q)
+    while (and (> q 0) (is-word-at text (prev-pos text q))):
+        set q (prev-pos text q)
+    q
+
+; The character count of text before byte offset p.
+fun chars-before text p:
+    width-of (slice text 0 p)
+
+; The byte offset of the k-th character of text.
+fun char-offset text k:
+    length (take-chars text k)
+
+; text-input text (initial): a one-line field with the editor's emacs keys:
+;   C-f C-b, left right       a character      C-d, delete   delete forward
+;   M-f M-b, C-right C-left   a word           DEL, C-h      delete back
+;   C-a C-e, home end         start, end       C-k C-u       kill to end, start
+;   C-w, M-DEL                kill word back   M-d           kill word forward
+;   C-y                       yank             C-t           transpose
+; Enter closes the screen with the text. A long text scrolls to keep point in
+; view.
+fun text-input text (initial = "") (name = nothing):
+    content = initial
+    point = length initial
+    fun insert s:
+        set content (concat (slice content 0 point) s (slice content point))
+        set point (+ point (length s))
+        "handled"
+    fun kill-range a b:
+        when (< a b):
+            append kills (slice content a b)
+            set content (concat (slice content 0 a) (slice content b))
+            set point a
+        "handled"
+    fun delete-range a b:
+        set content (concat (slice content 0 a) (slice content b))
+        set point a
+        "handled"
+    fun move-to p:
+        set point p
+        "handled"
+    fun yank:
+        if (is-any kills):
+            insert (index kills (- (length kills) 1))
+            "handled"
+    fun transpose:
+        when (and (> point 0) (> (length content) 1)):
+            when (= point (length content)):
+                set point (prev-pos content point)
+            a = prev-pos content point
+            b = next-pos content point
+            set content (concat (slice content 0 a) (slice content point b) (slice content a point) (slice content b))
+            set point b
+        "handled"
+    fun draw focused width:
+        head = concat text ": "
+        room = max (- width (width-of head) 1) 4
+        total = width-of content
+        at-char = chars-before content point
+        first = 0
+        when (> (+ at-char 1) room):
+            set first (- (+ at-char 1) room)
+        last = min total (+ first room)
+        left-cut = > first 0
+        right-cut = < last total
+        when left-cut:
+            set first (+ first 1)
+        when right-cut:
+            set last (- last 1)
+        a = char-offset content first
+        b = char-offset content last
+        before = slice content a point
+        here = if (< point (length content)):
+            slice content point (next-pos content point)
+            " "
+        after = if (< point (length content)):
+            slice content (next-pos content point) b
+            ""
+        line = if focused:
+            concat (underline before) (inverse here) (underline after)
+            underline (slice content a b)
+        [] (concat head (pick left-cut (dim "…") "") line (pick right-cut (dim "…") ""))
+    fun handle key:
+        n = length content
+        cond:
+            (is-text key) = (insert key)
+            (= key "<paste>") = (insert paste-text)
+            (is-one-of key ([] "<C-f>" "<right>")) = (move-to (next-pos content point))
+            (is-one-of key ([] "<C-b>" "<left>")) = (move-to (prev-pos content point))
+            (is-one-of key ([] "<M-f>" "<C-right>" "<M-right>")) = (move-to (word-end content point))
+            (is-one-of key ([] "<M-b>" "<C-left>" "<M-left>")) = (move-to (word-start content point))
+            (is-one-of key ([] "<C-a>" "<home>")) = (move-to 0)
+            (is-one-of key ([] "<C-e>" "<end>")) = (move-to n)
+            (is-one-of key ([] "<DEL>" "<C-h>")) = (delete-range (prev-pos content point) point)
+            (is-one-of key ([] "<C-d>" "<delete>")) = (delete-range point (next-pos content point))
+            (= key "<C-k>") = (kill-range point n)
+            (= key "<C-u>") = (kill-range 0 point)
+            (is-one-of key ([] "<C-w>" "<M-DEL>" "<C-DEL>")) = (kill-range (word-start content point) point)
+            (is-one-of key ([] "<M-d>" "<C-delete>")) = (kill-range point (word-end content point))
+            (= key "<C-y>") = (yank)
+            (= key "<C-t>") = (transpose)
+            (= key "<RET>") = "close"
+            true = nothing
+    fun value:
+        content
+    widget "text-input" name true draw handle value
+
+; An entry of a menu: what it shows, what choosing it gives, and a dim hint
+; shown after the label. A plain string is all three in one.
+fun entry text (result = nothing) (hint = "") (name = nothing):
+    {} (label = text) (value = (pick (= result nothing) text result)) (hint = hint)
+
+fun as-entry x:
+    if (= (type-of x) "string"):
+        entry x
+        x
+
+; menu entries (rows) (filter): a list to choose from with up and down (C-p,
+; C-n, page up, page down, home, end); enter closes the screen with the
+; chosen entry's value. With filter on, typing narrows the list to entries
+; whose label or hint holds the typed text, ignoring case; label matches are
+; listed first.
+fun menu entries (rows = 10) (filter = true) (name = nothing):
+    all = ([])
+    i = 0
+    while (< i (length entries)):
+        append all (as-entry (at entries i))
+        set i (+ i 1)
+    query = ""
+    selected = 0
+    offset = 0
+    shown = all
+    ; Entries whose label starts with the query come first, then those whose
+    ; label holds it, then those whose hint does.
+    fun refilter:
+        q = lower query
+        starts = ([])
+        inside = ([])
+        hinted = ([])
+        j = 0
+        while (< j (length all)):
+            e = at all j
+            at-label = find (lower e.label) q
+            cond:
+                (= at-label 0) = (append starts e)
+                (<> at-label nothing) = (append inside e)
+                (<> (find (lower e.hint) q) nothing) = (append hinted e)
+                true = nothing
+            set j (+ j 1)
+        set shown (concat starts inside hinted)
+        set selected 0
+        set offset 0
+    fun move by:
+        when (is-any shown):
+            set selected (max 0 (min (- (length shown) 1) (+ selected by)))
+            when (< selected offset):
+                set offset selected
+            when (not (< selected (+ offset rows))):
+                set offset (+ (- selected rows) 1)
+        "handled"
+    fun draw focused width:
+        out = ([])
+        when filter:
+            append out (pick (= query "") (dim (fit "type to filter" width)) (concat "filter: " (bold (fit query (- width 8)))))
+        j = offset
+        stop = min (length shown) (+ offset rows)
+        label-width = 0
+        k = offset
+        while (< k stop):
+            set label-width (max label-width (width-of (index shown (+ k 0) "label")))
+            set k (+ k 1)
+        set label-width (min label-width (max (- width 12) 8))
+        while (< j stop):
+            e = at shown j
+            mark = if (= j selected):
+                "› "
+                "  "
+            name-part = pad-to (fit e.label label-width) label-width
+            line = concat mark name-part
+            room = - width (width-of line) 2
+            hint = if (and (<> e.hint "") (> room 3)):
+                concat "  " (fit e.hint room)
+                ""
+            append out (concat (pick (= j selected) (focus-style focused line) line) (dim hint))
+            set j (+ j 1)
+        when (is-empty shown):
+            append out (dim "  (nothing matches)")
+        when (> (length shown) stop):
+            append out (dim (concat "  … " (to-string (- (length shown) stop)) " more"))
+        out
+    fun handle key:
+        cond:
+            (is-one-of key ([] "<up>" "<C-p>")) = (move -1)
+            (is-one-of key ([] "<down>" "<C-n>")) = (move 1)
+            (= key "<prior>") = (move (- 0 rows))
+            (= key "<next>") = (move rows)
+            (= key "<home>") = (move (- 0 (length shown)))
+            (= key "<end>") = (move (length shown))
+            (= key "<RET>") = (pick (is-any shown) "close" "handled")
+            (and filter (is-text key)) = (do (set query (concat query key)) (refilter) "handled")
+            (and filter (is-one-of key ([] "<DEL>" "<C-h>"))) = (do (set query (drop-last-char query)) (refilter) "handled")
+            (and filter (= key "<C-u>")) = (do (set query "") (refilter) "handled")
+            true = nothing
+    fun value:
+        if (is-empty shown):
+            nothing
+            index shown (+ selected 0) "value"
+    widget "menu" name true draw handle value
+
+; code-view sections (rows) (actions): owl source to scroll through, made of
+; sections (records of gutter, text and value: a document's items, or printed
+; results). One section is selected, the first or, with at-end, the last; up and down (C-p, C-n) move between
+; sections, page up and page down (and home, end) scroll by screens, and the
+; view follows the selection. actions are records of key and action: such a
+; key closes the screen, and the view's value is then a record of the action
+; and the selected section's value.
+fun section gutter text (result = nothing):
+    {} (gutter = gutter) (text = text) (value = result)
+
+fun action key what:
+    {} (key = key) (action = what)
+
+fun code-view sections (rows = 15) (actions = ([])) (at-end = false) (name = nothing):
+    starts = ([])
+    lines = ([])
+    i = 0
+    while (< i (length sections)):
+        append starts (length lines)
+        parts = split-text (index sections (+ i 0) "text")
+        first = true
+        while (is-any parts):
+            append lines ({} (sec = i) (text = (pop-front parts)) (first = first))
+            set first false
+        set i (+ i 1)
+    selected = 0
+    offset = 0
+    chosen = nothing
+    fun section-end k:
+        if (< (+ k 1) (length starts)):
+            at starts (+ k 1)
+            length lines
+    fun show-selected:
+        start = at starts selected
+        stop = section-end selected
+        when (< start offset):
+            set offset start
+        when (> stop (+ offset rows)):
+            set offset (max start (- stop rows))
+    fun select k:
+        when (is-any sections):
+            set selected (max 0 (min (- (length sections) 1) k))
+            (show-selected)
+        "handled"
+    fun scroll by:
+        set offset (max 0 (min (max 0 (- (length lines) rows)) (+ offset by)))
+        when (is-any lines):
+            top = at lines offset
+            when (or (< (section-end selected) (+ offset 1)) (> (at starts selected) (+ offset rows -1))):
+                set selected top.sec
+        "handled"
+    fun draw focused width:
+        out = ([])
+        room = - width 6
+        when (> offset 0):
+            append out (dim (concat "      ↑ " (to-string offset) " more lines"))
+        j = offset
+        stop = min (length lines) (+ offset rows)
+        while (< j stop):
+            line = at lines j
+            mine = = line.sec selected
+            label = if line.first:
+                index sections line.sec "gutter"
+                ""
+            gutter = pad-to (fit label 4) 4
+            bar = if mine:
+                "▌ "
+                "  "
+            gutter-text = concat gutter bar
+            styled-gutter = if mine:
+                bold gutter-text
+                dim gutter-text
+            append out (concat styled-gutter (fit line.text room))
+            set j (+ j 1)
+        when (is-empty lines):
+            append out (dim "  (empty)")
+        when (> (length lines) stop):
+            append out (dim (concat "      ↓ " (to-string (- (length lines) stop)) " more lines"))
+        out
+    fun handle key:
+        found = nothing
+        k = 0
+        while (< k (length actions)):
+            when (and (= found nothing) (= (index actions (+ k 0) "key") key)):
+                set found (index actions (+ k 0) "action")
+            set k (+ k 1)
+        cond:
+            (and (<> found nothing) (is-any sections)) = (do (set chosen found) "close")
+            (is-one-of key ([] "<up>" "<C-p>")) = (select (- selected 1))
+            (is-one-of key ([] "<down>" "<C-n>")) = (select (+ selected 1))
+            (= key "<prior>") = (scroll (- 0 rows))
+            (= key "<next>") = (scroll rows)
+            (= key "<home>") = (select 0)
+            (= key "<end>") = (select (length sections))
+            true = nothing
+    fun value:
+        if (is-empty sections):
+            nothing
+            {} (action = chosen) (value = (index sections (+ selected 0) "value"))
+    when at-end:
+        select (- (length sections) 1)
+    widget "code-view" name true draw handle value
+
+fun split-text text:
+    out = ([])
+    from = 0
+    done = false
+    while (not done):
+        at-nl = find text (char 10) from
+        if (= at-nl nothing):
+            do:
+                append out (slice text from)
+                set done true
+            do:
+                append out (slice text from at-nl)
+                set from (+ at-nl 1)
+    out
+
+; --- clipboard ----------------------------------------------------------------
+;
+; copy-text text puts text on the terminal's clipboard with OSC 52, which
+; most terminals (kitty, foot, wezterm, iTerm2, xterm with it allowed, tmux
+; with set-clipboard) honor; others ignore it.
+
+b64-chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+fun byte-at text i:
+    if (< i (length text)):
+        code text i
+        0
+
+fun mod64 n:
+    - n (* 64 (floor (/ n 64)))
+
+fun b64 n:
+    index b64-chars (+ n 0)
+
+fun base64 text:
+    out = ""
+    i = 0
+    n = length text
+    while (< i n):
+        v = + (* (byte-at text i) 65536) (* (byte-at text (+ i 1)) 256) (byte-at text (+ i 2))
+        c2 = if (< (+ i 1) n):
+            b64 (mod64 (floor (/ v 64)))
+            "="
+        c3 = if (< (+ i 2) n):
+            b64 (mod64 v)
+            "="
+        set out (concat out (b64 (floor (/ v 262144))) (b64 (mod64 (floor (/ v 4096)))) c2 c3)
+        set i (+ i 3)
+    out
+
+fun copy-text text:
+    tui-write (concat esc "]52;c;" (base64 text) (char 7))
+
+; --- screens ----------------------------------------------------------------------
+
+default-hint = "tab ↑↓ move · enter choose · space toggle · esc cancel"
+
+drawn = 0
+
+; The name of the widget that closed the last screen, nothing if cancelled.
+closed-by = nothing
+
+fun up-rows n:
+    if (> n 0):
+        cursor-up n
+        ""
+
+fun box-lines title widgets focus hint:
+    width = max (min (tui-width) 80) 20
+    inner = - width 4
+    title-text = fit (concat " " title " ") (- width 4)
+    lines = ([])
+    append lines (concat "┌─" (bold title-text) (repeat-text "─" (- width 3 (width-of title-text))) "┐")
+    i = 0
+    while (< i (length widgets)):
+        w = at widgets i
+        drawn-lines = w.draw (= i focus) inner
+        while (is-any drawn-lines):
+            line = pop-front drawn-lines
+            append lines (concat "│ " (pad-to line inner) " │")
+        set i (+ i 1)
+    append lines (concat "└" (repeat-text "─" (- width 2)) "┘")
+    append lines (dim (fit hint width))
+    lines
+
+fun paint lines:
+    out = concat (up-rows drawn) (char 13) csi "J"
+    i = 0
+    while (< i (length lines)):
+        set out (concat out (at lines i) (char 13) (char 10))
+        set i (+ i 1)
+    tui-write out
+    set drawn (length lines)
+
+fun clear-screen-area:
+    tui-write (concat (up-rows drawn) (char 13) csi "J")
+    set drawn 0
+
+fun next-focus widgets focus step:
+    n = length widgets
+    i = focus
+    found = nothing
+    tries = 0
+    while (and (= found nothing) (< tries n)):
+        set i (+ i step)
+        when (< i 0):
+            set i (- n 1)
+        when (not (< i n)):
+            set i 0
+        when (index widgets (+ i 0) "focusable"):
+            set found i
+        set tries (+ tries 1)
+    if (= found nothing):
+        focus
+        found
+
+fun run-screen title widgets (hint = default-hint):
+    focus = next-focus widgets -1 1
+    result = nothing
+    running = true
+    set drawn 0
+    tui-raw true
+    tui-write hide-cursor
+    fun step:
+        paint (box-lines title widgets focus hint)
+        key = (tui-read-key)
+        w = at widgets focus
+        action = if (index w "focusable"):
+            w.handle key
+            nothing
+        cond:
+            (= action "close") = (do (set result (w.value)) (set closed-by w.name) (set running false))
+            (<> action nothing) = nothing
+            (is-one-of key ([] "<TAB>" "<down>" "<C-n>")) = (set focus (next-focus widgets focus 1))
+            (is-one-of key ([] "<S-TAB>" "<up>" "<C-p>")) = (set focus (next-focus widgets focus -1))
+            (is-one-of key ([] "<ESC>" "<C-g>" "<C-c>" "<EOF>")) = (set running false)
+            true = nothing
+    fun loop:
+        while running:
+            (step)
+    set closed-by nothing
+    try (loop):
+        (clear-screen-area)
+        tui-write show-cursor
+        tui-raw false
+        error failure
+    (clear-screen-area)
+    tui-write show-cursor
+    tui-raw false
+    result
+
+; --- ready-made screens -----------------------------------------------------------
+
+; choose title entries: a filtered menu; the chosen entry's value or nothing.
+fun choose title entries (rows = 10) (hint = "type to filter · ↑↓ move · enter choose · esc cancel"):
+    run-screen title ([] (menu entries rows)) hint
+
+; ask title text (initial): a text field; its text, or nothing when cancelled.
+fun ask title text (initial = ""):
+    field = text-input text initial "field"
+    choice = run-screen title ([] field (button-row ([] "OK" "Cancel"))) "enter accept · tab move · esc cancel"
+    if (or (= closed-by "field") (= choice "OK")):
+        (field.value)
+        nothing
+
+; confirm title message buttons: a message and a row of buttons; the chosen
+; button's text, or nothing.
+fun confirm title message (buttons = ([] "Yes" "No")):
+    run-screen title ([] (label message) (button-row buttons)) "←→ pick · enter choose · esc cancel"
+
+export:
+    tui-read-key = tui-read-key
+    tui-write = tui-write
+    tui-raw = tui-raw
+    tui-width = tui-width
+    width-of = width-of
+    fit = fit
+    label = label
+    checkbox = checkbox
+    button = button
+    button-row = button-row
+    text-input = text-input
+    entry = entry
+    menu = menu
+    section = section
+    action = action
+    code-view = code-view
+    copy-text = copy-text
+    base64 = base64
+    run-screen = run-screen
+    closed-by = closed-by
+    choose = choose
+    ask = ask
+    confirm = confirm

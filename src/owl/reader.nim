@@ -5,6 +5,9 @@ type
   ItemKind = enum Object, Eq, Colon, Dot
 
   Item = object
+    # Set on an index call folded from dots (a.b), which in parentheses is
+    # called like a lone name: (w.f) calls the command in w's field f.
+    dotted: bool
     case kind: ItemKind
     of Object: value: objects.Object
     of Eq, Colon, Dot: discard
@@ -140,7 +143,7 @@ proc foldDots(p: var Parser, items: seq[Item]): seq[Item] =
       let target = result[^1].value
       let key = items[i + 1].value
       result.setLen(result.len - 1)
-      result.add Item(kind: Object, value: indexCall(target, key))
+      result.add Item(kind: Object, value: indexCall(target, key), dotted: true)
       i += 2
     else:
       result.add items[i]
@@ -175,7 +178,8 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
         return
       inc i
       var value = p.assemble(inner)
-      if inner.len == 1 and inner[0].kind == Object and isSymbol(value):
+      # A lone name or dotted access in parentheses is a call: (f), (w.f).
+      if inner.len == 1 and inner[0].kind == Object and (isSymbol(value) or inner[0].dotted):
         value = list(@[value])
       result.add Item(kind: Object, value: value)
     of Close:

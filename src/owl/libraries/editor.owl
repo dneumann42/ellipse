@@ -4,6 +4,7 @@ use io
 use strings
 use ansi
 use term
+use keys
 
 ; A multi-line terminal line editor with emacs keys, written on top of the
 ; term module's raw bytes. `read-code prompt continuation` edits a buffer that
@@ -17,6 +18,12 @@ use term
 ; Ctrl+Enter only reaches us as its own key when the terminal reports
 ; modifiers, so editing turns on the kitty keyboard protocol and xterm's
 ; modifyOtherKeys, and bracketed paste so pasted newlines stay text.
+;
+;
+; Keys in escape-keys (set by the caller) leave the editor without
+; submitting: read-code then gives a record with the key and the text so
+; far, and the caller can show its own screen and call read-code again with
+; that text. The repl's menu key works this way.
 ;
 ; The buffer is one string and the cursor (point) a byte offset into it that
 ; always sits on a UTF-8 character boundary.
@@ -34,7 +41,6 @@ undo-stack = ([])
 history = ([])
 history-at = 0
 draft = ""
-paste-text = ""
 last-command = ""
 this-command = ""
 done = false
@@ -44,12 +50,12 @@ continuation-text = "...  "
 prompt-width = 5
 continuation-width = 5
 drawn-row = 0
+escape-keys = ([])
 
 cr = char 13
 word-chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
 keyboard-on = concat csi ">1u" csi ">4;2m" csi "?2004h"
 keyboard-off = concat csi "<u" csi ">4m" csi "?2004l"
-paste-end = concat esc "[201~"
 undo-limit = 200
 
 ; --- small helpers -----------------------------------------------------------
@@ -484,6 +490,11 @@ fun submit:
     set outcome buf
     set done true
 
+fun escape key:
+    (finish-display)
+    set outcome ({} (key = key) (text = buf))
+    set done true
+
 fun cancel:
     set point (length buf)
     (render)
@@ -507,191 +518,11 @@ fun control-x:
         (= key "u") = (undo)
         true = nothing
 
-; --- keys ----------------------------------------------------------------------------
-;
-; read-key turns raw input bytes into one key: typed text comes back as itself
-; ("a", "é"), anything else as a name in angle brackets, emacs style:
-; "<C-a>", "<M-f>", "<C-RET>", "<left>", "<C-right>".
-
-fun is-text key:
-    not (and (> (length key) 1) (starts-with key "<"))
-
-fun read-utf8 b:
-    more = if (> b 239):
-        3
-        if (> b 223):
-            2
-            if (> b 191):
-                1
-                0
-    text = char b
-    while (> more 0):
-        c = read-byte 50
-        if (or (= c nothing) (< c 0)):
-            set more 0
-            do:
-                set text (concat text (char c))
-                set more (- more 1)
-    text
-
-fun byte-key b:
-    cond:
-        (= b 13) = "<RET>"
-        (= b 10) = "<C-j>"
-        (= b 9) = "<TAB>"
-        (= b 127) = "<DEL>"
-        (= b 8) = "<C-h>"
-        (= b 0) = "<C-SPC>"
-        (= b 31) = "<C-/>"
-        (< b 27) = (concat "<C-" (char (+ b 96)) ">")
-        (< b 32) = "<unknown>"
-        (< b 128) = (char b)
-        true = (read-utf8 b)
-
-fun meta-key key:
-    if (is-text key):
-        concat "<M-" key ">"
-        concat "<M-" (drop key 1)
-
-; The modifier parameter of a CSI key is 1 + shift(1) + alt(2) + ctrl(4).
-fun mod-prefix m:
-    bits = - m 1
-    while (> bits 7):
-        set bits (- bits 8)
-    ctrl = > bits 3
-    when ctrl:
-        set bits (- bits 4)
-    alt = > bits 1
-    when alt:
-        set bits (- bits 2)
-    shift = > bits 0
-    concat (pick ctrl "C-" "") (pick alt "M-" "") (pick shift "S-" "")
-
-fun modified name m:
-    concat "<" (mod-prefix m) name ">"
-
-; A key reported by code point, from the kitty protocol (CSI code;mod u) or
-; modifyOtherKeys (CSI 27;mod;code ~).
-fun codepoint-key cp m:
-    name = cond:
-        (= cp 13) = "RET"
-        (= cp 9) = "TAB"
-        (= cp 127) = "DEL"
-        (= cp 8) = "DEL"
-        (= cp 27) = "ESC"
-        (= cp 32) = "SPC"
-        (and (> cp 32) (< cp 127)) = (char cp)
-        true = nothing
-    prefix = mod-prefix m
-    cond:
-        (= name nothing) = "<unknown>"
-        (and (or (= prefix "") (= prefix "S-")) (= (length name) 1)) = name
-        true = (concat "<" prefix name ">")
-
-fun tilde-key n m:
-    name = cond:
-        (or (= n 1) (= n 7)) = "home"
-        (or (= n 4) (= n 8)) = "end"
-        (= n 2) = "insert"
-        (= n 3) = "delete"
-        (= n 5) = "prior"
-        (= n 6) = "next"
-        true = nothing
-    if (= name nothing):
-        "<unknown>"
-        modified name m
-
-fun param xs i fallback:
-    if (< i (length xs)):
-        nth xs i
-        fallback
-
-fun read-paste:
-    text = ""
-    finished = false
-    while (not finished):
-        b = read-byte 1000
-        if (or (= b nothing) (< b 0)):
-            set finished true
-            do:
-                set text (concat text (char b))
-                when (and (= b 126) (= (slice text (- (length text) (length paste-end))) paste-end)):
-                    set text (slice text 0 (- (length text) (length paste-end)))
-                    set finished true
-    set paste-text text
-    "<paste>"
-
-fun read-csi:
-    params = ([])
-    current = nothing
-    sub = false
-    final = nothing
-    while (= final nothing):
-        b = read-byte 50
-        if (or (= b nothing) (< b 0)):
-            set final 0
-            if (and (> b 47) (< b 58)):
-                when (not sub):
-                    set current (+ (* (pick (= current nothing) 0 current) 10) (- b 48))
-                if (= b 59):
-                    do:
-                        append params (pick (= current nothing) 1 current)
-                        set current nothing
-                        set sub false
-                    if (= b 58):
-                        set sub true
-                        when (and (> b 63) (< b 127)):
-                            set final b
-    when (<> current nothing):
-        append params current
-    p0 = param params 0 1
-    p1 = param params 1 1
-    cond:
-        (= final 117) = (codepoint-key p0 p1)
-        (and (= final 126) (= p0 27)) = (codepoint-key (param params 2 0) p1)
-        (and (= final 126) (= p0 200)) = (read-paste)
-        (= final 126) = (tilde-key p0 p1)
-        (= final 65) = (modified "up" p1)
-        (= final 66) = (modified "down" p1)
-        (= final 67) = (modified "right" p1)
-        (= final 68) = (modified "left" p1)
-        (= final 72) = (modified "home" p1)
-        (= final 70) = (modified "end" p1)
-        (= final 90) = "<S-TAB>"
-        true = "<unknown>"
-
-fun read-ss3:
-    b = read-byte 50
-    cond:
-        (= b 65) = "<up>"
-        (= b 66) = "<down>"
-        (= b 67) = "<right>"
-        (= b 68) = "<left>"
-        (= b 72) = "<home>"
-        (= b 70) = "<end>"
-        true = "<unknown>"
-
-fun read-escape:
-    b = read-byte 50
-    cond:
-        (= b nothing) = "<ESC>"
-        (< b 0) = "<ESC>"
-        (= b 91) = (read-csi)
-        (= b 79) = (read-ss3)
-        (= b 27) = "<ESC>"
-        true = (meta-key (byte-key b))
-
-fun read-key:
-    b = (read-byte)
-    cond:
-        (< b 0) = "<EOF>"
-        (= b 27) = (read-escape)
-        true = (byte-key b)
-
 ; --- key bindings ------------------------------------------------------------------------
 
 fun dispatch key:
     cond:
+        (is-one-of key escape-keys) = (escape key)
         (is-text key) = (self-insert key)
         (= key "<paste>") = (paste)
         (is-one-of key ([] "<C-RET>" "<M-RET>" "<C-j>")) = (submit)
@@ -796,13 +627,13 @@ fun edit-loop:
         when (not done):
             (render)
 
-fun read-code (prompt = "owl> ") (continuation = "...  "):
+fun read-code (prompt = "owl> ") (continuation = "...  ") (initial = ""):
     set prompt-text prompt
     set continuation-text continuation
     set prompt-width (visible-length prompt)
     set continuation-width (visible-length continuation)
-    set buf ""
-    set point 0
+    set buf initial
+    set point (length initial)
     set mark nothing
     set undo-stack ([])
     set last-command ""
@@ -824,3 +655,4 @@ fun read-code (prompt = "owl> ") (continuation = "...  "):
 
 export:
     read-code = read-code
+    escape-keys = escape-keys

@@ -442,4 +442,88 @@ f = first ([] 7 8)
 
 check("base owl merge", baseOwlWorks)
 
+proc moduleNamed(lib: Library, name: string): Module =
+  result = newModule("missing")
+  for m in lib.modules.values:
+    if m.name == name:
+      result = m
+
+# `use` shares bindings instead of copying them, so patching a module's
+# definition reaches every module and program that uses it.
+proc liveImportsWork() {.raises.} =
+  let lib = newLibrary("t19")
+  add(lib, baseModule())
+  add(lib, mathModule())
+  add(lib, newModule("shapes").addSource("""
+use math
+
+count = 0
+
+fun area w h:
+  * w h
+
+fun hidden-area w h:
+  area w h
+
+export:
+  area = area
+  boxed = hidden-area
+  count = count
+"""))
+  add(lib, newModule("report").addSource("""
+use shapes
+
+fun report w h:
+  area w h
+
+export:
+  report = report
+"""))
+  let env = runProgram(lib, parseForms("""
+use base
+use shapes
+use report
+before = report 2 3
+"""))
+  expect toNumber(value(env, "before")) == 6.0, "before the patch"
+  let shapes = moduleNamed(lib, "shapes")
+  let patch = parseForms("fun area w h:\n  + w h")
+  makeDefinition(shapes.env, patch[0], true)
+  let after = runProgram(lib, parseForms("""
+use shapes
+use report
+direct = area 2 3
+indirect = report 2 3
+renamed = boxed 2 3
+"""))
+  expect toNumber(value(after, "direct")) == 5.0, "a patched fun reaches a user of its module"
+  expect toNumber(value(after, "indirect")) == 5.0, "and a module that uses it"
+  expect toNumber(value(after, "renamed")) == 5.0, "and callers through a renamed export"
+  discard evalForms(env, parseForms("again = report 2 3"))
+  expect toNumber(value(env, "again")) == 5.0, "an env that used the module before the patch sees it"
+
+  discard evalForms(env, parseForms("set count 4"))
+  expect toNumber(exportValue(shapes, "count").get(nothing())) == 4.0,
+    "set on an imported name writes the exporting module's binding"
+  expect toNumber(value(shapes.env, "count")) == 4.0, "inside the module too"
+
+  discard evalForms(env, parseForms("area = 1"))
+  expect toNumber(value(env, "area")) == 1.0, "a definition of its own shadows an import"
+  expect isCommand(exportValue(shapes, "area").get(nothing())), "without touching the module"
+
+proc unboundExportFails() {.raises.} =
+  var raised = false
+  clearCaptured()
+  try:
+    let lib = newLibrary("t20")
+    add(lib, newModule("bad").addSource("export:\n  ghost = ghost"))
+    evaluate(lib)
+  except:
+    raised = true
+  expect raised, "exporting an unbound name fails"
+  expectError "bad exports an unbound name: ghost"
+
+check("live imports", liveImportsWork)
+check("unbound export", unboundExportFails)
+
 finish "modules"

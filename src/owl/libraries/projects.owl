@@ -1,0 +1,253 @@
+use base
+use math
+use strings
+use fs
+use modules
+
+; An owl project is a directory with a project.owl file of plain bindings:
+;
+;     name = "app"
+;     source = "src"     ; where modules live, relative to project.owl
+;     main = "main"      ; the module `owl run` starts
+;
+; Module names are paths under source without .owl: `use ui/button` is
+; src/ui/button.owl. Opening a project adds its source directory to the
+; module search paths.
+
+fun at xs i:
+    index xs (+ i 0)
+
+fun join-path a b:
+    cond:
+        (= a "") = b
+        (ends-with a "/") = (concat a b)
+        true = (concat a "/" b)
+
+; The directory part of a path: "" for a bare name, "/" for a file at the root.
+fun parent-dir path:
+    last = nothing
+    at-slash = find path "/"
+    while (<> at-slash nothing):
+        set last at-slash
+        set at-slash (find path "/" (+ at-slash 1))
+    cond:
+        (= last nothing) = ""
+        (= last 0) = "/"
+        true = (slice path 0 last)
+
+fun base-name path:
+    dir = parent-dir path
+    cond:
+        (= dir "") = path
+        (= dir "/") = (slice path 1)
+        true = (slice path (+ (length dir) 1))
+
+fun home-dir:
+    home = env-var "HOME"
+    when (or (= home nothing) (= home "")):
+        error "~ needs HOME to be set"
+    home
+
+; The parts of a path between slashes, empty parts dropped.
+fun path-parts path:
+    parts = ([])
+    from = 0
+    done = false
+    while (not done):
+        at-slash = find path "/" from
+        stop = if (= at-slash nothing):
+            length path
+            at-slash
+        part = slice path from stop
+        when (<> part ""):
+            append parts part
+        if (= at-slash nothing):
+            set done true
+            set from (+ at-slash 1)
+    parts
+
+fun drop-last xs:
+    if (is-empty xs):
+        xs
+        slice xs 0 (- (length xs) 1)
+
+; absolute-path path: path made absolute against the current directory (a
+; leading ~ is the home directory; a ~ anywhere else is refused, so a
+; directory literally named ~ is never made by accident), with . and ..
+; resolved and no trailing slash, so one directory always
+; reads the same.
+fun absolute-path path:
+    full = cond:
+        (starts-with path "/") = path
+        (or (= path "~") (starts-with path "~/")) = (concat (home-dir) (slice path 1))
+        true = (concat (current-dir) "/" path)
+    parts = path-parts full
+    kept = ([])
+    while (is-any parts):
+        part = pop-front parts
+        cond:
+            (= part "~") = (error (concat "~ is the home directory only at the start of a path: " path))
+            (= part ".") = nothing
+            (= part "..") = (set kept (drop-last kept))
+            true = (append kept part)
+    out = ""
+    while (is-any kept):
+        set out (concat out "/" (pop-front kept))
+    if (= out ""):
+        "/"
+        out
+
+; The project directory at or above dir, or nothing.
+fun find-project dir:
+    found = nothing
+    cur = dir
+    searching = true
+    while searching:
+        if (file-exists (join-path cur "project.owl")):
+            do:
+                set found cur
+                set searching false
+            do:
+                up = parent-dir cur
+                when (or (= up cur) (= up "")):
+                    set searching false
+                set cur up
+    found
+
+fun setting scope key fallback:
+    if (has-own scope key):
+        eval-in scope (at (parse key) 0)
+        fallback
+
+fun text-setting scope key fallback file:
+    v = setting scope key fallback
+    when (<> (type-of v) "string"):
+        error (concat file ": " key " must be a string, got " (to-string v))
+    v
+
+; read-project root evaluates root/project.owl and gives the project record:
+; root, file, name, source (absolute) and main.
+fun read-project root:
+    file = join-path root "project.owl"
+    scope = (new-scope)
+    forms = parse (read-file file)
+    while (is-any forms):
+        eval-in scope (pop-front forms)
+    name = text-setting scope "name" (base-name root) file
+    source = text-setting scope "source" "." file
+    main = text-setting scope "main" "main" file
+    src = if (= source "."):
+        root
+        join-path root source
+    {} (root = root) (file = file) (name = name) (source = src) (main = main)
+
+; open-project dir finds the project around dir, adds its source directory to
+; the module search paths and gives the project record, or nothing outside of
+; a project.
+fun open-project dir:
+    root = find-project dir
+    if (= root nothing):
+        nothing
+        do:
+            project = read-project root
+            add-module-path project.source
+            project
+
+; project-at dir: the project whose project.owl is in dir itself (not above
+; it), with dir made absolute. Fails when dir holds no project.owl.
+fun project-at dir:
+    root = absolute-path dir
+    when (not (file-exists (join-path root "project.owl"))):
+        error (concat "no project.owl in " root)
+    read-project root
+
+; Whether a module's file lies in the project's source directory.
+fun in-project project path:
+    and (<> path nothing) (starts-with path (concat project.source "/"))
+
+; close-project project unloads the project's modules (each gets its
+; on-unload) and takes its source directory off the search paths. Gives the
+; names it unloaded.
+fun close-project project:
+    gone = ([])
+    names = (module-names)
+    while (is-any names):
+        name = pop-front names
+        when (in-project project (module-path name)):
+            unload-module name
+            append gone name
+    remove-module-path project.source
+    gone
+
+; use-project project adds its source directory to the search paths.
+fun use-project project:
+    add-module-path project.source
+    project
+
+; The directories right under dir that hold a project.owl.
+fun projects-under dir:
+    out = ([])
+    when (dir-exists dir):
+        entries = list-dir dir
+        while (is-any entries):
+            e = pop-front entries
+            when (and (= e.kind "dir") (file-exists (join-path (join-path dir e.name) "project.owl"))):
+                append out (join-path dir e.name)
+    out
+
+; new-project dir makes a project: dir/project.owl and a main module.
+fun new-project path:
+    dir = absolute-path path
+    when (file-exists (join-path dir "project.owl")):
+        error (concat "there is a project in " dir " already")
+    name = base-name dir
+    make-dir (join-path dir "src")
+    write-file (join-path dir "project.owl") (project-template name)
+    main = join-path dir "src/main.owl"
+    when (not (file-exists main)):
+        write-file main (main-template name)
+    dir
+
+fun lines-of parts:
+    out = ""
+    while (is-any parts):
+        set out (concat out (pop-front parts) (char 10))
+    out
+
+fun project-template name:
+    lines-of ([] "; The owl project file: plain bindings, read by owl." (concat "name = " (char 34) name (char 34)) "" "; Where modules live, relative to this file: `use ui/button` is" "; src/ui/button.owl." (concat "source = " (char 34) "src" (char 34)) "" "; The module `owl run` starts." (concat "main = " (char 34) "main" (char 34)))
+
+fun main-template name:
+    lines-of ([] "use io" "" (concat "echo " (char 34) "hello from " name (char 34)))
+
+; The names of the modules under dir, sorted, as `use` would name them.
+fun modules-under dir (prefix = ""):
+    names = ([])
+    entries = list-dir dir
+    while (is-any entries):
+        e = pop-front entries
+        cond:
+            (= e.kind "dir") = (set names (concat names (modules-under (join-path dir e.name) (concat prefix e.name "/"))))
+            (and (= prefix "") (= e.name "project.owl")) = nothing
+            (ends-with e.name ".owl") = (append names (concat prefix (slice e.name 0 (- (length e.name) 4))))
+            true = nothing
+    names
+
+fun project-modules project:
+    modules-under project.source
+
+export:
+    join-path = join-path
+    parent-dir = parent-dir
+    base-name = base-name
+    find-project = find-project
+    read-project = read-project
+    open-project = open-project
+    new-project = new-project
+    project-modules = project-modules
+    absolute-path = absolute-path
+    project-at = project-at
+    in-project = in-project
+    close-project = close-project
+    use-project = use-project
+    projects-under = projects-under

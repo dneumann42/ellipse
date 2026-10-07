@@ -102,6 +102,36 @@ proc toStringBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): O
     err("to-string needs one argument")
   str(stringify(eval(args[0], env)))
 
+proc toCodeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # to-code value (width) writes value as owl code that reads back as it,
+  # broken into blocks where it would pass width columns (default 80).
+  if args.len < 1 or args.len > 2:
+    err("to-code needs a value and an optional width")
+  let value = eval(args[0], env)
+  var width = 80
+  if args.len == 2:
+    width = wholeArg(env, args[1], "to-code")
+  str(toCode(value, max(width, 20)))
+
+proc typeOfBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # type-of x names the kind of value: "number", "string", "symbol", "list",
+  # "pair", "record", "command", ... Code that reads code (see source.owl)
+  # needs it to tell a binding from a call.
+  if args.len != 1:
+    err("type-of needs one argument")
+  str(kindName(eval(args[0], env)))
+
+proc bodyStartBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # body-start form gives the position where a parsed form's ':' block begins,
+  # or nothing when it has no block.
+  if args.len != 1:
+    err("body-start needs one form")
+  let at = bodyStart(eval(args[0], env))
+  if at < 0:
+    result = nothing()
+  else:
+    result = number(float64(at))
+
 proc silentReport(msg: string) =
   discard
 
@@ -382,7 +412,7 @@ proc hasLength(o: Object): bool =
 proc lengthOf(o: Object): int =
   result = 0
   if isList(o):
-    result = toSeq(o).len
+    result = itemCount(o)
   elif isRecord(o):
     result = recordFields(o).len
   elif isString(o):
@@ -439,7 +469,7 @@ proc indexAt(o: Object, key: Object): Object {.raises.} =
   elif isRecord(o):
     result = recordFields(o)[at]
   else:
-    result = toSeq(o)[at]
+    result = itemAt(o, at)
 
 proc indexBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len < 2:
@@ -563,6 +593,9 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("try"), newBuiltin("try", tryBuiltin, false))
   define(env, symbol("char"), newBuiltin("char", charBuiltin, true))
   define(env, symbol("to-string"), newBuiltin("to-string", toStringBuiltin, true))
+  define(env, symbol("to-code"), newBuiltin("to-code", toCodeBuiltin, true))
+  define(env, symbol("type-of"), newBuiltin("type-of", typeOfBuiltin, true))
+  define(env, symbol("body-start"), newBuiltin("body-start", bodyStartBuiltin, true))
   define(env, symbol("slice"), newBuiltin("slice", sliceBuiltin, true))
   define(env, symbol("find"), newBuiltin("find", findBuiltin, true))
   define(env, symbol("code"), newBuiltin("code", codeBuiltin, true))

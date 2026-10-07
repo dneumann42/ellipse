@@ -17,7 +17,8 @@ type
     line*: int
 
 const
-  Delimiters = {' ', '\t', '(', ')', ';', ':', '=', '"'}
+  # '\r' counts as space so files with CRLF line ends read like LF ones.
+  Delimiters = {' ', '\t', '\r', '(', ')', ';', ':', '=', '"'}
   Digits = {'0' .. '9'}
 
 func indentOf*(text: string): int =
@@ -42,7 +43,7 @@ proc tokenize*(t: var Tokenizer, text: string): seq[Token] {.raises.} =
   var i = 0
   while i < text.len:
     case text[i]
-    of ' ', '\t':
+    of ' ', '\t', '\r':
       inc i
     of '(':
       result.add Token(kind: Open)

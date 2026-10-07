@@ -50,6 +50,9 @@ test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/reader_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/evaluator_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/modules_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/source_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/live_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/tui_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/clay_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/clay_dsl_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/widget_test.nim
