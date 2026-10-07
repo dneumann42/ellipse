@@ -1,0 +1,117 @@
+use base
+use math
+use strings
+use io
+use fs
+use net
+
+; The attach protocol, shared by the server in a running program (attach.owl)
+; and the repl that attaches to it.
+;
+; A running owl program listens on a unix socket, $XDG_RUNTIME_DIR/owl/<pid>.sock,
+; readable by its owner only. Each message, either way, is its length in bytes,
+; a newline, and the text. A request's text is its kind, a newline, and its
+; body:
+;
+;   hello             answers the program's name and project root, one per line
+;   input <text>      runs text as if typed at the program's own repl; answers
+;                     the active document's name, a newline, and what it printed
+;   query <code>      evaluates owl code in that session, for a repl's own
+;                     screens: answers ok or error, the active document, the
+;                     value as owl code (data only) after its length, and
+;                     what the code printed
+;   stop              closes the program's window; answers "stopping"
+;
+; One request is answered before the next is read, in order.
+
+fun runtime-dir:
+    dir = env-var "XDG_RUNTIME_DIR"
+    if (or (= dir nothing) (= dir "")):
+        concat "/tmp/owl-" (to-string (env-var "USER"))
+        dir
+
+fun socket-dir:
+    concat (runtime-dir) "/owl"
+
+fun socket-path pid:
+    concat (socket-dir) "/" (to-string pid) ".sock"
+
+fun frame-message text:
+    concat (to-string (length text)) newline text
+
+; The first whole message in buf: a record of the message and the rest of
+; buf, or nothing while it is incomplete.
+fun take-message buf:
+    nl = find buf newline
+    if (= nl nothing):
+        nothing
+        do:
+            n = index (parse (slice buf 0 nl)) 0
+            stop = + nl 1 n
+            if (< (length buf) stop):
+                nothing
+                {} (message = (slice buf (+ nl 1) stop)) (rest = (slice buf stop))
+
+fun request kind body:
+    concat kind newline body
+
+; A request's kind and body.
+fun parse-request text:
+    nl = find text newline
+    if (= nl nothing):
+        {} (kind = text) (body = "")
+        {} (kind = (slice text 0 nl)) (body = (slice text (+ nl 1)))
+
+; The pids of running programs that listen for a repl, oldest first. Sockets
+; left behind by programs that died are removed.
+fun live-pids:
+    out = ([])
+    dir = (socket-dir)
+    when (dir-exists dir):
+        entries = list-dir dir
+        while (is-any entries):
+            e = pop-front entries
+            when (ends-with e.name ".sock"):
+                pid = index (parse (slice e.name 0 (- (length e.name) 5))) 0
+                if (and (= (type-of pid) "number") (process-alive pid)):
+                    append out pid
+                    remove-file (concat dir "/" e.name)
+    out
+
+; A connection to a running program: a record of its fd, pid and the bytes
+; read past the last message, or nothing when it does not answer.
+fun connect pid:
+    fd = unix-connect (socket-path pid)
+    if (= fd nothing):
+        nothing
+        {} (fd = fd) (pid = pid) (buf = "")
+
+; exchange conn kind body sends a request and waits for its answer. Gives a
+; record of the answer (nothing when the program went away) and the
+; connection with its buffer updated.
+fun exchange conn kind body:
+    sock-write conn.fd (frame-message (request kind body))
+    buf = conn.buf
+    m = take-message buf
+    gone = false
+    while (and (= m nothing) (not gone)):
+        data = sock-read conn.fd
+        if (= data nothing):
+            set gone true
+            do:
+                set buf (concat buf data)
+                set m (take-message buf)
+    if gone:
+        {} (answer = nothing) (conn = conn)
+        {} (answer = m.message) (conn = (with conn (buf = m.rest)))
+
+export:
+    runtime-dir = runtime-dir
+    socket-dir = socket-dir
+    socket-path = socket-path
+    frame-message = frame-message
+    take-message = take-message
+    parse-request = parse-request
+    live-pids = live-pids
+    connect = connect
+    exchange = exchange

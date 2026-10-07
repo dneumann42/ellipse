@@ -170,11 +170,18 @@ proc hoistDefinitions(env: ref Environment, forms: seq[Object]) =
     if evaluator.isDefinition(f, "fun"):
       evaluator.makeDefinition(env, f, true)
 
+proc isExportAll*(f: Object): bool =
+  # `export all`: everything the module binds itself is public.
+  isExportForm(f) and bodyStart(f) < 0 and toSeq(f).len == 2 and
+    toSymbol(toSeq(f)[1]) == "all"
+
 proc registerExports(m: Module) {.raises.} =
   # Exports of a name are known before any statement runs, so a module in a
   # use cycle can already see them; the name resolves when it is used.
   for f in m.forms:
-    if isExportForm(f):
+    if isExportAll(f):
+      setExportAll(m.exports, true)
+    elif isExportForm(f):
       for e in exportEntries(f):
         if not isPair(e) or not isSymbol(car(e)):
           fail("module " & m.name & ": export needs (name = value) forms")
@@ -201,6 +208,8 @@ proc runModuleForms(m: Module, lib: Library) {.raises.} =
     if evaluator.isAnyDefinition(f):
       continue
     if isUseForm(f):
+      continue
+    if isExportAll(f):
       continue
     if isExportForm(f):
       runExportForm(m, f)

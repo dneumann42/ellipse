@@ -1,0 +1,287 @@
+use base
+use math
+use strings
+use io
+use gui
+use themes
+use memberform
+
+; Widget Gallery -- a tour of the ellipse_ui standard widget set, in owl.
+;
+; Every widget the library ships, on one scrolling page that drives
+; module-owned state through the immediate-mode round trip, plus a modal
+; form (memberform.owl) that puts most of them in a dialog at once, and the
+; quick popups -- each of which can open over the page or in a window of
+; its own. The owl twin of apps/gallery.nim.
+;
+; Run:   owl run              (in this directory), or owl repl, then run
+;        F1 in the window for the debug overlay
+;
+; The state below is plain bindings: a reload (saving a file, or patching
+; from an attached repl) keeps their values.
+
+; --- demo state: every value below is owned by this app, changed through the
+; immediate-mode round trip of the widget calls in draw-gallery --------------
+
+count = 0
+large-count = false
+show-intro = true
+
+vsync = true
+wifi = false
+
+backend = 1
+engine-modules = [] 0 2
+
+artist = "Ada Lovelace"
+notes = ""
+
+quantity = 2
+volume = 0.5
+
+theme-index = 0
+
+; dialogs open as their own windows
+own-window = false
+last-answer = ""
+
+backends = [] "OpenGL" "Vulkan" "Software"
+module-names = [] "Render" "Audio" "Input" "Networking" "Logging"
+tab-names = [] "Stats" "Session" "Actions"
+theme-names = [] "Dark (default)" "Light" "High contrast" "Warm sepia"
+
+; --- themes ------------------------------------------------------------------
+; The presets live in themes.owl. Applied every frame, so editing one shows
+; at once; setting a theme costs nothing on its own.
+
+fun apply-theme:
+    set-theme (theme-for theme-index)
+
+fun reset-all:
+    set count 0
+    set large-count false
+    set show-intro true
+    set vsync true
+    set wifi false
+    set backend 1
+    set engine-modules ([] 0 2)
+    set artist "Ada Lovelace"
+    set notes ""
+    set quantity 2
+    set volume 0.5
+    set theme-index 0
+    (apply-theme)
+
+fun member-line m:
+    line = concat m.name "  <" m.email ">  " (index role-names (+ m.role 0)) ", " (index team-names (+ m.team 0)) ", " (to-string m.hours) " h/wk"
+    when m.admin:
+        set line (concat line ", admin")
+    when m.remote:
+        set line (concat line ", remote")
+    line
+
+fun dialog-mode:
+    if own-window:
+        "window"
+        "inline"
+
+fun alert-done r:
+    set last-answer "alert closed"
+
+fun confirm-done yes:
+    set last-answer (pick-answer yes "confirm: deleted" "confirm: kept")
+
+fun pick-answer c a b:
+    if c:
+        a
+        b
+
+fun ask-done i:
+    set last-answer (concat "ask: answer #" (to-string i))
+
+fun prompt-done s:
+    set last-answer (concat "prompt: " (char 34) s (char 34))
+
+fun popup-buttons:
+    m = (dialog-mode)
+    when (button "pop-alert" "Alert" (height = 40)):
+        alert "The build finished without warnings." (title = "Build") (detail = "412 files, 3.1 s") (mode = m) (on-done = alert-done)
+    when (button "pop-confirm" "Confirm" (height = 40)):
+        confirm "Delete the 3 selected files?" confirm-done (title = "Delete") (yes = "Delete") (mode = m)
+    when (button "pop-ask" "Ask" (height = 40)):
+        ask "Save changes to notes.txt before closing?" ([] "Save" "Don't save" "Cancel") ask-done (title = "Unsaved changes") (cancel-index = 2) (mode = m)
+    when (button "pop-prompt" "Prompt" (height = 40)):
+        prompt "Name the new folder:" prompt-done (title = "New folder") (text = "Untitled") (mode = m)
+    when (button "pop-toast" "Toast" (height = 40)):
+        toast "Copied to clipboard"
+
+fun tab-actions:
+    when (button "btn-tab-reset" "Reset all"):
+        (reset-all)
+
+fun counter-font-size:
+    if large-count:
+        96
+        48
+
+; --- page scaffolding -------------------------------------------------------
+
+widget Page &body:
+    column (id = "app") (width = grow) (height = grow) (align-x = "center") (bg = "bg"):
+        (body)
+
+widget Toolbar &body:
+    tool-bar "toolbar" (body = body)
+
+; Wheel-scrollable page body: a vertical clip container whose children ride
+; the current scroll offset, with the floating scrollbar that hugs the right
+; edge whenever content overflows.
+widget Scroll &body:
+    column (id = "scroll") (width = grow) (height = grow) (padding = 28) (scroll = "y"):
+        column (id = "content") (width = (grow 0 820)) (height = fit) (gap = 10) (align-x = "center"):
+            (body)
+
+; --- the gallery itself -------------------------------------------------------
+
+fun draw-gallery:
+    Scroll:
+        heading "Widget Gallery" 1
+        overline "ellipse_ui on clay"
+        when show-intro:
+            body-text "The standard widget set of the new UI system: toggles, dropdowns, text and number entry, headings and reading text -- all immediate-mode clay layout blocks. Scroll with the wheel or drag the floating scrollbar thumbs; the File and View menus above drive this same state."
+
+        section "Theme":
+            row (id = "throw") (width = grow) (height = fit) (gap = 16) (align-y = "top"):
+                labeled "Look":
+                    sel = combo-box "combo-theme" theme-names theme-index "Pick one"
+                    when (<> sel theme-index):
+                        set theme-index sel
+                        (apply-theme)
+            caption "One combobox swaps the live theme; every widget -- menus, fields, scrollbars, this very dropdown -- reads its tokens from `activeTheme` as it renders."
+
+        section "Toggles & buttons":
+            row (id = "trow") (width = grow) (height = fit) (gap = 28) (align-y = "center"):
+                set vsync (checkbox "cb-vsync" "VSync" vsync)
+                set wifi (switch "sw-wifi" "Wifi" wifi)
+                when (button "btn-inc" "Increment" (height = 48)):
+                    set count (+ count 1)
+                badge "beta"
+
+        section "Dropdowns":
+            row (id = "drow") (width = grow) (height = fit) (gap = 16) (align-y = "top"):
+                labeled "Renderer backend":
+                    set backend (combo-box "combo-backend" backends backend "Pick one")
+                labeled "Engine modules":
+                    set engine-modules (multi-select "multi-modules" module-names engine-modules "None selected")
+
+        section "Text entry":
+            row (id = "trow2") (width = grow) (height = fit) (gap = 16) (align-y = "top"):
+                labeled "Artist":
+                    set artist (text-field "tf-artist" artist "Your name")
+                labeled "Notes":
+                    set notes (multiline-field "tf-notes" notes "Leave a note..." (rows = 3) (max-lines = 6))
+            caption "Enter commits, Escape reverts, a click outside commits too. Caret and selection live in the widget; the text is yours. Notes grows with each new line up to six, then scrolls."
+            caption "Emacs bindings: C-a/C-e line edges, C-b/C-f chars, M-b/M-f words, Up/Down and C-p/C-n lines, C-k/C-u/C-w/M-d kill, C-y yank, C-d/C-h delete, Enter commit, C-g or Escape cancel."
+
+        section "Numbers":
+            row (id = "nrow") (width = grow) (height = fit) (gap = 16) (align-y = "top"):
+                labeled "Quantity":
+                    set quantity (int-number-field "nf-qty" quantity 1)
+                labeled "Volume (0..1, step 0.05)":
+                    set volume (number-field "nf-vol" volume 0.05 0 1)
+            label "Counter -- driven by the File menu, too"
+            row (id = "counter") (width = grow) (height = fit) (gap = 12) (align-y = "center"):
+                text (to-string count) (counter-font-size)
+                row (id = "buttons") (gap = 8):
+                    when (button "dec" "Decrement" (height = 44)):
+                        set count (- count 1)
+                    when (button "inc" "Increment" (height = 44)):
+                        set count (+ count 1)
+
+        section "Tabs & cards":
+            caption "A TabbedView container: the strip swaps whole pages, and cards frame the controls on them."
+            row (id = "tabwrap") (width = grow) (height = 250):
+                tabbed-view "gallery-tabs" tab-names:
+                    page = active-tab "gallery-tabs"
+                    if (= page 0):
+                        card-row:
+                            stat-card "Count" (to-string count) "menu or buttons"
+                            stat-card "Quantity" (to-string quantity) ""
+                            stat-card "Modules" (to-string (length engine-modules)) (concat "of " (to-string (length module-names)))
+                        if (= page 1):
+                            card "Session" (actions = slot):
+                                body-text "Cards hug their content; the empty `actions` slot costs nothing."
+                                set wifi (switch "sw-tab" "Wifi" wifi)
+                            card "Actions" (actions = tab-actions):
+                                body-text "The header's right edge is the `actions` slot -- here a button that resets the gallery."
+
+        section "Scrolling containers":
+            caption "Clip containers with floating scrollbars: grab a thumb and drag, click a bare track to jump, or spin the wheel -- the feel ramps up with velocity, glides to a stop, and springs at the ends."
+            row (id = "scrow") (width = grow) (height = 240) (gap = 16) (align-y = "top"):
+                column (id = "vpanel") (width = (pct 0.5)) (height = grow) (gap = 2) (padding = (pad-item)) (bg = "field") (border = (hairline)) (border-color = "panel-border") (corner = (panel-radius)) (scroll = "y"):
+                    r = 0
+                    while (< r 24):
+                        list-row "vpanel.row" r:
+                            text (concat "Module entry " (to-string r)) 16
+                        set r (+ r 1)
+                column (id = "hwrap") (width = grow) (height = grow) (gap = 6):
+                    label "Horizontal strip"
+                    row (id = "hstrip") (width = grow) (height = grow) (gap = 10) (padding = 8) (bg = "field") (border = (hairline)) (border-color = "panel-border") (corner = (panel-radius)) (scroll = "x"):
+                        c = 0
+                        while (< c 10):
+                            list-card "hstrip.card" c 150:
+                                text (concat "Card " (to-string c))
+                            set c (+ c 1)
+
+        section "Dialogs":
+            caption "A modal form: text, combos, a multiselect, number fields, switches and checkboxes in one dialog, validated on submit. Escape, Cancel or a click on the backdrop discards the draft; Enter (outside the bio) submits."
+            caption "With the switch on, every dialog here opens as a window of its own: a child process parented to this window, whose answer comes back serialized."
+            set own-window (switch "sw-ownwin" "Open dialogs in their own window" own-window)
+            row (id = "dlgrow") (width = grow) (height = fit) (gap = 16) (align-y = "center"):
+                when (button "btn-member" "Add team member..." (height = 44)):
+                    begin-member-form (dialog-mode)
+                badge (concat (to-string (length members)) " added")
+            label "Quick popups"
+            row (id = "poprow") (width = grow) (height = fit) (gap = 10) (align-y = "center"):
+                (popup-buttons)
+            when (> (length last-answer) 0):
+                caption (concat "Last answer -- " last-answer)
+            if (is-empty members):
+                caption "Nobody yet -- members you add show up here."
+                do:
+                    i = 0
+                    while (< i (length members)):
+                        list-row "members.row" i:
+                            text (member-line (index members (+ i 0))) 15
+                        set i (+ i 1)
+
+        row (id = "footer") (width = grow) (height = fit) (gap = 14) (align-y = "center"):
+            when (text-link "lnk-intro" "Toggle intro"):
+                set show-intro (not show-intro)
+            badge (pick-answer vsync "vsync on" "vsync off")
+
+fun view:
+    (apply-theme)
+    Page:
+        Toolbar:
+            menu "File":
+                when (menu-item "Increment" "Ctrl++"):
+                    set count (+ count 1)
+                when (menu-item "Decrement" "Ctrl+-"):
+                    set count (- count 1)
+                (menu-separator)
+                when (menu-item "Scroll to top"):
+                    set-scroll-position "scroll"
+                when (menu-item "Add team member..."):
+                    (begin-member-form)
+                when (menu-item "Reset gallery"):
+                    (reset-all)
+            menu "View":
+                when (menu-item "Intro text"):
+                    set show-intro (not show-intro)
+                when (menu-item "Large count"):
+                    set large-count (not large-count)
+        (draw-gallery)
+
+run-app (title = "Widget Gallery"):
+    (view)

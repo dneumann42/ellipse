@@ -132,6 +132,50 @@ proc bodyStartBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): 
   else:
     result = number(float64(at))
 
+proc syntaxFormBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # syntax-form x: the code a command argument was written as. A command
+  # that rewrites code (see `widget` in gui.owl) reads its arguments so.
+  if args.len != 1:
+    err("syntax-form needs one argument")
+  let v = eval(args[0], env)
+  result = if isSyntax(v): syntaxForm(v) else: v
+
+proc syntaxScopeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # syntax-scope x: the scope a command argument was written in, for
+  # eval-in and make-definition.
+  if args.len != 1:
+    err("syntax-scope needs one argument")
+  let v = eval(args[0], env)
+  let scope = syntaxScope(v)
+  if scope == nil:
+    err("syntax-scope needs a command argument, got " & stringify(v))
+    result = nothing()
+  else:
+    result = scopeValue(scope)
+
+proc withBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # with r (name = value)...: r with those fields replaced, or added when r
+  # has none of that name. Records are values; this gives a new one.
+  if args.len < 1:
+    err("with needs a record")
+  let r = eval(args[0], env)
+  if not isRecord(r):
+    err("with needs a record, got " & stringify(r))
+  var fields = recordFields(r)
+  for i in 1 ..< args.len:
+    let f = args[i]
+    if not isPair(f) or not isSymbol(car(f)):
+      err("with needs (name = value) changes")
+    let value = eval(cdr(f), env)
+    var found = false
+    for j in 0 ..< fields.len:
+      if car(fields[j]) == car(f):
+        fields[j] = pair(car(f), value)
+        found = true
+    if not found:
+      fields.add pair(car(f), value)
+  record(fields)
+
 proc silentReport(msg: string) =
   discard
 
@@ -596,6 +640,9 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("to-code"), newBuiltin("to-code", toCodeBuiltin, true))
   define(env, symbol("type-of"), newBuiltin("type-of", typeOfBuiltin, true))
   define(env, symbol("body-start"), newBuiltin("body-start", bodyStartBuiltin, true))
+  define(env, symbol("syntax-form"), newBuiltin("syntax-form", syntaxFormBuiltin, true))
+  define(env, symbol("syntax-scope"), newBuiltin("syntax-scope", syntaxScopeBuiltin, true))
+  define(env, symbol("with"), newBuiltin("with", withBuiltin, false))
   define(env, symbol("slice"), newBuiltin("slice", sliceBuiltin, true))
   define(env, symbol("find"), newBuiltin("find", findBuiltin, true))
   define(env, symbol("code"), newBuiltin("code", codeBuiltin, true))

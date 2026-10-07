@@ -9,6 +9,8 @@ import ../logger
 import ./pacing
 export pacing
 import ./layershell
+import ./fdwatch
+export fdwatch
 export layershell
 
 const
@@ -702,7 +704,11 @@ proc pumpEvents(app: var PlatformApplication) =
       let kb = cast[ptr SDL_KeyboardEvent](addr event)[]
       discard info("sdl-event ", $kind, " sc=", $kb.scancode, " key=",
         $kb.key, " mod=", $kb.modifiers)
-    if kind == EventQuit or kind == EventTerminating or kind == EventWindowCloseRequested:
+    if kind != 0'u32 and kind == fdWakeEventType():
+      # A watched descriptor is readable (see `fdwatch`): its callback runs
+      # here, between frames.
+      runReadyFds()
+    elif kind == EventQuit or kind == EventTerminating or kind == EventWindowCloseRequested:
       app.running = false
       wake()
     elif kind == EventWindowPixelResized:

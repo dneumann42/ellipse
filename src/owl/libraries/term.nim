@@ -1,5 +1,6 @@
 import std/syncio
 import owl/[objects, evaluator, modules]
+import ./io
 
 # The terminal primitives owl cannot express itself. Key decoding, editing and
 # drawing live in owl (see editor.owl); this is only the system boundary.
@@ -53,6 +54,9 @@ proc writeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
   var text = ""
   for a in args:
     text.add stringify(eval(a, env))
+  if capturing():
+    captureText(text)
+    return nothing()
   # echo goes through stdout's buffer; flush it so output stays in order
   flushFile(stdout)
   if text.len > 0:

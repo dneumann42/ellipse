@@ -6,6 +6,36 @@ proc defaultOutput*(s: string) =
 
 var outputWriter*: proc(s: string) = defaultOutput
 
+# capture-output: while it runs, echo and term's write go into a buffer
+# instead of the terminal. The attach server answers a remote repl so.
+var captures*: seq[string] = @[]
+
+proc capturing*(): bool = captures.len > 0
+
+proc captureText*(s: string) =
+  if captures.len > 0:
+    captures[^1].add s
+
+proc captureLine(s: string) =
+  captureText(s & "\n")
+
+proc captureOutputBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # capture-output f: calls f and gives what it printed, as one string.
+  if args.len != 1:
+    err("capture-output needs a fun")
+  let f = eval(args[0], env)
+  let saved = outputWriter
+  outputWriter = captureLine
+  captures.add ""
+  var text = ""
+  try:
+    discard invoke(f, @[])
+  finally:
+    outputWriter = saved
+    text = captures[^1]
+    captures.setLen(captures.len - 1)
+  result = str(text)
+
 proc printBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   var parts: seq[string] = @[]
   for a in args:
@@ -30,6 +60,7 @@ proc installIo*(env: ref Environment) =
   define(env, symbol("newline"), str("\n"))
   define(env, symbol("print"), newBuiltin("print", printBuiltin, true))
   define(env, symbol("echo"), newBuiltin("echo", printBuiltin, true))
+  define(env, symbol("capture-output"), newBuiltin("capture-output", captureOutputBuiltin, true))
   define(env, symbol("readline"), newBuiltin("readline", readlineBuiltin, true))
 
 proc ioModule*(): Module =

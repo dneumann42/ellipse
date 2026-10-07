@@ -327,6 +327,12 @@ proc request(inst: Instance; name: string): Fields =
   result.put("modal", inst.modal)
   result.put("title", inst.title)
 
+var dialogLauncher*: seq[string] = @[]
+  ## The command a window dialog's process starts with, before its
+  ## `--ellipse-dialog=` argument; empty means this executable alone. A
+  ## host that runs programs (an interpreter) puts its own command here,
+  ## so the child runs the same program.
+
 proc open*(d: Dialog; args = Fields(); mode = dmInline;
            onDone: nil DialogDone = nil; title = "";
            modal = true) =
@@ -350,9 +356,12 @@ proc open*(d: Dialog; args = Fields(); mode = dmInline;
   installDialogKeys()
   requestFrame()
   if mode == dmWindow:
-    let exe = getAppFilename()
     let req = request(inst, d.name)
-    var child = spawnProcess(@[exe, DialogFlag & encode(req)])
+    var cmd = dialogLauncher
+    if cmd.len == 0:
+      cmd = @[getAppFilename()]
+    cmd.add DialogFlag & encode(req)
+    var child = spawnProcess(cmd)
     if child.running:
       inst.child = child
       if modal:

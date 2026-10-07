@@ -21,6 +21,9 @@ type
   Exports* = object
     env: ref Environment
     names: Table[Object, Object]
+    # `export all`: every binding of the module's own scope is public too,
+    # including ones made after the use (a repl document grows).
+    all: bool
 
   ObjectKind = enum
     Nothing
@@ -736,7 +739,12 @@ proc newEnvironment*(up: nil ref Environment = nil): ref Environment =
     redirectFrom: nil, redirectTo: nil, imports: @[])
 
 proc newExports*(env: ref Environment): ref Exports =
-  (ref Exports)(env: env, names: initTable[Object, Object]())
+  (ref Exports)(env: env, names: initTable[Object, Object](), all: false)
+
+proc setExportAll*(x: ref Exports, on: bool) =
+  x.all = on
+
+proc exportsAll*(x: ref Exports): bool = x.all
 
 proc exportName*(x: ref Exports, public, internal: Object) =
   x.names[public] = internal
@@ -745,6 +753,10 @@ proc exportedNames*(x: ref Exports): seq[Object] =
   result = @[]
   for name in x.names.keys:
     result.add name
+  if x.all:
+    for name in x.env.bindings.keys:
+      if not x.names.hasKey(name):
+        result.add name
 
 proc exportsEnv*(x: ref Exports): ref Environment =
   x.env
@@ -821,6 +833,9 @@ proc findCell(env: nil ref Environment, name: Object, depth: int,
           let found = findCell(x.env, x.names.getOrDefault(name, name), depth + 1, key)
           if found != nil:
             return found
+        elif x.all and x.env.bindings.hasKey(name):
+          key = name
+          return x.env
         dec i
     cur = cur.up
   return nil
@@ -855,5 +870,7 @@ proc assign*(env: ref Environment, name, value: Object): bool =
 proc lookupExport*(x: ref Exports, name: Object): Option[Object] =
   if x.names.hasKey(name):
     result = lookup(x.env, x.names.getOrDefault(name, name))
+  elif x.all and x.env.bindings.hasKey(name):
+    result = some(x.env.bindings.getOrDefault(name, nothing()))
   else:
     result = none[Object]()

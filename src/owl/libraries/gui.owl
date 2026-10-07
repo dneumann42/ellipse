@@ -1,0 +1,429 @@
+use base
+use math
+use strings
+use io
+use fs
+use modules
+use live
+use projects
+use net
+use attach
+
+; Owl apps on the ellipse_ui toolkit. The builtins (gui.nim) are the toolkit
+; itself: row, column, text, the stock widgets, event frames and the frame
+; loop. This half is what owl adds on top: `widget`, `run-app`, and the
+; reloading and repl serving a running app does.
+;
+;   use gui
+;
+;   count = 0
+;
+;   widget focusable Counter label n:
+;       emits Bumped by
+;       row (gap = 8) (align-y = "center"):
+;           text (concat label ": " (to-string n))
+;           when (button (concat id ".more") "+1"):
+;               emit Bumped (by = 1)
+;
+;   fun view:
+;       handle-events:
+;           event Bumped e:
+;               set count (+ count e.by)
+;           column (padding = 24):
+;               Counter "clicks" "Clicks" count
+;
+;   run-app (title = "Counter"):
+;       (view)
+;
+; run-app calls its block every frame, so redefining view (or anything it
+; calls) changes the next frame, and module state lives in plain bindings,
+; which a reload keeps.
+
+; --- widgets ------------------------------------------------------------------
+;
+; `widget` is the owl port of ellipse_ui's `widget` macro: it rewrites a
+; definition into a fun whose body runs inside an event frame, shared with
+; the Nim widgets, so events bubble through owl and Nim widgets alike.
+;
+;   widget focusable Toggle label on:
+;       emits Toggled              ; a stock event: fields id and on
+;       event Toggled e:           ; catch it here first...
+;           set e (with e (on = (and e.on enabled)))
+;           reemit                 ; ...and pass it on, changed
+;       row (id = id) (focus-ring = id):
+;           text label
+;       when (or (clicked id) (activated id)):
+;           emit Toggled (id = id) (on = (not on))
+;
+;   widget Settings &body:
+;       emits SettingsChanged
+;       event Toggled e:
+;           emit SettingsChanged   ; starts at Settings' parent frame
+;       (body)
+;
+; - `focusable` adds an id parameter first and (tab-index = 0) last, and
+;   registers the widget on the Tab chain before its body runs.
+; - `emits Name field...` declares an event and its fields; a bare
+;   `emits Name` names one declared elsewhere (the stock ones: Pressed,
+;   Toggled, Picked, TextChanged, TextCommitted, NumberChanged, MenuPicked).
+;   An `emit` of an event the widget does not declare is refused when the
+;   widget is defined.
+; - `event Name e:` sections are the widget's handlers. A handler consumes
+;   the event unless it calls reemit; `set e` changes what is passed on.
+; - A parameter written &name is the slot the call's `:` block fills; a slot
+;   left empty draws nothing. Other slots are passed by name as funs.
+; - The widget gives back its body's last value, like a fun.
+;
+; (widget-code Name) shows the fun a widget became.
+
+widget-codes = ([])
+
+fun slot:
+    nothing
+
+fun at xs i:
+    index xs (+ i 0)
+
+fun is-head form word:
+    and (= (type-of form) "list") (and (is-any form) (= (to-string (index form 0)) word))
+
+fun contains xs x:
+    found = false
+    i = 0
+    while (< i (length xs)):
+        when (= (at xs i) x):
+            set found true
+        set i (+ i 1)
+    found
+
+fun unwrap-all xs:
+    out = ([])
+    i = 0
+    while (< i (length xs)):
+        append out (syntax-form (at xs i))
+        set i (+ i 1)
+    out
+
+fun spaces n:
+    out = ""
+    while (< (length out) n):
+        set out (concat out " ")
+    out
+
+; Code for forms, one per line, every line indented by n.
+fun block-code forms n:
+    out = ""
+    pad = spaces n
+    i = 0
+    while (< i (length forms)):
+        code = to-code (at forms i) (- 120 n)
+        from = 0
+        done = false
+        while (not done):
+            nl = find code newline from
+            line = if (= nl nothing):
+                slice code from
+                slice code from nl
+            set out (concat out pad line newline)
+            if (= nl nothing):
+                set done true
+                set from (+ nl 1)
+        set i (+ i 1)
+    out
+
+fun param-name p:
+    if (= (type-of p) "pair"):
+        to-string (index p 0)
+        to-string p
+
+fun param-code p:
+    name = param-name p
+    cond:
+        (= (type-of p) "pair") = (concat "(" (to-code p) ")")
+        (starts-with name "&") = (concat "(" name " = slot)")
+        true = name
+
+fun declare-emits widget-name form:
+    when (< (length form) 2):
+        error (concat "widget " widget-name ": emits needs an event name")
+    name = to-string (at form 1)
+    fields = ([])
+    i = 2
+    while (< i (length form)):
+        append fields (to-string (at form i))
+        set i (+ i 1)
+    when (is-any fields):
+        define-event name fields
+    name
+
+; Every `emit` in forms must name one of emits, as the Nim macro checks.
+fun check-emits widget-name forms emits:
+    stack = forms
+    while (is-any stack):
+        f = pop-front stack
+        t = type-of f
+        when (= t "pair"):
+            append stack (index f 1)
+        when (= t "list"):
+            when (and (is-head f "emit") (> (length f) 1)):
+                name = to-string (at f 1)
+                when (not (contains emits name)):
+                    error (concat "widget " widget-name " emits " name " without declaring it: add `emits " name "`")
+            set stack (concat stack f)
+
+; As in the Nim macro, a bare `reemit` line in a handler is the call
+; (reemit): a lone name on a line would only read the value.
+fun call-reemit code:
+    lines = split-code-lines code
+    out = ""
+    while (is-any lines):
+        line = pop-front lines
+        if (= (trim-left line) "reemit"):
+            set out (concat out (slice line 0 (- (length line) 6)) "(reemit)" newline)
+            set out (concat out line newline)
+    out
+
+fun trim-left s:
+    i = 0
+    while (and (< i (length s)) (= (index s (+ i 0)) " ")):
+        set i (+ i 1)
+    slice s i
+
+fun split-code-lines code:
+    out = ([])
+    from = 0
+    done = false
+    while (not done):
+        nl = find code newline from
+        if (= nl nothing):
+            do:
+                when (< from (length code)):
+                    append out (slice code from)
+                set done true
+            do:
+                append out (slice code from nl)
+                set from (+ nl 1)
+    out
+
+fun handler-code f:
+    name = to-string (at f 1)
+    bs = body-start f
+    when (= bs nothing):
+        error (concat "event " name " needs a block: event " name " e:")
+    param = if (> bs 2):
+        to-string (at f 2)
+        "e"
+    concat "    fun widget-on-" name " " param ":" newline (call-reemit (block-code (slice f bs) 8)) "        " param newline
+
+fun widget-source name focusable params emits handlers rest:
+    names = ([])
+    i = 0
+    while (< i (length params)):
+        append names (param-name (at params i))
+        set i (+ i 1)
+    has-id = or focusable (contains names "id")
+    head = concat "fun " name
+    when (and focusable (not (contains names "id"))):
+        set head (concat head " id")
+    set i 0
+    while (< i (length params)):
+        set head (concat head " " (param-code (at params i)))
+        set i (+ i 1)
+    when (and focusable (not (contains names "tab-index"))):
+        set head (concat head " (tab-index = 0)")
+    out = concat head ":" newline
+    when focusable:
+        set out (concat out "    register-focus id tab-index" newline)
+    table = "([]"
+    set i 0
+    while (< i (length handlers)):
+        h = at handlers i
+        ename = to-string (at h 1)
+        set out (concat out (handler-code h))
+        set table (concat table " ([] " (char 34) ename (char 34) " widget-on-" ename ")")
+        set i (+ i 1)
+    set table (concat table ")")
+    body = if (is-empty rest):
+        concat "        nothing" newline
+        block-code rest 8
+    id-code = if has-id:
+        "id"
+        "nothing"
+    concat out "    fun widget-body:" newline body "    widget-frame " (char 34) name (char 34) " " id-code " " table " widget-body" newline
+
+command widget head+ &body:
+    words = unwrap-all head
+    when (is-empty words):
+        error "widget needs a name: widget Name params...:"
+    where = syntax-scope (at head 0)
+    focusable = false
+    when (= (to-string (at words 0)) "focusable"):
+        set focusable true
+        pop-front words
+    name = to-string (pop-front words)
+    emits = ([])
+    handlers = ([])
+    rest = ([])
+    forms = unwrap-all body
+    while (is-any forms):
+        f = pop-front forms
+        cond:
+            (is-head f "emits") = (append emits (declare-emits name f))
+            (is-head f "event") = (append handlers f)
+            true = (append rest f)
+    check-emits name rest emits
+    check-emits name handlers emits
+    code = widget-source name focusable words emits handlers rest
+    make-definition where (at (parse code) 0)
+    remember-widget name code
+    nothing
+
+fun remember-widget name code:
+    kept = ([])
+    while (is-any widget-codes):
+        w = pop-front widget-codes
+        when (<> w.name name):
+            append kept w
+    append kept ({} (name = name) (code = code))
+    set widget-codes kept
+
+fun widget-code name:
+    found = nothing
+    i = 0
+    while (< i (length widget-codes)):
+        when (= (index widget-codes (+ i 0) "name") name):
+            set found (index widget-codes (+ i 0) "code")
+        set i (+ i 1)
+    found
+
+; --- colours and theme tokens ----------------------------------------------------
+
+fun rgb r g b (a = 255):
+    {} (r = r) (g = g) (b = b) (a = a)
+
+; The tokens ellipse_ui reads often, as it spells them (padItem, hairline,
+; panelRadius, itemRadius); the rest are in (theme).
+fun pad-item:
+    (theme).metrics.pad-item
+
+fun hairline:
+    (theme).metrics.border-hairline
+
+fun panel-radius:
+    (theme).radii.panel
+
+fun item-radius:
+    (theme).radii.item
+
+; --- running an app ------------------------------------------------------------
+;
+; run-app opens the window and runs the frame loop until it closes. While it
+; runs, the app:
+;   - serves repls on its socket: `owl repl`, then `attach` (see wire.owl);
+;   - reloads a project module whose file changes on disk (live.owl keeps
+;     the state of its bindings), so saving in any editor shows at once.
+; Both wait on the frame loop's fd watching: an idle app stays asleep.
+;
+; A reload that reruns this statement (its text changed) only swaps in the
+; new block and title; the loop keeps running.
+
+fun run-app (title = "owl") (width = 1280) (height = 720) (debug = true) &view:
+    config = {} (title = title) (width = width) (height = height) (debug = debug)
+    cond:
+        app-running = (gui-run config view)
+        (is-dialog-process) = (gui-run config view)
+        true = (serve-app config view)
+
+app-running = false
+
+; The app proper (not a dialog's own process): repls and file watching
+; around the frame loop.
+fun serve-app config view:
+    set app-running true
+    host = {} (watch = watch-fd) (unwatch = unwatch-fd) (quit = quit-app) (status = frame-error) (after = after-frame)
+    server = try (serve-attach host):
+        echo (concat "owl: no repl socket: " failure)
+        nothing
+    watcher = (watch-project)
+    gui-run config view
+    set app-running false
+    when (<> server nothing):
+        stop-attach server
+
+; The project around the current directory, its source directory watched.
+fun watch-project:
+    root = find-project (current-dir)
+    if (= root nothing):
+        nothing
+        do:
+            project = read-project root
+            watch-source project.source
+
+fun watch-source source:
+    fd = (watch-open)
+    dirs = ([])
+    fun add-dir dir prefix:
+        wd = watch-add fd dir
+        append dirs ({} (watch = wd) (prefix = prefix))
+        entries = list-dir dir
+        while (is-any entries):
+            e = pop-front entries
+            when (= e.kind "dir"):
+                add-dir (join-path dir e.name) (concat prefix e.name "/")
+    fun prefix-of wd:
+        found = ""
+        i = 0
+        while (< i (length dirs)):
+            when (= (index dirs (+ i 0) "watch") wd):
+                set found (index dirs (+ i 0) "prefix")
+            set i (+ i 1)
+        found
+    fun on-change:
+        changes = watch-read fd
+        names = ([])
+        while (is-any changes):
+            c = pop-front changes
+            when (ends-with c.name ".owl"):
+                name = concat (prefix-of c.watch) (slice c.name 0 (- (length c.name) 4))
+                when (not (contains names name)):
+                    append names name
+        while (is-any names):
+            reload-changed (pop-front names)
+    add-dir source ""
+    watch-fd fd on-change
+    fd
+
+fun reload-changed name:
+    when (has-module name):
+        try (report-reload name (reload-module name)):
+            echo (concat "owl: reloading " name " failed: " failure)
+
+fun report-reload name s:
+    parts = ([])
+    when (is-any s.defined):
+        append parts (concat "defined " (to-string s.defined))
+    when (is-any s.bound):
+        append parts (concat "bound " (to-string s.bound))
+    when (is-any s.removed):
+        append parts (concat "removed " (to-string s.removed))
+    when (is-any s.kept):
+        append parts (concat "kept the running value of " (to-string s.kept) " (rerun it to take the file's)")
+    when (> s.ran 0):
+        append parts (concat "ran " (to-string s.ran))
+    when (is-any parts):
+        line = concat "owl: reloaded " name ":"
+        while (is-any parts):
+            set line (concat line " " (pop-front parts))
+        echo line
+
+export:
+    widget = widget
+    widget-code = widget-code
+    slot = slot
+    rgb = rgb
+    pad-item = pad-item
+    hairline = hairline
+    panel-radius = panel-radius
+    item-radius = item-radius
+    run-app = run-app
+    watch-project = watch-project

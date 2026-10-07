@@ -161,7 +161,9 @@ proc moduleExportBuiltin(env: ref Environment, args: seq[Object], bodyStart: int
   nothing()
 
 proc moduleClearExportsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
-  clearExportNames(moduleArg(env, args, "module-clear-exports").exports)
+  let m = moduleArg(env, args, "module-clear-exports")
+  clearExportNames(m.exports)
+  setExportAll(m.exports, false)
   nothing()
 
 proc hasOwnBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
@@ -207,6 +209,11 @@ proc scopeNamesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int):
       names.add str(toSymbol(name))
   list(names)
 
+proc moduleExportAllBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # module-export-all name: `export all` for module name.
+  setExportAll(moduleArg(env, args, "module-export-all").exports, true)
+  nothing()
+
 proc installLoader*(env: ref Environment) =
   define(env, symbol("load-module"), newBuiltin("load-module", loadModuleBuiltin, true))
   define(env, symbol("new-module"), newBuiltin("new-module", newModuleBuiltin, true))
@@ -227,6 +234,7 @@ proc installLoader*(env: ref Environment) =
   define(env, symbol("module-use"), newBuiltin("module-use", moduleUseBuiltin, true))
   define(env, symbol("module-clear-uses"), newBuiltin("module-clear-uses", moduleClearUsesBuiltin, true))
   define(env, symbol("module-export"), newBuiltin("module-export", moduleExportBuiltin, true))
+  define(env, symbol("module-export-all"), newBuiltin("module-export-all", moduleExportAllBuiltin, true))
   define(env, symbol("module-clear-exports"), newBuiltin("module-clear-exports", moduleClearExportsBuiltin, true))
   define(env, symbol("has-own"), newBuiltin("has-own", hasOwnBuiltin, true))
   define(env, symbol("scope-names"), newBuiltin("scope-names", scopeNamesBuiltin, true))

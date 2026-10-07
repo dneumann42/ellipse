@@ -59,12 +59,63 @@ proc restName(p: Object): Object =
     if text.len > 1 and text.endsWith("+"):
       result = symbol(text[0 ..< text.len - 1])
 
-proc bindParams(cmd: Object, argObjs: seq[Object], callerEnv: ref Environment,
-    child: ref Environment) {.raises.} =
+proc blockParam(params: seq[Object]): int =
+  # The position of the parameter written `&name`, which takes the call's
+  # `:` block, or -1.
+  result = -1
+  for i in 0 ..< params.len:
+    var name = params[i]
+    if isPair(name):
+      name = car(name)
+    let text = toSymbol(name)
+    if text.len > 1 and text[0] == '&':
+      return i
+
+proc blockName(p: Object): Object =
+  var name = p
+  if isPair(p):
+    name = car(p)
+  symbol(toSymbol(name)[1 ..< toSymbol(name).len])
+
+proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
+    child: ref Environment, bodyStart: int) {.raises.} =
   # A fun gets its arguments' values. A command gets them unevaluated: as
   # syntax that remembers the caller's scope, or, for a dynamic-command, as
   # bare forms that its body evaluates in its own (the caller's) scope.
-  let params = cmdParams(cmd)
+  #
+  # A parameter written `&name` takes the forms of the call's `:` block. A
+  # fun gets them as a closure over the caller's scope, (name) runs them;
+  # a command gets the list of forms (syntax, for a hygienic one). Without
+  # a block it can still be passed by name, or keeps its default.
+  var params = cmdParams(cmd)
+  var argObjs = allArgs
+  let blockAt = blockParam(params)
+  if blockAt >= 0:
+    let blockSym = blockName(params[blockAt])
+    let blockDefault = params[blockAt]
+    var kept: seq[Object] = @[]
+    for i in 0 ..< params.len:
+      if i != blockAt:
+        kept.add params[i]
+    params = kept
+    if bodyStart >= 0 and bodyStart < allArgs.len:
+      argObjs = allArgs[0 ..< bodyStart]
+      let forms = allArgs[bodyStart ..< allArgs.len]
+      if isFun(cmd):
+        define(child, blockSym, newCommand("", @[], forms, callerEnv, true))
+      elif not isDynamic(cmd):
+        var wrapped: seq[Object] = @[]
+        for x in forms:
+          wrapped.add syntax(x, callerEnv)
+        define(child, blockSym, list(wrapped))
+      else:
+        define(child, blockSym, list(forms))
+    elif isPair(blockDefault):
+      params.add pair(blockSym, cdr(blockDefault))
+    elif isFun(cmd):
+      params.add pair(blockSym, symbol("nothing"))
+    else:
+      define(child, blockSym, list(@[]))
   let hygienic = not isFun(cmd) and not isDynamic(cmd)
   var fixed = params.len
   var rest = nothing()
@@ -137,8 +188,22 @@ proc apply(cmd: Object, callerEnv: ref Environment, args: seq[Object],
   let child = newEnvironment(upEnv)
   if not isFun(cmd) and not isDynamic(cmd):
     setCaller(child, callerEnv)
-  bindParams(cmd, args, callerEnv, child)
+  bindParams(cmd, args, callerEnv, child, bodyStart)
   evalForms(child, cmdBody(cmd))
+
+proc invoke*(cmd: Object, values: seq[Object]): Object {.raises.} =
+  ## Call a command value from Nim with already evaluated arguments: each
+  ## one is reached through a name in a scratch scope, so a fun sees the
+  ## values as they are (a list is not run as a call).
+  if not isCommand(cmd):
+    err("cannot call " & stringify(cmd) & ", it is not a command")
+  let scratch = newEnvironment()
+  var args: seq[Object] = @[]
+  for i in 0 ..< values.len:
+    let name = symbol("arg" & $i)
+    define(scratch, name, values[i])
+    args.add name
+  apply(cmd, scratch, args, args.len)
 
 proc evalForms*(env: ref Environment, forms: seq[Object]): Object {.raises.} =
   result = nothing()

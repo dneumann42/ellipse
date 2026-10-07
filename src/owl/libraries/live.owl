@@ -49,7 +49,7 @@ fun run-hooks name event summary:
         set i (+ i 1)
 
 fun is-definition item:
-    or (= item.kind "fun") (or (= item.kind "command") (= item.kind "dynamic-command"))
+    or (= item.kind "fun") (or (= item.kind "command") (or (= item.kind "dynamic-command") (= item.kind "widget")))
 
 fun form-of item:
     at (parse item.code) 0
@@ -81,6 +81,11 @@ fun apply-use name item:
 fun apply-export name item:
     scope = module-scope name
     form = form-of item
+    if (and (= (length form) 2) (= (to-string (at form 1)) "all")):
+        module-export-all name
+        apply-export-entries name scope form
+
+fun apply-export-entries name scope form:
     i = 1
     while (< i (length form)):
         entry = at form i
@@ -99,6 +104,7 @@ fun apply-item name item:
     cond:
         (= item.kind "use") = (apply-use name item)
         (= item.kind "export") = (apply-export name item)
+        (= item.kind "widget") = (eval-in (module-scope name) (form-of item))
         (is-definition item) = (make-definition (module-scope name) (form-of item))
         true = (eval-in (module-scope name) (form-of item))
 

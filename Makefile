@@ -1,4 +1,4 @@
-.PHONY: clean setup cli run run_gallery run_tome build_owl run_owl run_duck run_bar test
+.PHONY: clean setup cli run run_gallery run_tome build_owl run_owl run_duck run_bar test run_owl_gallery gallery_parity
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -31,7 +31,7 @@ APPS_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 	@:
 endif
 
-bin/owl: setup
+bin/owl: setup $(wildcard src/owl/*.nim src/owl/*/*.nim src/owl/*/*.owl src/owl/*/*.c)
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/owl/owl.nim
 
 build_owl: bin/owl
@@ -39,13 +39,19 @@ build_owl: bin/owl
 run_owl: bin/owl
 	./bin/owl $(ARGS) $(APPS_ARGS)
 
+run_owl_gallery: bin/owl
+	cd apps/owl-gallery && ../../bin/owl run
+
+gallery_parity: bin/owl
+	./tests/gallery_cmp/run.sh
+
 bin/duck: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./apps/duck.nim
 
 run_duck: bin/duck
 	./bin/duck $(ARGS) $(APPS_ARGS)
 
-test: setup
+test: setup bin/owl
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/objects_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/reader_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/evaluator_test.nim
@@ -68,6 +74,10 @@ test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/fields_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/dialogs_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/dialog_header_test.nim
+	SDL_VIDEODRIVER=offscreen ./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/fdwatch_test.nim
+	SDL_VIDEODRIVER=offscreen ./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/gui_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/attach_test.nim
+	python3 -I ./tests/repl_screens_test.py
 
 bin/bar: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./apps/bar.nim

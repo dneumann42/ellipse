@@ -59,6 +59,16 @@ proc fileExistsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int):
     err("file-exists needs one path")
   boolean(fileExists(pathArg(env, args, "file-exists")))
 
+proc c_unlink(path: cstring): int32 {.importc: "unlink", header: "<unistd.h>".}
+
+proc removeFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # remove-file path deletes a file (or socket); a missing one is no error.
+  if args.len != 1:
+    err("remove-file needs one path")
+  var path = pathArg(env, args, "remove-file")
+  discard c_unlink(path.toCString)
+  nothing()
+
 proc dirExistsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len != 1:
     err("dir-exists needs one path")
@@ -157,6 +167,7 @@ proc installFs*(env: ref Environment) =
   define(env, symbol("read-file"), newBuiltin("read-file", readFileBuiltin, true))
   define(env, symbol("write-file"), newBuiltin("write-file", writeFileBuiltin, true))
   define(env, symbol("file-exists"), newBuiltin("file-exists", fileExistsBuiltin, true))
+  define(env, symbol("remove-file"), newBuiltin("remove-file", removeFileBuiltin, true))
   define(env, symbol("dir-exists"), newBuiltin("dir-exists", dirExistsBuiltin, true))
   define(env, symbol("list-dir"), newBuiltin("list-dir", listDirBuiltin, true))
   define(env, symbol("make-dir"), newBuiltin("make-dir", makeDirBuiltin, true))

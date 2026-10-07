@@ -39,6 +39,8 @@
 ## `run` shows that one dialog in a window of its own instead of the app,
 ## and exits when it closes.
 
+import std/envvars
+
 import clay
 import ellipse/logger
 import ellipse/platform/platform
@@ -125,6 +127,16 @@ proc runDialogProcess(app: App) {.raises.} =
   start(frame, render)
   endDialogProcess()
 
+proc shotScript(path: string): AppFn =
+  ## `ELLIPSE_SCREENSHOT=<path>`: a few frames to settle, the picture saved
+  ## as a BMP, then out -- for comparing apps headless
+  ## (`SDL_VIDEODRIVER=offscreen`).
+  result = proc () {.closure, raises.} =
+    for i in 0 ..< 6:
+      frame()
+    if not saveScreenshot(path, bg = activeTheme.palette.bg):
+      discard error("could not write the screenshot ", path)
+
 proc run*(app: App; script: nil AppFn = nil) =
   ## `launch` the app and hand it to the paced loop until the window
   ## closes. With a `script` the loop is skipped and the script runs
@@ -136,8 +148,11 @@ proc run*(app: App; script: nil AppFn = nil) =
       runDialogProcess(app)
       return
     launch(app)
+    let shot = getEnv("ELLIPSE_SCREENSHOT")
     if script != nil:
       script()
+    elif shot.len > 0:
+      shotScript(shot)()
     else:
       start(frame, render)
   except ErrorCode:

@@ -33,8 +33,9 @@ written in owl.
 | project     | project.owl, module name <-> file, =owl new=           | libraries/projects.owl | done    |
 | live        | reload/patch/rerun/drop a loaded module, hooks        | libraries/live.owl     | done    |
 | documents   | repl document model and commands                      | scripts/repl.owl       | done    |
-| runner      | repl hosts the app; patches at a safe point           | owl + small Nim hook   | planned |
-| attach      | socket protocol to a running owl program              | Nim socket prims + owl | planned |
+| gui         | ellipse_ui apps: widget, events, run-app              | gui.owl + gui.nim      | done    |
+| runner      | =run= starts the app; it serves repls between frames  | repl.owl, fdwatch      | done    |
+| attach      | socket protocol to a running owl program              | wire/attach.owl + net  | done    |
 | tui         | item browser, document view                           | owl (editor, ansi)     | planned |
 
 * Source items (done)
@@ -172,6 +173,11 @@ is a command name.
 | =rerun <key>=            | evaluate an item again                            |
 | =reload [module]=        | re-read a module from its file, keeping state     |
 | =modules=                | loaded modules and the project's modules          |
+| =run=                    | start the project's app and attach to it          |
+| =apps=                   | list running owl programs                         |
+| =attach [pid]=           | send input to a running program instead           |
+| =detach=                 | leave it running and work here again              |
+| =stop=                   | close the attached program                        |
 
 A statement is recorded by what it changed, not as history (=run-statement=
 in =live.owl=). The module's own bindings are compared before and after:
@@ -214,23 +220,82 @@ In the repl:
   ask before leaving with unsaved documents.
 - =exit= or C-d with unsaved documents offers Save all / Leave / Stay.
 
-* Next phases
+* GUI projects
 
-** Runner and attach
-- One protocol, two transports. A request is (module, owl text, mode: eval,
-  patch or query). A response is the printed result or the error.
-- Runner: =owl repl --run= starts the project's main module under the repl.
-  Requests queue, and the app drains them at a safe point (a frame boundary
-  or idle). The evaluator stays single-threaded, so it needs no locks.
-- Attach: the running program serves the same requests on a unix socket
-  (=$XDG_RUNTIME_DIR/owl/<pid>.sock=, mode 0600), and =owl attach [pid]= is
-  a repl whose eval goes over the socket. This needs Nim primitives for
-  non-blocking listen/accept/read/write; the protocol and server are owl.
+=owl new <dir> gui= (or =new-project <dir> gui= in the repl) makes a
+project whose =project.owl= says =kind = "gui"=: =src/main.owl= opens a
+window with =run-app= and uses =src/widgets.owl=. The app is built on
+ellipse_ui itself (=libraries/gui.nim= is a bridge to it; ellipse knows
+nothing of owl), and the owl half, =libraries/gui.owl=, adds:
+
+- =widget [focusable] Name params...:= -- the port of ellipse_ui's
+  =widget= macro, as a command that rewrites the definition into a =fun=
+  whose body runs in an event frame shared with the Nim widgets. =emits
+  Name field...=, =event Name e:= handlers, =emit Name (f = v)=, =reemit=
+  and =handle-events:= behave as in =docs/ui.org=: bubbling through owl and
+  Nim widgets alike, a handler consuming unless it reemits, =set e (with e
+  ...)= changing what a reemit passes on, an emit in a handler starting at
+  the parent frame. An undeclared emit is refused when the widget is
+  defined. =widget-code Name= shows what a widget became. =widget= items
+  are definitions to the live layer, so patching one replaces it.
+- =run-app (title = ...): body= runs the frame loop and calls its body
+  every frame. State is plain bindings (a reload keeps them); redefining
+  =view= or a widget changes the next frame. A view that fails is shown
+  over the window and retried each frame, so the fix brings it back.
+- A parameter written =&name= (evaluator) takes the call's =:= block: a
+  fun gets a closure over the caller's scope, a command the forms. Widgets
+  use it for their block slot.
+- =export all= makes a module public as it grows. Documents the repl
+  makes in a project carry it, and a document saved into the project for
+  the first time joins main's uses, so the app runs what the session
+  builds.
+
+* Runner and attach
+
+A running owl app serves repls on a unix socket,
+=$XDG_RUNTIME_DIR/owl/<pid>.sock= (mode 0600). The protocol and server are
+owl (=wire.owl=, =attach.owl=): length-prefixed messages; =hello=, =input
+<text>= (runs as typed at the app's own repl session, answers the active
+document and the printed output) and =stop=. The app's session is its own
+repl state (=serve-input= in =repl.owl=), not a terminal, with the main
+module as the active document. Any number of repls may attach, one after
+another or at once, and leave with =detach=; the session and its state
+stay.
+
+The app never waits on a repl. ellipse's frame loop sleeps in SDL's event
+queue; =ellipse/platform/fdwatch= adds a helper thread that =poll()=s the
+watched descriptors (the listening socket, each client, an inotify
+descriptor) and pushes one SDL event when one is readable, so the request
+runs on the main thread between frames and an idle app stays at 0 frames.
+An input's answer is sent after the next frame, so it can say whether that
+frame's view failed.
+
+The app also watches its source directory (inotify) and reloads a module
+whose file is saved, keeping state, so any editor works too.
+
+While attached, the repl's screens still run on its own terminal: =items=
+(the cursorable item view, with edit, copy, drop and rerun), =results=
+(F2), =settings=, the F1 menu and every argument picker. They read and
+change the app's documents through a =query= request, which evaluates owl
+code in the app's session and returns the value as data along with what it
+printed; locally the same code runs in this repl's session.
+=tests/repl_screens_test.py= drives them on a pseudo-terminal, both ways.
+
+=run= in the repl saves the project's documents, starts =owl run= in the
+project root as its own process (output to
+=$XDG_RUNTIME_DIR/owl/<name>.log=) and attaches. Editing happens in the
+repl process, so the app's frame loop never slows the prompt down, and the
+app keeps running after the repl leaves. =detach= reads back documents the
+app saved.
 
 ** Known gaps
 - A reload that fails part way leaves the scope partly updated and the text
   unchanged. A dry run against a scratch scope first would make it atomic.
 - =on-unload= runs only when a project switch unloads a module; there is
   no command to unload a single module.
+- A directory created under =src/= while the app runs is not watched
+  until it restarts.
+- Attach and file watching are POSIX only (Linux tested); on Windows the
+  net module and fd watching are stubs.
 - Interpreter speed: symbol lookups hash strings, and command bodies are
   copied per call. Listing an 826-line module takes about 0.2s.

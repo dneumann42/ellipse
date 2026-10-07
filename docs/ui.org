@@ -168,3 +168,48 @@ GNOME (Mutter) doesn't implement the protocol. There, and on X11 and
 Windows, the same config opens a borderless always-on-top window of the
 dock's shape. It doesn't reserve screen space, and it logs that. =docked()=
 reports which one you got.
+
+* Owl apps
+
+owl drives the same toolkit: =use gui= in an owl module gives =row=,
+=column=, =text=, the stock widgets (=button=, =checkbox=, =switch=,
+=text-field=, =number-field=, =combo-box=, =tab-strip=, =card=,
+=section=, menus...), the =widget= command and events. Owl widgets open
+the same event frames as Nim ones, and the stock events (=Pressed=,
+=Toggled=, ...) reach owl handlers as records. See =docs/repl.org= ("GUI
+projects", "Runner and attach") and =src/owl/libraries/gui.owl=.
+
+#+begin_src owl
+
+  widget focusable Toggle label on:
+      emits Toggled
+      row (id = id) (focus-ring = id) (padding = 6):
+          text label
+      when (or (clicked id) (activated id)):
+          emit Toggled (id = id) (on = (not on))
+
+  widget Settings &body:
+      emits SettingsChanged
+      event Toggled e:
+          emit SettingsChanged
+      (body)
+
+  fun view:
+      handle-events:
+          event SettingsChanged e:
+              (save-settings)
+          Settings:
+              Toggle "wifi" "Wifi" wifi
+
+#+end_src
+
+=apps/owl-gallery= is the widget gallery (=apps/gallery.nim=) written in
+owl, as a project: =make run_owl_gallery=, or =owl repl= there, then
+=run=, to edit it live. =make gallery_parity= drives both through the
+same clicks and keys and requires every screenshot to match byte for byte.
+=ELLIPSE_SCREENSHOT=<file.bmp>= makes any app save its settled first frame
+and exit.
+
+Watching file descriptors from the frame loop (=ellipse/platform/fdwatch=)
+is what lets a running owl app answer repls and reload saved files without
+running frames while idle; it is plain ellipse API, open to Nim apps too.

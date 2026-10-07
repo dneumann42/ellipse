@@ -954,4 +954,40 @@ let fnEnv = runOk("fun twice x:\n  * x 2", "")
 expect toCode(value(fnEnv, "twice"), 80) == "fun twice x:\n    * x 2",
   "a fun prints as its definition: " & toCode(value(fnEnv, "twice"), 80)
 
+# A parameter written &name takes the call's `:` block: a fun gets a closure
+# over the caller's scope, a command the forms.
+let blockEnv = runOk("""fun twice-run &body:
+    (body)
+    (body)
+fun wrap label (&inner = empty):
+    concat label (pick-or (inner) "")
+fun empty:
+    nothing
+fun pick-or v d:
+    if (= v nothing):
+        d
+        v
+n = 0
+twice-run:
+    set n (+ n 1)
+seen = wrap "a":
+    "b"
+plain = wrap "c"
+fun give-e:
+    "e"
+named = wrap "d" (inner = give-e)
+command forms-of x &body:
+    length body
+count = forms-of 1:
+    echo "x"
+    echo "y"
+none = forms-of 1
+""", "")
+expect toNumber(value(blockEnv, "n")) == 2.0, "the block closure ran twice and set the caller's n"
+expect toStr(value(blockEnv, "seen")) == "ab", "the block's value comes back: " & stringify(value(blockEnv, "seen"))
+expect toStr(value(blockEnv, "plain")) == "c", "without a block the default is kept"
+expect toStr(value(blockEnv, "named")) == "de", "a block parameter can be passed by name"
+expect toNumber(value(blockEnv, "count")) == 2.0, "a command gets the block's forms"
+expect toNumber(value(blockEnv, "none")) == 0.0 or value(blockEnv, "none") == nothing(), "no block, no forms"
+
 finish "evaluator"

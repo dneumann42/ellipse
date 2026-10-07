@@ -94,12 +94,24 @@ fun symbol-text x:
         to-string x
         nothing
 
+; A widget (gui.owl) is a definition too: `widget Name ...:` or
+; `widget focusable Name ...:`.
+fun widget-name form:
+    n = length form
+    first = if (> n 1):
+        symbol-text (at form 1)
+        nothing
+    if (and (= first "focusable") (> n 2)):
+        symbol-text (at form 2)
+        first
+
 fun list-info form:
     head = symbol-text (at form 0)
     n = length form
     defines = and (or (= head "fun") (or (= head "command") (= head "dynamic-command"))) (and (> n 2) (<> (symbol-text (at form 1)) nothing))
     cond:
         (and defines (<> (body-start form) nothing)) = ({} (kind = head) (name = (symbol-text (at form 1))))
+        (and (= head "widget") (and (<> (body-start form) nothing) (<> (widget-name form) nothing))) = ({} (kind = "widget") (name = (widget-name form)))
         (= head "use") = ({} (kind = "use") (name = nothing))
         (= head "export") = ({} (kind = "export") (name = nothing))
         true = ({} (kind = "statement") (name = nothing))
