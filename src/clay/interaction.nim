@@ -400,6 +400,16 @@ func openElementId*(ctx: Context): uint32 =
   ## The id of the innermost open element -- the seed for `localId`.
   ctx.elements[ctx.openStack[^1]].id
 
+func enclosingZIndex*(ctx: Context): int16 =
+  ## The `zIndex` of the innermost open floating element, 0 outside any --
+  ## so a floating child can stack relative to the layer it is declared
+  ## in (a scrollbar inside a modal panel, say) instead of a fixed number.
+  result = 0
+  for i in countdown(ctx.openStack.high, 0):
+    let el = ctx.elements[ctx.openStack[i]]
+    if isFloatingEl(el):
+      return el.decl.floating.zIndex
+
 func localId*(label: string; seed: uint32): ElementId =
   ## Hash `label` relative to `seed` -- typically `openElementId(ctx)` -- so
   ## repeated subtrees get collision-free ids without string building. This

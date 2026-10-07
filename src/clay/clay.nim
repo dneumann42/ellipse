@@ -82,6 +82,7 @@ proc setLayoutDimensions*(dims: Size) = setLayoutDimensions(currentContext(), di
 proc layoutDimensions*(): Size = layoutDimensions(currentContext())
 proc takeErrors*(): seq[ErrorData] = takeErrors(currentContext())
 proc openElementId*(): uint32 = openElementId(currentContext())
+proc enclosingZIndex*(): int16 = enclosingZIndex(currentContext())
 proc currentScrollOffset*(): Vec2 = currentScrollOffset(currentContext())
 
 proc localId*(label: string): ElementId =

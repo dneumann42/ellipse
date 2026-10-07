@@ -168,6 +168,10 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
   if not geom.scrollable:
     return
 
+  # Above the page's content, and above whatever floating layer (a modal
+  # panel, a dropdown) the container itself is declared in.
+  let z = max(220'i16, min(enclosingZIndex(), 32765'i16) + 1'i16)
+
   let trackId = localId(if axis == vertical: "sb.vtrack" else: "sb.htrack",
     id.id)
   let thumbId = localId(if axis == vertical: "sb.vthumb" else: "sb.hthumb",
@@ -191,7 +195,7 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
       lerp(style.track, style.thumb, 0.35'f32) else: style.track)
     .corner(style.radius)
     .floating(attachElementId,
-      offset = offset, zIndex = 220, points = points,
+      offset = offset, zIndex = z, points = points,
       parentId = container.id, clipTo = clipToAttachedParent))
   if clickedIn(trackId):
     let local = pointerAlong(axis) -
@@ -215,7 +219,7 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
       style.thumbHot else: style.thumb)
     .corner(style.radius)
     .floating(attachElementId,
-      offset = toffset, zIndex = 221, points = points,
+      offset = toffset, zIndex = z + 1, points = points,
       parentId = container.id, clipTo = clipToAttachedParent))
   if pressedNow() and pointerOver(thumbId) and geom.track > geom.thumb:
     let grab = pointerAlong(axis) -

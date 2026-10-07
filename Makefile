@@ -1,19 +1,21 @@
-.PHONY: clean setup run run_tome run_owl run_duck run_bar test
+.PHONY: clean setup run run_gallery run_tome run_owl run_duck run_bar test
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
 
-bin/ellipse: setup
-	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/ellipse.nim
+bin/gallery: setup
+	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./apps/gallery.nim
 
 bin/tome: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/tome.nim
 
-build: bin/ellipse
+build: bin/gallery
 	@echo "Finish building ellipse"
 
-run: build 
-	./bin/ellipse
+run: run_gallery
+
+run_gallery: bin/gallery
+	./bin/gallery
 
 run_tome: bin/tome
 	./bin/tome
