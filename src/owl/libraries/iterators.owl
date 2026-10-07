@@ -2,17 +2,19 @@ use base
 use math
 
 ; An iterator is a closure that returns the next value when called,
-; and nothing once it is out of items. `for` consumes one.
+; and nothing once it is out of items. `for` consumes one. Each pass runs in
+; its own `do` scope, so the loop variable and anything the body defines
+; exist only for that pass.
 command for name iter body+:
     it = eval iter
     v = (it)
     while (not (= v nothing)):
         do:
-            eval (pair (eval (quote name)) v)
+            bind name v
             forms = body
             while (not (= (length forms) 0)):
                 eval (pop-front forms)
-            v = (it)
+            set v (it)
 
 fun range from (to = nothing):
     i = if (= to nothing):

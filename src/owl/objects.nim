@@ -4,6 +4,12 @@ type
   Environment* = object
     up: nil ref Environment
     bindings: Table[Object, Object]
+    # Set on a hygienic command's frame: the scope it was called from.
+    caller: nil ref Environment
+    # Set on a `do` scope inside a command: while it runs, syntax written in
+    # redirectFrom evaluates in redirectTo, a fresh child of the caller's scope.
+    redirectFrom: nil ref Environment
+    redirectTo: nil ref Environment
 
   ObjectKind = enum
     Nothing
@@ -15,6 +21,8 @@ type
     Pair
     Record
     Command
+    Syntax
+    Scope
 
   Object* = object
     case kind: ObjectKind
@@ -41,7 +49,16 @@ type
       body: seq[Object]
       env: nil ref Environment
       isFun: bool
+      dynamic: bool
       call: CommandProc
+    of Syntax:
+      # An unevaluated argument of a command together with the scope it was
+      # written in, so evaluating it never sees the command's own names.
+      form: nil ref Object
+      scope: nil ref Environment
+    of Scope:
+      # A scope as a value, from new-scope, for eval-in.
+      scopeRef: nil ref Environment
 
   CommandProc* = nil proc (env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.}
 
@@ -74,9 +91,15 @@ func record*(fields: seq[Object]): Object =
   Object(kind: Record, fields: fields)
 
 func newCommand*(name: string, params, body: seq[Object], env: nil ref Environment,
-    isFun: bool): Object =
+    isFun: bool, dynamic: bool = false): Object =
   Object(kind: Command, name: name, params: params, body: body, env: env, isFun: isFun,
-    call: nil)
+    dynamic: dynamic, call: nil)
+
+func syntax*(form: Object, scope: ref Environment): Object =
+  Object(kind: Syntax, form: box(form), scope: scope)
+
+func scopeValue*(env: ref Environment): Object =
+  Object(kind: Scope, scopeRef: env)
 
 func newBuiltin*(name: string, call: CommandProc, isFun: bool): Object =
   Object(kind: Command, name: name, isFun: isFun, call: call)
@@ -90,6 +113,29 @@ func isList*(o: Object): bool = o.kind == List
 func isPair*(o: Object): bool = o.kind == Pair
 func isRecord*(o: Object): bool = o.kind == Record
 func isCommand*(o: Object): bool = o.kind == Command
+func isSyntax*(o: Object): bool = o.kind == Syntax
+
+func scopeEnv*(o: Object): nil ref Environment =
+  result = nil
+  if o.kind == Scope:
+    result = o.scopeRef
+
+func syntaxForm*(o: Object): Object =
+  result = nothing()
+  if o.kind == Syntax:
+    let f = o.form
+    if f != nil:
+      result = f[]
+
+func syntaxScope*(o: Object): nil ref Environment =
+  result = nil
+  if o.kind == Syntax:
+    result = o.scope
+
+func isDynamic*(o: Object): bool =
+  result = false
+  if o.kind == Command:
+    result = o.dynamic
 
 func bodyStart*(o: Object): int =
   result = -1
@@ -232,8 +278,12 @@ func `==`*(a, b: Object): bool =
   of Nothing:
     result = true
   of Command:
-    result = a.name == b.name and a.isFun == b.isFun and a.env == b.env and
-      (a.call == b.call or (a.call != nil and b.call != nil))
+    result = a.name == b.name and a.isFun == b.isFun and a.dynamic == b.dynamic and
+      a.env == b.env and (a.call == b.call or (a.call != nil and b.call != nil))
+  of Syntax:
+    result = a.scope == b.scope and syntaxForm(a) == syntaxForm(b)
+  of Scope:
+    result = a.scopeRef == b.scopeRef
   of Number:
     result = a.number == b.number
   of String:
@@ -298,6 +348,10 @@ func hash*(o: Object): Hash =
   of Command:
     result = result !& hash(o.name)
     result = result !& hash(o.isFun)
+  of Syntax:
+    result = result !& hash(syntaxForm(o))
+  of Scope:
+    discard
   result = !$result
 
 func `$`*(o: Object): string =
@@ -307,6 +361,10 @@ func `$`*(o: Object): string =
     discard
   of Command:
     result.add ", name: " & o.name
+  of Syntax:
+    result.add ", form: " & $syntaxForm(o)
+  of Scope:
+    discard
   of Number:
     result.add ", number: " & $o.number
   of String:
@@ -401,11 +459,45 @@ func stringify*(o: Object): string =
       result.add " "
       result.add stringifyArg(o.fields[i])
   of Command:
-    let kw = if o.isFun: "fun" else: "command"
+    let kw = if o.isFun: "fun" elif o.dynamic: "dynamic-command" else: "command"
     result = "<" & kw & " " & o.name & ">"
+  of Syntax:
+    result = stringify(syntaxForm(o))
+  of Scope:
+    result = "<scope>"
 
 proc newEnvironment*(up: nil ref Environment = nil): ref Environment =
-  (ref Environment)(up: up, bindings: initTable[Object, Object]())
+  (ref Environment)(up: up, bindings: initTable[Object, Object](), caller: nil,
+    redirectFrom: nil, redirectTo: nil)
+
+proc setCaller*(frame: ref Environment, caller: ref Environment) =
+  frame.caller = caller
+
+proc setRedirect*(env: ref Environment, source, target: ref Environment) =
+  env.redirectFrom = source
+  env.redirectTo = target
+
+# The scope the nearest enclosing hygienic command was called from, or nil
+# outside of any command.
+proc commandCaller*(env: ref Environment): nil ref Environment =
+  result = nil
+  var cur: nil ref Environment = env
+  while cur != nil:
+    let c = cur.caller
+    if c != nil:
+      return c
+    cur = cur.up
+
+# Where syntax written in scope should evaluate when seen from env: the
+# nearest `do` redirect for that scope, or the scope itself.
+proc resolveScope*(env: ref Environment, scope: ref Environment): ref Environment =
+  result = scope
+  var cur: nil ref Environment = env
+  while cur != nil:
+    let target = cur.redirectTo
+    if cur.redirectFrom == scope and target != nil:
+      return target
+    cur = cur.up
 
 proc define*(env: ref Environment, name, value: Object) =
   env.bindings[name] = value

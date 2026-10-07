@@ -1,3 +1,106 @@
 use io
 use base
+use math
+use strings
+use iterators
+use cmdline
+use ansi
+use term
+use editor
+use program
 
+; An interactive read-eval-print loop. Each input is parsed and its forms are
+; evaluated in the session scope, so bindings, funs and commands made at the
+; prompt stay around for later inputs.
+;
+; On a terminal input comes from the editor module: a multi-line buffer with
+; emacs keys, where RET adds a line and C-RET (or M-RET, C-j) runs it. When
+; input is piped, lines are read plainly; a line ending in ':' opens a block
+; that runs to the next empty line.
+
+interactive = (is-terminal)
+
+; Inputs are evaluated here, a scope of their own that lasts the whole
+; session, so definitions carry over and never touch the repl's own names.
+session = (new-scope)
+
+; Styles text only on a terminal, so piped output stays plain.
+fun styled f text:
+    if interactive:
+        f text
+        text
+
+fun prompt:
+    styled bold (fg "blue" "owl> ")
+
+fun continuation:
+    styled dim "...  "
+
+fun is-blank s:
+    i = 0
+    blank = true
+    while (< i (length s)):
+        if (= (index s (+ i 0)) " "):
+            set i (+ i 1)
+            do:
+                set blank false
+                set i (length s)
+    blank
+
+fun is-done input:
+    or (= input nothing) (or (= input "exit") (= input "quit"))
+
+fun read-block first:
+    text = first
+    line = readline "...  "
+    while (and (<> line nothing) (not (is-blank line))):
+        do:
+            set text (concat text newline line)
+            set line (readline "...  ")
+    text
+
+fun read-plain:
+    first = readline "owl> "
+    if (or (= first nothing) (not (ends-with first ":"))):
+        first
+        read-block first
+
+fun read-input:
+    if interactive:
+        read-code (prompt) (continuation)
+        (read-plain)
+
+fun show value:
+    when (<> value nothing):
+        echo (styled dim "=>") value
+
+fun show-error message:
+    label = if interactive:
+        bold (fg "red" "error:")
+        "error:"
+    echo label message
+
+fun repl:
+    if interactive:
+        echo (dim "owl repl. Enter adds a line, Ctrl+Enter runs (or Alt+Enter, Ctrl+J). Ctrl+D leaves.")
+        echo "owl repl. Type exit or press ctrl-d to leave."
+    running = true
+    forms = ([])
+    while running:
+        input = (read-input)
+        if (is-done input):
+            do:
+                when (= input nothing):
+                    echo ""
+                set running false
+            do:
+                set forms ([])
+                try (set forms (parse input)):
+                    show-error failure
+                while (is-any forms):
+                    try (show (eval-in session (pop-front forms))):
+                        show-error failure
+                        set forms ([])
+
+export:
+    repl = repl

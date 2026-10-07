@@ -15,28 +15,157 @@ proc evalBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   let syntax = eval(args[0], env)
   eval(syntax, env)
 
+proc parseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len != 1:
+    err("parse needs one string")
+  let source = eval(args[0], env)
+  if not isString(source):
+    err("parse needs a string, got " & stringify(source))
+  let parsed = parseOwl(toStr(source))
+  if not parsed.isOk:
+    err("parse error: " & parsed.error("unknown"))
+  list(parsed.get(@[]))
+
+proc charBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # char 27 gives the one-character string with that byte, for the control
+  # characters that owl string literals cannot spell.
+  if args.len != 1:
+    err("char needs one number")
+  let code = eval(args[0], env)
+  if not isNumber(code):
+    err("char needs a number, got " & stringify(code))
+  let n = toNumber(code)
+  if n < 0.0 or n > 255.0 or n != float64(int64(n)):
+    err("char needs a whole number from 0 to 255, got " & stringify(code))
+  var s = " "
+  s[0] = char(int(n))
+  str(s)
+
+proc wholeArg(env: ref Environment, form: Object, what: string): int {.raises.} =
+  let v = eval(form, env)
+  if not isNumber(v) or toNumber(v) != float64(int64(toNumber(v))):
+    err(what & " needs a whole number, got " & stringify(v))
+  int(toNumber(v))
+
+proc sliceBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # slice x from (to) copies x[from ..< to] of a string or list; to defaults
+  # to the end. Both ends are clamped into range.
+  if args.len < 2 or args.len > 3:
+    err("slice needs a string or list, a start and an optional end")
+  let x = eval(args[0], env)
+  if not isString(x) and not isList(x):
+    err("slice needs a string or list, got " & stringify(x))
+  let n = if isString(x): toStr(x).len else: toSeq(x).len
+  var a = wholeArg(env, args[1], "slice")
+  var b = if args.len == 3: wholeArg(env, args[2], "slice") else: n
+  a = max(0, min(a, n))
+  b = max(a, min(b, n))
+  if isString(x):
+    result = str(toStr(x)[a ..< b])
+  else:
+    let items = toSeq(x)
+    var part: seq[Object] = @[]
+    for i in a ..< b:
+      part.add items[i]
+    result = list(part)
+
+proc findBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # find s needle (start) gives the position of needle in s at or after start,
+  # or nothing when it does not occur.
+  if args.len < 2 or args.len > 3:
+    err("find needs a string, a needle and an optional start")
+  let s = eval(args[0], env)
+  let needle = eval(args[1], env)
+  if not isString(s) or not isString(needle):
+    err("find needs strings, got " & stringify(s) & " and " & stringify(needle))
+  let start = if args.len == 3: wholeArg(env, args[2], "find") else: 0
+  let at = find(toStr(s), toStr(needle), max(start, 0))
+  if at < 0:
+    result = nothing()
+  else:
+    result = number(float64(at))
+
+proc codeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # code s (at) gives the byte at position at (default 0) as a number.
+  if args.len < 1 or args.len > 2:
+    err("code needs a string and an optional position")
+  let s = eval(args[0], env)
+  if not isString(s):
+    err("code needs a string, got " & stringify(s))
+  let at = if args.len == 2: wholeArg(env, args[1], "code") else: 0
+  if at < 0 or at >= toStr(s).len:
+    err("code position out of range: " & $at)
+  number(float64(ord(toStr(s)[at])))
+
+proc toStringBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  if args.len != 1:
+    err("to-string needs one argument")
+  str(stringify(eval(args[0], env)))
+
+proc silentReport(msg: string) =
+  discard
+
+proc blockScope(env: ref Environment): ref Environment =
+  # Every block (do, if, when, while, cond and try bodies) runs in its own
+  # scope: what it defines ends with it, while set still reaches outer names.
+  newEnvironment(env)
+
+proc callerBlockScope(env: ref Environment): ref Environment =
+  # A do inside a command also opens a scope on the caller's side, a fresh
+  # child of the caller's scope, where the command's syntax arguments
+  # evaluate and bind while the block runs. That is how `for` gives each pass
+  # its own loop variable. Other blocks leave the caller's side alone, so a
+  # command's own loops and branches never split its caller's code apart.
+  result = newEnvironment(env)
+  let caller = commandCaller(env)
+  if caller != nil:
+    setRedirect(result, caller, newEnvironment(resolveScope(env, caller)))
+
+proc tryBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # try expr...: handler... evaluates the forms before the block. If one fails,
+  # the error is not reported; the handler block runs instead, with `failure`
+  # bound to the message. A lone `try expr` gives nothing on failure.
+  if args.len == 0:
+    err("try needs something to evaluate")
+  let attempt = if bodyStart >= 1 and bodyStart < args.len: bodyStart else: args.len
+  let saved = errorReport
+  errorReport = silentReport
+  var failed = false
+  result = nothing()
+  try:
+    result = evalForms(env, args[0 ..< attempt])
+  except:
+    failed = true
+  errorReport = saved
+  if failed:
+    let child = blockScope(env)
+    define(child, symbol("failure"), str(lastErrorMessage))
+    result = evalForms(child, args[attempt ..< args.len])
+
 proc ifBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len == 0:
     err("if needs a condition")
   if bodyStart >= args.len:
     err("if needs at least one body form")
   if toBool(eval(args[0], env)):
-    eval(args[bodyStart], env)
+    eval(args[bodyStart], blockScope(env))
   else:
-    evalForms(env, args[bodyStart + 1 ..< args.len])
+    evalForms(blockScope(env), args[bodyStart + 1 ..< args.len])
 
 proc doBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  let scope = callerBlockScope(env)
   result = nothing()
   for form in args:
-    result = eval(form, env)
+    result = eval(form, scope)
 
 proc whileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len == 0:
     err("while needs a condition")
   if bodyStart >= args.len:
     err("while needs at least one body form")
+  # each pass gets a fresh scope
   while toBool(eval(args[0], env)):
-    discard evalForms(env, args[bodyStart ..< args.len])
+    discard evalForms(blockScope(env), args[bodyStart ..< args.len])
   nothing()
 
 proc whenBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
@@ -45,7 +174,7 @@ proc whenBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   if bodyStart >= args.len:
     err("when needs at least one body form")
   if toBool(eval(args[0], env)):
-    evalForms(env, args[bodyStart ..< args.len])
+    evalForms(blockScope(env), args[bodyStart ..< args.len])
   else:
     nothing()
 
@@ -58,7 +187,7 @@ proc condBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
     if not isPair(form):
       err("cond needs (test = body) pairs")
     if toBool(eval(car(form), env)):
-      return eval(cdr(form), env)
+      return eval(cdr(form), blockScope(env))
 
 proc concatBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len == 0:
@@ -119,7 +248,7 @@ proc pairBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   var key = args[0]
   if not isSymbol(key):
     key = eval(key, env)
-  if not isSymbol(key):
+  if not isSymbol(key) and not isSymbol(syntaxForm(key)):
     err("pair needs a symbol name, got " & stringify(key))
   pair(key, eval(args[1], env))
 
@@ -171,12 +300,12 @@ proc notBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
   boolean(not toBool(eval(args[0], env)))
 
 proc defineInEnv(env: ref Environment, args: seq[Object], bodyStart: int,
-    isFun: bool): Object {.raises.} =
+    isFun: bool, dynamic: bool = false): Object {.raises.} =
   if args.len < 1 or not isSymbol(args[0]):
-    let kw = if isFun: "fun" else: "command"
+    let kw = if isFun: "fun" elif dynamic: "dynamic-command" else: "command"
     err(kw & " needs a name")
   define(env, args[0], newCommand(toSymbol(args[0]), args[1 ..< bodyStart],
-    args[bodyStart ..< args.len], env, isFun))
+    args[bodyStart ..< args.len], env, isFun, dynamic))
   nothing()
 
 proc funBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
@@ -184,6 +313,49 @@ proc funBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
 
 proc commandBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   defineInEnv(env, args, bodyStart, false)
+
+proc dynamicCommandBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  defineInEnv(env, args, bodyStart, false, true)
+
+proc bindBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # bind name value defines name where it was written. Given a command's
+  # parameter, that is the caller's scope, or, inside a `do`, the block's
+  # scope on the caller's side, which ends with the block.
+  if args.len != 2:
+    err("bind needs a name and a value")
+  let name = eval(args[0], env)
+  let value = eval(args[1], env)
+  let scope = syntaxScope(name)
+  if isSymbol(name):
+    define(env, name, value)
+  elif scope != nil:
+    if not isSymbol(syntaxForm(name)):
+      err("bind needs a name, got " & stringify(name))
+    define(resolveScope(env, scope), syntaxForm(name), value)
+  else:
+    err("bind needs a name, got " & stringify(name))
+  value
+
+proc newScopeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # new-scope gives a fresh scope, a child of the current one, as a value
+  # that eval-in can run code in. It lasts as long as the value does, which
+  # is what a repl needs to keep definitions between inputs.
+  if args.len != 0:
+    err("new-scope takes no arguments")
+  scopeValue(newEnvironment(env))
+
+proc evalInBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # eval-in scope code evaluates the value of code in scope.
+  if args.len != 2:
+    err("eval-in needs a scope and code")
+  let target = eval(args[0], env)
+  let code = eval(args[1], env)
+  let scope = scopeEnv(target)
+  result = nothing()
+  if scope == nil:
+    err("eval-in needs a scope from new-scope, got " & stringify(target))
+  else:
+    result = eval(code, scope)
 
 proc lambdaBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   result = newCommand("", args[0 ..< bodyStart], args[bodyStart ..< args.len], env, true)
@@ -387,6 +559,13 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("set"), newBuiltin("set", setBuiltin, false))
   define(env, symbol("quote"), newBuiltin("quote", quoteBuiltin, false))
   define(env, symbol("eval"), newBuiltin("eval", evalBuiltin, false))
+  define(env, symbol("parse"), newBuiltin("parse", parseBuiltin, true))
+  define(env, symbol("try"), newBuiltin("try", tryBuiltin, false))
+  define(env, symbol("char"), newBuiltin("char", charBuiltin, true))
+  define(env, symbol("to-string"), newBuiltin("to-string", toStringBuiltin, true))
+  define(env, symbol("slice"), newBuiltin("slice", sliceBuiltin, true))
+  define(env, symbol("find"), newBuiltin("find", findBuiltin, true))
+  define(env, symbol("code"), newBuiltin("code", codeBuiltin, true))
   define(env, symbol("if"), newBuiltin("if", ifBuiltin, false))
   define(env, symbol("<"), newBuiltin("<", ltBuiltin, true))
   define(env, symbol(">"), newBuiltin(">", gtBuiltin, true))
@@ -395,6 +574,10 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("not"), newBuiltin("not", notBuiltin, true))
   define(env, symbol("fun"), newBuiltin("fun", funBuiltin, true))
   define(env, symbol("command"), newBuiltin("command", commandBuiltin, false))
+  define(env, symbol("dynamic-command"), newBuiltin("dynamic-command", dynamicCommandBuiltin, false))
+  define(env, symbol("bind"), newBuiltin("bind", bindBuiltin, false))
+  define(env, symbol("new-scope"), newBuiltin("new-scope", newScopeBuiltin, true))
+  define(env, symbol("eval-in"), newBuiltin("eval-in", evalInBuiltin, true))
   define(env, symbol("lambda"), newBuiltin("lambda", lambdaBuiltin, true))
   define(env, symbol("λ"), newBuiltin("λ", lambdaBuiltin, true))
   define(env, symbol("{}"), newBuiltin("{}", recordBuiltin, true))
@@ -420,8 +603,8 @@ proc installBaseOwl*(env: ref Environment) =
   let parsed = parseOwl(source)
   if parsed.isOk:
     for f in parsed.get(@[]):
-      if isDefinition(f, "command"):
-        makeDefinition(env, f, false)
+      if isCommandDefinition(f):
+        makeCommandDefinition(env, f)
       elif isDefinition(f, "fun"):
         makeDefinition(env, f, true)
 

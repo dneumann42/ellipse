@@ -48,8 +48,14 @@ fun drop s count:
             set i (+ i 1)
     out
 
+fun ends-with s suffix:
+    if (< (length s) (length suffix)):
+        false
+        = (drop s (- (length s) (length suffix))) suffix
+
 export:
     starts-with = starts-with
+    ends-with = ends-with
     find-char = find-char
     take = take
     drop = drop

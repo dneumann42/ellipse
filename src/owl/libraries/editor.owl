@@ -1,0 +1,826 @@
+use base
+use math
+use io
+use strings
+use ansi
+use term
+
+; A multi-line terminal line editor with emacs keys, written on top of the
+; term module's raw bytes. `read-code prompt continuation` edits a buffer that
+; may span many lines and returns it as a string when submitted, "" when
+; cancelled with C-c, and nothing at end of input (C-d on an empty buffer).
+;
+; RET inserts a newline (keeping the indentation, one level deeper after a
+; line ending in ':'). C-RET submits; M-RET and C-j do too, for terminals
+; that cannot tell C-RET from RET.
+;
+; Ctrl+Enter only reaches us as its own key when the terminal reports
+; modifiers, so editing turns on the kitty keyboard protocol and xterm's
+; modifyOtherKeys, and bracketed paste so pasted newlines stay text.
+;
+; The buffer is one string and the cursor (point) a byte offset into it that
+; always sits on a UTF-8 character boundary.
+
+; --- state -----------------------------------------------------------------
+
+buf = ""
+point = 0
+mark = nothing
+goal-column = 0
+kills = ([])
+yank-start = 0
+yank-index = 0
+undo-stack = ([])
+history = ([])
+history-at = 0
+draft = ""
+paste-text = ""
+last-command = ""
+this-command = ""
+done = false
+outcome = nothing
+prompt-text = "owl> "
+continuation-text = "...  "
+prompt-width = 5
+continuation-width = 5
+drawn-row = 0
+
+cr = char 13
+word-chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+keyboard-on = concat csi ">1u" csi ">4;2m" csi "?2004h"
+keyboard-off = concat csi "<u" csi ">4m" csi "?2004l"
+paste-end = concat esc "[201~"
+undo-limit = 200
+
+; --- small helpers -----------------------------------------------------------
+
+fun nth xs i:
+    index xs (+ i 0)
+
+fun pick c a b:
+    if c:
+        a
+        b
+
+fun is-one-of key options:
+    found = false
+    while (and (not found) (is-any options)):
+        when (= (pop-front options) key):
+            set found true
+    found
+
+fun quotient a b:
+    q = 0
+    r = a
+    while (not (< r b)):
+        set r (- r b)
+        set q (+ q 1)
+    q
+
+fun remainder a b:
+    - a (* b (quotient a b))
+
+fun spaces n:
+    out = ""
+    while (> n 0):
+        set out (concat out " ")
+        set n (- n 1)
+    out
+
+fun trim-right s:
+    e = length s
+    while (and (> e 0) (= (nth s (- e 1)) " ")):
+        set e (- e 1)
+    slice s 0 e
+
+fun replace-all s from to:
+    out = ""
+    at = 0
+    next = find s from at
+    while (<> next nothing):
+        set out (concat out (slice s at next) to)
+        set at (+ next (length from))
+        set next (find s from at)
+    concat out (slice s at)
+
+fun is-blank-text s:
+    = (trim-right (replace-all s newline "")) ""
+
+; --- characters --------------------------------------------------------------
+
+fun is-cont-byte s i:
+    c = code s i
+    and (> c 127) (< c 192)
+
+fun next-pos s i:
+    n = length s
+    j = + i 1
+    while (and (< j n) (is-cont-byte s j)):
+        set j (+ j 1)
+    min j n
+
+fun prev-pos s i:
+    j = - i 1
+    while (and (> j 0) (is-cont-byte s j)):
+        set j (- j 1)
+    max j 0
+
+; The number of characters (not bytes) in s, which is its width on screen.
+fun char-width s:
+    n = length s
+    i = 0
+    w = 0
+    while (< i n):
+        when (not (is-cont-byte s i)):
+            set w (+ w 1)
+        set i (+ i 1)
+    w
+
+fun is-word-char ch:
+    or (> (code ch) 127) (<> (find word-chars ch) nothing)
+
+fun is-word-at i:
+    is-word-char (nth buf i)
+
+fun char-up ch:
+    c = code ch
+    if (and (> c 96) (< c 123)):
+        char (- c 32)
+        ch
+
+fun char-down ch:
+    c = code ch
+    if (and (> c 64) (< c 91)):
+        char (+ c 32)
+        ch
+
+fun map-chars text f:
+    out = ""
+    i = 0
+    while (< i (length text)):
+        set out (concat out (f (nth text i)))
+        set i (+ i 1)
+    out
+
+fun upcase text:
+    map-chars text char-up
+
+fun downcase text:
+    map-chars text char-down
+
+fun capitalize text:
+    i = 0
+    n = length text
+    while (and (< i n) (not (is-word-char (nth text i)))):
+        set i (+ i 1)
+    if (< i n):
+        concat (slice text 0 i) (char-up (nth text i)) (downcase (slice text (+ i 1)))
+        text
+
+; --- positions -----------------------------------------------------------------
+
+fun line-start p:
+    i = p
+    while (and (> i 0) (<> (nth buf (- i 1)) newline)):
+        set i (- i 1)
+    i
+
+fun line-end p:
+    at = find buf newline p
+    if (= at nothing):
+        length buf
+        at
+
+fun column-of p:
+    char-width (slice buf (line-start p) p)
+
+fun pos-at-column s col:
+    e = line-end s
+    i = s
+    w = 0
+    while (and (< i e) (< w col)):
+        set i (next-pos buf i)
+        set w (+ w 1)
+    i
+
+fun indent-end p:
+    i = line-start p
+    while (and (< i (length buf)) (= (nth buf i) " ")):
+        set i (+ i 1)
+    i
+
+fun word-end p:
+    n = length buf
+    i = p
+    while (and (< i n) (not (is-word-at i))):
+        set i (next-pos buf i)
+    while (and (< i n) (is-word-at i)):
+        set i (next-pos buf i)
+    i
+
+fun word-start p:
+    i = p
+    while (and (> i 0) (not (is-word-at (prev-pos buf i)))):
+        set i (prev-pos buf i)
+    while (and (> i 0) (is-word-at (prev-pos buf i))):
+        set i (prev-pos buf i)
+    i
+
+; --- editing primitives ------------------------------------------------------------
+
+fun save-undo:
+    ; a run of typed characters undoes as one step
+    when (not (and (= this-command "insert") (= last-command "insert"))):
+        append undo-stack ({} (text = buf) (at = point))
+        when (> (length undo-stack) undo-limit):
+            pop-front undo-stack
+
+fun insert-text text:
+    set buf (concat (slice buf 0 point) text (slice buf point))
+    when (and (<> mark nothing) (> mark point)):
+        set mark (+ mark (length text))
+    set point (+ point (length text))
+
+; Removes the text between a and b and returns it, keeping point and mark on
+; the same text.
+fun delete-range a b:
+    lo = min a b
+    hi = max a b
+    gone = slice buf lo hi
+    set buf (concat (slice buf 0 lo) (slice buf hi))
+    when (> point lo):
+        set point (max lo (- point (- hi lo)))
+    when (and (<> mark nothing) (> mark lo)):
+        set mark (max lo (- mark (- hi lo)))
+    gone
+
+fun load-text text:
+    set buf text
+    set point (length text)
+    set mark nothing
+
+; Kills join the kill ring; consecutive kills grow one entry, in the
+; direction they went.
+fun kill a b:
+    lo = min a b
+    hi = max a b
+    backward = not (> hi point)
+    when (> hi lo):
+        (save-undo)
+        text = delete-range lo hi
+        if (and (= last-command "kill") (is-any kills)):
+            do:
+                prev = pop kills
+                joined = if backward:
+                    concat text prev
+                    concat prev text
+                append kills joined
+            append kills text
+    set this-command "kill"
+
+; --- commands ------------------------------------------------------------------------
+
+fun self-insert text:
+    set this-command "insert"
+    (save-undo)
+    insert-text text
+
+fun newline-and-indent:
+    (save-undo)
+    s = line-start point
+    keep = min (- (indent-end point) s) (- point s)
+    deeper = ends-with (trim-right (slice buf s point)) ":"
+    insert-text (concat newline (spaces (+ keep (pick deeper 4 0))))
+
+fun open-line:
+    (save-undo)
+    insert-text newline
+    set point (- point 1)
+
+fun indent:
+    (save-undo)
+    insert-text (spaces (- 4 (remainder (column-of point) 4)))
+
+fun forward-char:
+    set point (next-pos buf point)
+
+fun backward-char:
+    set point (prev-pos buf point)
+
+fun forward-word:
+    set point (word-end point)
+
+fun backward-word:
+    set point (word-start point)
+
+fun beginning-of-line:
+    set point (line-start point)
+
+fun end-of-line:
+    set point (line-end point)
+
+fun back-to-indentation:
+    set point (indent-end point)
+
+fun beginning-of-buffer:
+    set point 0
+
+fun end-of-buffer:
+    set point (length buf)
+
+fun history-back:
+    when (> history-at 0):
+        when (= history-at (length history)):
+            set draft buf
+        set history-at (- history-at 1)
+        load-text (nth history history-at)
+
+fun history-forward:
+    when (< history-at (length history)):
+        set history-at (+ history-at 1)
+        if (= history-at (length history)):
+            load-text draft
+            load-text (nth history history-at)
+
+; Up and down keep the column they started from; past the first or last line
+; they walk the history instead.
+fun previous-line:
+    s = line-start point
+    if (= s 0):
+        (history-back)
+        do:
+            when (<> last-command "line"):
+                set goal-column (column-of point)
+            set point (pos-at-column (line-start (- s 1)) goal-column)
+            set this-command "line"
+
+fun next-line:
+    e = line-end point
+    if (= e (length buf)):
+        (history-forward)
+        do:
+            when (<> last-command "line"):
+                set goal-column (column-of point)
+            set point (pos-at-column (+ e 1) goal-column)
+            set this-command "line"
+
+fun delete-char:
+    when (< point (length buf)):
+        (save-undo)
+        delete-range point (next-pos buf point)
+
+; In leading spaces backspace removes back to the previous indentation stop.
+fun backspace:
+    when (> point 0):
+        (save-undo)
+        before = slice buf (line-start point) point
+        if (and (> (length before) 0) (= (trim-right before) "")):
+            do:
+                r = remainder (length before) 4
+                delete-range (- point (pick (= r 0) 4 r)) point
+            delete-range (prev-pos buf point) point
+
+fun kill-line:
+    e = line-end point
+    if (and (= e point) (< point (length buf))):
+        kill point (+ point 1)
+        kill point e
+
+fun kill-to-line-start:
+    kill (line-start point) point
+
+fun kill-word:
+    kill point (word-end point)
+
+fun backward-kill-word:
+    kill (word-start point) point
+
+fun kill-region-or-word:
+    if (= mark nothing):
+        (backward-kill-word)
+        do:
+            kill mark point
+            set mark nothing
+
+fun copy-region:
+    when (<> mark nothing):
+        append kills (slice buf (min mark point) (max mark point))
+        set mark nothing
+
+fun yank:
+    when (is-any kills):
+        (save-undo)
+        set yank-start point
+        set yank-index (- (length kills) 1)
+        insert-text (nth kills yank-index)
+        set this-command "yank"
+
+; Right after a yank, replaces the yanked text with the next older kill.
+fun yank-pop:
+    when (and (= last-command "yank") (> (length kills) 1)):
+        delete-range yank-start point
+        if (= yank-index 0):
+            set yank-index (- (length kills) 1)
+            set yank-index (- yank-index 1)
+        insert-text (nth kills yank-index)
+        set this-command "yank"
+
+fun transpose-chars:
+    at = pick (= point (line-end point)) (prev-pos buf point) point
+    when (and (> at 0) (< at (length buf))):
+        a = prev-pos buf at
+        b = next-pos buf at
+        left = slice buf a at
+        right = slice buf at b
+        when (and (<> left newline) (<> right newline)):
+            (save-undo)
+            set buf (concat (slice buf 0 a) right left (slice buf b))
+            set point b
+
+fun case-word f:
+    e = word-end point
+    when (> e point):
+        (save-undo)
+        set buf (concat (slice buf 0 point) (f (slice buf point e)) (slice buf e))
+        set point e
+
+fun set-mark:
+    set mark point
+
+fun exchange-point-and-mark:
+    when (<> mark nothing):
+        other = mark
+        set mark point
+        set point other
+
+fun keyboard-quit:
+    set mark nothing
+
+fun undo:
+    when (is-any undo-stack):
+        entry = pop undo-stack
+        set buf entry.text
+        set point entry.at
+        set mark nothing
+    set this-command "undo"
+
+fun paste:
+    (save-undo)
+    insert-text (replace-all (replace-all paste-text (concat cr newline) newline) cr newline)
+
+fun redraw-screen:
+    write home clear-screen
+    set drawn-row 0
+
+fun finish-display:
+    set point (length buf)
+    (render)
+    write cr newline
+
+fun submit:
+    (finish-display)
+    when (and (not (is-blank-text buf)) (or (is-empty history) (<> buf (nth history (- (length history) 1))))):
+        append history buf
+    set outcome buf
+    set done true
+
+fun cancel:
+    set point (length buf)
+    (render)
+    write (dim "^C") cr newline
+    set outcome ""
+    set done true
+
+fun end-of-input:
+    set outcome nothing
+    set done true
+
+fun delete-char-or-end:
+    if (= buf ""):
+        (end-of-input)
+        (delete-char)
+
+fun control-x:
+    key = (read-key)
+    cond:
+        (= key "<C-x>") = (exchange-point-and-mark)
+        (= key "u") = (undo)
+        true = nothing
+
+; --- keys ----------------------------------------------------------------------------
+;
+; read-key turns raw input bytes into one key: typed text comes back as itself
+; ("a", "é"), anything else as a name in angle brackets, emacs style:
+; "<C-a>", "<M-f>", "<C-RET>", "<left>", "<C-right>".
+
+fun is-text key:
+    not (and (> (length key) 1) (starts-with key "<"))
+
+fun read-utf8 b:
+    more = if (> b 239):
+        3
+        if (> b 223):
+            2
+            if (> b 191):
+                1
+                0
+    text = char b
+    while (> more 0):
+        c = read-byte 50
+        if (or (= c nothing) (< c 0)):
+            set more 0
+            do:
+                set text (concat text (char c))
+                set more (- more 1)
+    text
+
+fun byte-key b:
+    cond:
+        (= b 13) = "<RET>"
+        (= b 10) = "<C-j>"
+        (= b 9) = "<TAB>"
+        (= b 127) = "<DEL>"
+        (= b 8) = "<C-h>"
+        (= b 0) = "<C-SPC>"
+        (= b 31) = "<C-/>"
+        (< b 27) = (concat "<C-" (char (+ b 96)) ">")
+        (< b 32) = "<unknown>"
+        (< b 128) = (char b)
+        true = (read-utf8 b)
+
+fun meta-key key:
+    if (is-text key):
+        concat "<M-" key ">"
+        concat "<M-" (drop key 1)
+
+; The modifier parameter of a CSI key is 1 + shift(1) + alt(2) + ctrl(4).
+fun mod-prefix m:
+    bits = - m 1
+    while (> bits 7):
+        set bits (- bits 8)
+    ctrl = > bits 3
+    when ctrl:
+        set bits (- bits 4)
+    alt = > bits 1
+    when alt:
+        set bits (- bits 2)
+    shift = > bits 0
+    concat (pick ctrl "C-" "") (pick alt "M-" "") (pick shift "S-" "")
+
+fun modified name m:
+    concat "<" (mod-prefix m) name ">"
+
+; A key reported by code point, from the kitty protocol (CSI code;mod u) or
+; modifyOtherKeys (CSI 27;mod;code ~).
+fun codepoint-key cp m:
+    name = cond:
+        (= cp 13) = "RET"
+        (= cp 9) = "TAB"
+        (= cp 127) = "DEL"
+        (= cp 8) = "DEL"
+        (= cp 27) = "ESC"
+        (= cp 32) = "SPC"
+        (and (> cp 32) (< cp 127)) = (char cp)
+        true = nothing
+    prefix = mod-prefix m
+    cond:
+        (= name nothing) = "<unknown>"
+        (and (or (= prefix "") (= prefix "S-")) (= (length name) 1)) = name
+        true = (concat "<" prefix name ">")
+
+fun tilde-key n m:
+    name = cond:
+        (or (= n 1) (= n 7)) = "home"
+        (or (= n 4) (= n 8)) = "end"
+        (= n 2) = "insert"
+        (= n 3) = "delete"
+        (= n 5) = "prior"
+        (= n 6) = "next"
+        true = nothing
+    if (= name nothing):
+        "<unknown>"
+        modified name m
+
+fun param xs i fallback:
+    if (< i (length xs)):
+        nth xs i
+        fallback
+
+fun read-paste:
+    text = ""
+    finished = false
+    while (not finished):
+        b = read-byte 1000
+        if (or (= b nothing) (< b 0)):
+            set finished true
+            do:
+                set text (concat text (char b))
+                when (and (= b 126) (= (slice text (- (length text) (length paste-end))) paste-end)):
+                    set text (slice text 0 (- (length text) (length paste-end)))
+                    set finished true
+    set paste-text text
+    "<paste>"
+
+fun read-csi:
+    params = ([])
+    current = nothing
+    sub = false
+    final = nothing
+    while (= final nothing):
+        b = read-byte 50
+        if (or (= b nothing) (< b 0)):
+            set final 0
+            if (and (> b 47) (< b 58)):
+                when (not sub):
+                    set current (+ (* (pick (= current nothing) 0 current) 10) (- b 48))
+                if (= b 59):
+                    do:
+                        append params (pick (= current nothing) 1 current)
+                        set current nothing
+                        set sub false
+                    if (= b 58):
+                        set sub true
+                        when (and (> b 63) (< b 127)):
+                            set final b
+    when (<> current nothing):
+        append params current
+    p0 = param params 0 1
+    p1 = param params 1 1
+    cond:
+        (= final 117) = (codepoint-key p0 p1)
+        (and (= final 126) (= p0 27)) = (codepoint-key (param params 2 0) p1)
+        (and (= final 126) (= p0 200)) = (read-paste)
+        (= final 126) = (tilde-key p0 p1)
+        (= final 65) = (modified "up" p1)
+        (= final 66) = (modified "down" p1)
+        (= final 67) = (modified "right" p1)
+        (= final 68) = (modified "left" p1)
+        (= final 72) = (modified "home" p1)
+        (= final 70) = (modified "end" p1)
+        (= final 90) = "<S-TAB>"
+        true = "<unknown>"
+
+fun read-ss3:
+    b = read-byte 50
+    cond:
+        (= b 65) = "<up>"
+        (= b 66) = "<down>"
+        (= b 67) = "<right>"
+        (= b 68) = "<left>"
+        (= b 72) = "<home>"
+        (= b 70) = "<end>"
+        true = "<unknown>"
+
+fun read-escape:
+    b = read-byte 50
+    cond:
+        (= b nothing) = "<ESC>"
+        (< b 0) = "<ESC>"
+        (= b 91) = (read-csi)
+        (= b 79) = (read-ss3)
+        (= b 27) = "<ESC>"
+        true = (meta-key (byte-key b))
+
+fun read-key:
+    b = (read-byte)
+    cond:
+        (< b 0) = "<EOF>"
+        (= b 27) = (read-escape)
+        true = (byte-key b)
+
+; --- key bindings ------------------------------------------------------------------------
+
+fun dispatch key:
+    cond:
+        (is-text key) = (self-insert key)
+        (= key "<paste>") = (paste)
+        (is-one-of key ([] "<C-RET>" "<M-RET>" "<C-j>")) = (submit)
+        (is-one-of key ([] "<RET>" "<S-RET>")) = (newline-and-indent)
+        (= key "<C-o>") = (open-line)
+        (= key "<TAB>") = (indent)
+        (is-one-of key ([] "<C-f>" "<right>")) = (forward-char)
+        (is-one-of key ([] "<C-b>" "<left>")) = (backward-char)
+        (is-one-of key ([] "<M-f>" "<C-right>" "<M-right>")) = (forward-word)
+        (is-one-of key ([] "<M-b>" "<C-left>" "<M-left>")) = (backward-word)
+        (is-one-of key ([] "<C-a>" "<home>")) = (beginning-of-line)
+        (is-one-of key ([] "<C-e>" "<end>")) = (end-of-line)
+        (= key "<M-m>") = (back-to-indentation)
+        (is-one-of key ([] "<M-<>" "<C-home>")) = (beginning-of-buffer)
+        (is-one-of key ([] "<M->>" "<C-end>")) = (end-of-buffer)
+        (is-one-of key ([] "<C-p>" "<up>")) = (previous-line)
+        (is-one-of key ([] "<C-n>" "<down>")) = (next-line)
+        (is-one-of key ([] "<M-p>" "<C-up>")) = (history-back)
+        (is-one-of key ([] "<M-n>" "<C-down>")) = (history-forward)
+        (= key "<C-d>") = (delete-char-or-end)
+        (= key "<delete>") = (delete-char)
+        (is-one-of key ([] "<DEL>" "<C-h>" "<S-DEL>")) = (backspace)
+        (= key "<C-k>") = (kill-line)
+        (= key "<C-u>") = (kill-to-line-start)
+        (is-one-of key ([] "<M-d>" "<C-delete>")) = (kill-word)
+        (is-one-of key ([] "<M-DEL>" "<C-DEL>")) = (backward-kill-word)
+        (= key "<C-w>") = (kill-region-or-word)
+        (= key "<M-w>") = (copy-region)
+        (= key "<C-y>") = (yank)
+        (= key "<M-y>") = (yank-pop)
+        (= key "<C-t>") = (transpose-chars)
+        (= key "<M-u>") = (case-word upcase)
+        (= key "<M-l>") = (case-word downcase)
+        (= key "<M-c>") = (case-word capitalize)
+        (is-one-of key ([] "<C-SPC>" "<C-@>")) = (set-mark)
+        (= key "<C-g>") = (keyboard-quit)
+        (= key "<C-x>") = (control-x)
+        (is-one-of key ([] "<C-/>" "<C-_>")) = (undo)
+        (= key "<C-l>") = (redraw-screen)
+        (= key "<C-c>") = (cancel)
+        (= key "<EOF>") = (end-of-input)
+        true = nothing
+
+; --- drawing ---------------------------------------------------------------------------
+;
+; Every key redraws the whole buffer: back up to the first prompt row, clear
+; to the end of the screen, write each line behind its prompt, then put the
+; cursor back on point. Rows are counted with wrapping at the terminal width;
+; drawn-row remembers how far below the first prompt row the cursor was left.
+
+fun move-up n:
+    if (> n 0):
+        cursor-up n
+        ""
+
+fun render:
+    width = max (terminal-size).cols 1
+    out = concat (move-up drawn-row) cr csi "J"
+    start = 0
+    row = 0
+    cursor-row = 0
+    cursor-col = 0
+    on-first = true
+    finished = false
+    total = 0
+    while (not finished):
+        e = line-end start
+        line = slice buf start e
+        lead = pick on-first prompt-width continuation-width
+        set out (concat out (pick on-first prompt-text continuation-text) line)
+        set total (+ lead (char-width line))
+        when (and (not (< point start)) (not (> point e))):
+            offset = + lead (char-width (slice buf start point))
+            set cursor-row (+ row (quotient offset width))
+            set cursor-col (remainder offset width)
+        ; a line that exactly fills the width leaves the terminal waiting to
+        ; wrap; step onto the next row so the count below stays right
+        when (= (remainder total width) 0):
+            set out (concat out cr newline)
+        if (= e (length buf)):
+            set finished true
+            do:
+                set out (concat out cr newline)
+                set row (+ row (+ (quotient total width) 1))
+                set start (+ e 1)
+                set on-first false
+    end-row = + row (quotient total width)
+    set out (concat out (move-up (- end-row cursor-row)) cr)
+    when (> cursor-col 0):
+        set out (concat out (cursor-forward cursor-col))
+    write out
+    set drawn-row cursor-row
+
+; --- entry point --------------------------------------------------------------------------
+
+fun edit-loop:
+    while (not done):
+        key = (read-key)
+        set this-command ""
+        dispatch key
+        set last-command this-command
+        when (not done):
+            (render)
+
+fun read-code (prompt = "owl> ") (continuation = "...  "):
+    set prompt-text prompt
+    set continuation-text continuation
+    set prompt-width (visible-length prompt)
+    set continuation-width (visible-length continuation)
+    set buf ""
+    set point 0
+    set mark nothing
+    set undo-stack ([])
+    set last-command ""
+    set history-at (length history)
+    set draft ""
+    set drawn-row 0
+    set outcome nothing
+    set done false
+    raw-mode true
+    write keyboard-on
+    try (render) (edit-loop):
+        ; leave the terminal usable before passing the error on
+        write keyboard-off
+        raw-mode false
+        error failure
+    write keyboard-off
+    raw-mode false
+    outcome
+
+export:
+    read-code = read-code

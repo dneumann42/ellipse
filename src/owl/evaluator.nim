@@ -6,7 +6,12 @@ proc defaultErrorReport*(msg: string) =
 
 var errorReport*: proc(msg: string) = defaultErrorReport
 
+# The message of the most recent err(); bare raises carry no exception object,
+# so this is how a handler (the `try` builtin) learns why evaluation failed.
+var lastErrorMessage* = ""
+
 proc err*(msg: string) {.raises.} =
+  lastErrorMessage = msg
   errorReport(msg)
   raise ValueError
 
@@ -56,7 +61,11 @@ proc restName(p: Object): Object =
 
 proc bindParams(cmd: Object, argObjs: seq[Object], callerEnv: ref Environment,
     child: ref Environment) {.raises.} =
+  # A fun gets its arguments' values. A command gets them unevaluated: as
+  # syntax that remembers the caller's scope, or, for a dynamic-command, as
+  # bare forms that its body evaluates in its own (the caller's) scope.
   let params = cmdParams(cmd)
+  let hygienic = not isFun(cmd) and not isDynamic(cmd)
   var fixed = params.len
   var rest = nothing()
   if not isFun(cmd) and params.len > 0:
@@ -76,12 +85,16 @@ proc bindParams(cmd: Object, argObjs: seq[Object], callerEnv: ref Environment,
       value = cdr(a)
       if isFun(cmd):
         value = eval(value, callerEnv)
+      elif hygienic:
+        value = syntax(value, callerEnv)
     else:
       if pos < fixed:
         name = paramName(params[pos])
         inc pos
         if isFun(cmd):
           value = eval(value, callerEnv)
+        elif hygienic:
+          value = syntax(value, callerEnv)
       elif rest.isNothing:
         err("too many arguments for " & cmdName(cmd))
       else:
@@ -89,7 +102,13 @@ proc bindParams(cmd: Object, argObjs: seq[Object], callerEnv: ref Environment,
         continue
     define(child, name, value)
   if not rest.isNothing:
-    define(child, rest, list(extras))
+    if hygienic:
+      var wrapped: seq[Object] = @[]
+      for x in extras:
+        wrapped.add syntax(x, callerEnv)
+      define(child, rest, list(wrapped))
+    else:
+      define(child, rest, list(extras))
   for p in params:
     if isPair(p):
       let name = car(p)
@@ -97,6 +116,9 @@ proc bindParams(cmd: Object, argObjs: seq[Object], callerEnv: ref Environment,
         var value = cdr(p)
         if isFun(cmd):
           value = eval(value, child)
+        elif hygienic:
+          # a default is written in the definition, so it belongs to it
+          value = syntax(value, child)
         define(child, name, value)
 
 proc apply(cmd: Object, callerEnv: ref Environment, args: seq[Object],
@@ -106,8 +128,15 @@ proc apply(cmd: Object, callerEnv: ref Environment, args: seq[Object],
     if call == nil:
       err("builtin " & cmdName(cmd) & " has no implementation")
     return call(callerEnv, args, bodyStart)
-  let upEnv = if isFun(cmd): cmdEnv(cmd) else: callerEnv
+  # Only a dynamic-command runs inside the caller's scope; funs and commands
+  # run in the scope they were defined in, so their names never meet the
+  # caller's.
+  var upEnv: nil ref Environment = cmdEnv(cmd)
+  if isDynamic(cmd):
+    upEnv = callerEnv
   let child = newEnvironment(upEnv)
+  if not isFun(cmd) and not isDynamic(cmd):
+    setCaller(child, callerEnv)
   bindParams(cmd, args, callerEnv, child)
   evalForms(child, cmdBody(cmd))
 
@@ -124,11 +153,23 @@ proc eval*(obj: Object, env: ref Environment): Object {.raises.} =
     if found.isSome:
       return found.get()
     err("unbound symbol: " & toSymbol(obj))
+  if isSyntax(obj):
+    let scope = syntaxScope(obj)
+    if scope == nil:
+      err("syntax without a scope: " & stringify(obj))
+    else:
+      return eval(syntaxForm(obj), resolveScope(env, scope))
   if isPair(obj):
     let name = car(obj)
+    let value = eval(cdr(obj), env)
+    # A name that came in as syntax binds in the scope it was written in.
+    let scope = syntaxScope(name)
+    if scope != nil:
+      if isSymbol(syntaxForm(name)):
+        define(resolveScope(env, scope), syntaxForm(name), value)
+        return value
     if not isSymbol(name):
       err("a binding needs a symbol on the left of '='")
-    let value = eval(cdr(obj), env)
     define(env, name, value)
     return value
   if isList(obj):
@@ -155,7 +196,8 @@ proc isDefinition*(f: Object, kw: string): bool =
   isList(f) and bodyStart(f) >= 2 and toSeq(f).len >= 3 and headSymbol(f) == kw and
     isSymbol(toSeq(f)[1])
 
-proc makeDefinition*(env: ref Environment, f: Object, isFun: bool) =
+proc makeDefinition*(env: ref Environment, f: Object, isFun: bool,
+    dynamic: bool = false) =
   let it = toSeq(f)
   let bs = bodyStart(f)
   var params: seq[Object] = @[]
@@ -164,17 +206,26 @@ proc makeDefinition*(env: ref Environment, f: Object, isFun: bool) =
   var body: seq[Object] = @[]
   for i in bs ..< it.len:
     body.add it[i]
-  define(env, it[1], newCommand(toSymbol(it[1]), params, body, env, isFun))
+  define(env, it[1], newCommand(toSymbol(it[1]), params, body, env, isFun, dynamic))
+
+proc isCommandDefinition*(f: Object): bool =
+  isDefinition(f, "command") or isDefinition(f, "dynamic-command")
+
+proc isAnyDefinition*(f: Object): bool =
+  isCommandDefinition(f) or isDefinition(f, "fun")
+
+proc makeCommandDefinition*(env: ref Environment, f: Object) =
+  makeDefinition(env, f, false, isDefinition(f, "dynamic-command"))
 
 proc runProgram*(env: ref Environment, forms: seq[Object]) {.raises.} =
   for f in forms:
-    if isDefinition(f, "command"):
-      makeDefinition(env, f, false)
+    if isCommandDefinition(f):
+      makeCommandDefinition(env, f)
   for f in forms:
     if isDefinition(f, "fun"):
       makeDefinition(env, f, true)
   var rest: seq[Object] = @[]
   for f in forms:
-    if not isDefinition(f, "command") and not isDefinition(f, "fun"):
+    if not isAnyDefinition(f):
       rest.add f
   discard evalForms(env, rest)

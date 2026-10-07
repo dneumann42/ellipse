@@ -298,6 +298,37 @@ pairs = ([])
 for a (range 2):
   for b (range 2):
     append pairs (+ a b)
+
+v = 100
+it = 200
+forms = 300
+names = ([])
+for k (range 2):
+  append names (+ k v it forms)
+
+nested = [] ([] 1 2) ([] 3)
+sizes = ([])
+for row (items nested):
+  append sizes (length row)
+
+total = 0
+for q (range 4):
+  step = q
+  set total (+ total step)
+
+x = 99
+xs-seen = ([])
+for x (range 2):
+  append xs-seen x
+
+after-x = x
+
+hits = ([])
+when true:
+  for w (range 2):
+    unless false:
+      inner = (* w 10)
+      append hits inner
 """))
   expect toNumber(value(env, "i0")) == 0.0, "a range iterator yields its first value"
   expect toNumber(value(env, "i2")) == 2.0, "the iterator keeps its position between calls"
@@ -307,6 +338,16 @@ for a (range 2):
   expect stringify(value(env, "xs")) == "[] 10 20 30", "items does not consume the source list"
   expect stringify(value(env, "from2")) == "[] 2 3", "range counts from a start to a stop"
   expect stringify(value(env, "pairs")) == "[] 0 1 1 2", "for loops nest and see outer bindings"
+  expect stringify(value(env, "names")) == "[] 600 601",
+    "for's own locals (v, it, forms) never shadow the body's names"
+  expect stringify(value(env, "sizes")) == "[] 2 1", "for binds list values without evaluating them"
+  expect toNumber(value(env, "total")) == 6.0, "set in a for body reaches the caller's variables"
+  expect lookup(env, symbol("q")).isNone, "the loop variable ends with the loop"
+  expect lookup(env, symbol("step")).isNone, "names the loop body defines end with each pass"
+  expect toNumber(value(env, "after-x")) == 99.0, "a loop variable shadows an outer name only inside the loop"
+  expect stringify(value(env, "xs-seen")) == "[] 0 1", "inside the loop the loop variable wins"
+  expect stringify(value(env, "hits")) == "[] 0 10", "unless blocks inside for see the loop variable"
+  expect lookup(env, symbol("inner")).isNone, "names an unless block defines end with it"
 
 check("iterators library", iteratorsWork)
 

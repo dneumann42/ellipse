@@ -1,4 +1,4 @@
-.PHONY: clean setup cli run run_gallery run_tome run_owl run_duck run_bar test
+.PHONY: clean setup cli run run_gallery run_tome build_owl run_owl run_duck run_bar test
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -31,8 +31,12 @@ APPS_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 	@:
 endif
 
-run_owl: setup
+bin/owl: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/owl/owl.nim
+
+build_owl: bin/owl
+
+run_owl: bin/owl
 	./bin/owl $(ARGS) $(APPS_ARGS)
 
 bin/duck: setup

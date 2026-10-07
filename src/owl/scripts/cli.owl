@@ -1,16 +1,45 @@
 use io
 use base
-use iterators
 use cmdline
+use program
+use repl
 
-cli = (cli-parser)
-it = (cli)
+; The owl command line: `owl <command> [args]`.
 
-when (<> it.type "cmd"):
-    error "YOU SUCK ASSHOLE"
+fun usage:
+    echo "usage: owl <command> [args]"
+    echo ""
+    echo "commands:"
+    echo "  repl         start an interactive session"
+    echo "  run <file>   evaluate an owl source file"
+    echo "  help         show this message"
 
-cond:
-    (= it.type "cmd") = echo "CMD"
-    (= it.type "flag") = echo "FLAG"
-    (= it.type "floob") = echo "FLOOB"
-    true = echo "ELSE"
+fun fail msg:
+    error (concat msg " (see 'owl help')")
+
+fun wants-help arg:
+    cond:
+        (= arg.type "short-flag") = (= arg.flag "h")
+        (= arg.type "long-flag") = (= arg.flag "help")
+        true = false
+
+fun run-command next:
+    file = (next)
+    when (= file nothing):
+        fail "run needs a file"
+    when (<> file.type "cmd"):
+        fail (concat "run takes a file, not the option " file.flag)
+    run-file file.name
+
+fun dispatch arg next:
+    cond:
+        (= arg nothing) = (usage)
+        (wants-help arg) = (usage)
+        (<> arg.type "cmd") = (fail (concat "unknown option: " arg.flag))
+        (= arg.name "repl") = (repl)
+        (= arg.name "run") = (run-command next)
+        (= arg.name "help") = (usage)
+        true = (fail (concat "unknown command: " arg.name))
+
+next-arg = (cli-parser)
+dispatch (next-arg) next-arg

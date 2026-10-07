@@ -117,8 +117,8 @@ proc useFormsIn(env: ref Environment, forms: seq[Object], lib: Library) =
 
 proc hoistDefinitions(env: ref Environment, forms: seq[Object]) =
   for f in forms:
-    if evaluator.isDefinition(f, "command"):
-      evaluator.makeDefinition(env, f, false)
+    if evaluator.isCommandDefinition(f):
+      evaluator.makeCommandDefinition(env, f)
   for f in forms:
     if evaluator.isDefinition(f, "fun"):
       evaluator.makeDefinition(env, f, true)
@@ -128,7 +128,7 @@ proc runModuleForms(m: Module, lib: Library) {.raises.} =
   hoistDefinitions(env, m.forms)
   useFormsIn(env, m.forms, lib)
   for f in m.forms:
-    if evaluator.isDefinition(f, "command") or evaluator.isDefinition(f, "fun"):
+    if evaluator.isAnyDefinition(f):
       continue
     if isUseForm(f):
       continue
@@ -194,7 +194,7 @@ proc runProgram*(lib: Library, forms: seq[Object]): ref Environment {.raises.} =
   useFormsIn(result, forms, lib)
   var rest: seq[Object] = @[]
   for f in forms:
-    if evaluator.isDefinition(f, "command") or evaluator.isDefinition(f, "fun"):
+    if evaluator.isAnyDefinition(f):
       continue
     if isUseForm(f):
       continue

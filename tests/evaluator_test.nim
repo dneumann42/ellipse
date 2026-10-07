@@ -121,16 +121,17 @@ expect toNumber(value(e6, "u")) == 99.0, "if takes the rest of the body when fal
 
 let e7 = runOk("""
 m = 2
+w = 0
 if (< m 5):
-  w = 1
-  w = 2
+  set w 1
+  set w 2
 """, "")
 expect toNumber(value(e7, "w")) == 1.0, "if evaluates only the consequent when true"
 
 let e8 = runOk("""
-if (> 1 2):
-  z = 1
-  z = 2
+z = if (> 1 2):
+  1
+  2
 """, "")
 expect toNumber(value(e8, "z")) == 2.0, "if evaluates the alternative when false"
 
@@ -308,9 +309,9 @@ xs = [] 1 2
 n2 = <> (length xs) 3
 ordered = < 1 2 3
 
-if (= (length xs) 2):
-  branch = 1
-  branch = 2
+branch = if (= (length xs) 2):
+  1
+  2
 
 flag = not (= 1 2)
 """, "")
@@ -448,13 +449,13 @@ empty = (do)
 expect isNothing(value(e19, "n")), "nothing evaluates to the nil value"
 expect toNumber(value(e19, "e")) == 3.0, "do returns the last value"
 expect toNumber(value(e19, "blk")) == 2.0, "do returns the last form of a block"
-expect toNumber(value(e19, "a1")) == 1.0, "do evaluates every form in order"
+expect lookup(e19, symbol("a1")).isNone, "names defined in a do end with it"
 expect isNothing(value(e19, "empty")), "an empty do is nothing"
 
 let e20 = runOk("""
 count = 0
 while (< count 3):
-  count = + count 1
+  set count (+ count 1)
 
 p = pair (quote x) 5
 eval p
@@ -643,5 +644,241 @@ try:
 except:
   andShort = true
 expect not andShort, "and does not evaluate its second operand when the first is falsy"
+
+let eParse = runOk("""
+forms = parse (concat "x = 2" newline "+ x 3")
+n = length forms
+a = eval (pop-front forms)
+b = eval (pop-front forms)
+""", "")
+expect toNumber(value(eParse, "n")) == 2.0, "parse returns one form per top-level expression"
+expect toNumber(value(eParse, "b")) == 5.0, "parsed forms evaluate in the caller's env"
+
+var parseBad = false
+clearCaptured()
+try:
+  discard runSrc("x = parse \"(\"", "")
+except:
+  parseBad = true
+expect parseBad, "parse fails on malformed source"
+expect find(lastError(), "parse error") >= 0, "parse names the failure, got: " & lastError()
+
+let eTry = runOk("""
+ok = try (+ 1 2):
+  0
+bad = try (error "boom"):
+  concat "caught " failure
+quiet = try (error "boom")
+flag = 0
+try (error "again"):
+  set flag 1
+""", "")
+expect toNumber(value(eTry, "ok")) == 3.0, "try returns the value when nothing fails"
+expect toStr(value(eTry, "bad")) == "caught boom", "try runs the handler with failure bound"
+expect isNothing(value(eTry, "quiet")), "try without a handler gives nothing on failure"
+expect toNumber(value(eTry, "flag")) == 1.0, "the try handler can set outer variables"
+expect errorLines.len == 0, "try keeps caught errors from being reported"
+
+var tryRethrow = false
+clearCaptured()
+try:
+  discard runSrc("try (error \"one\"):\n  error \"two\"", "")
+except:
+  tryRethrow = true
+expect tryRethrow, "an error in the try handler propagates"
+expect lastError() == "two", "the handler's error is reported, got: " & lastError()
+
+let eChar = runOk("""
+a = char 65
+n = to-string 42
+s = concat "n=" (to-string 1.5)
+""", "")
+expect toStr(value(eChar, "a")) == "A", "char builds a one-character string from a byte"
+expect toStr(value(eChar, "n")) == "42", "to-string writes whole numbers without a fraction"
+expect toStr(value(eChar, "s")) == "n=1.5", "to-string output concatenates with strings"
+
+var charBad = false
+clearCaptured()
+try:
+  discard runSrc("x = char 300", "")
+except:
+  charBad = true
+expect charBad, "char rejects numbers outside a byte"
+
+let eSlice = runOk("""
+s1 = slice "hello" 1 3
+s2 = slice "hello" 3
+s3 = slice "hello" -2 99
+l1 = slice ([] 1 2 3) 1
+f1 = find "a=b=c" "="
+f2 = find "a=b=c" "=" 2
+f3 = find "abc" "z"
+c1 = code "A"
+c2 = code "AB" 1
+""", "")
+expect toStr(value(eSlice, "s1")) == "el", "slice takes a range of a string"
+expect toStr(value(eSlice, "s2")) == "lo", "slice runs to the end without an end"
+expect toStr(value(eSlice, "s3")) == "hello", "slice clamps its range"
+expect stringify(value(eSlice, "l1")) == "[] 2 3", "slice works on lists"
+expect toNumber(value(eSlice, "f1")) == 1.0, "find gives the first position"
+expect toNumber(value(eSlice, "f2")) == 3.0, "find starts at the given position"
+expect isNothing(value(eSlice, "f3")), "find gives nothing when there is no match"
+expect toNumber(value(eSlice, "c1")) == 65.0, "code gives the first byte"
+expect toNumber(value(eSlice, "c2")) == 66.0, "code takes a position"
+
+let eAndOr = runOk("""
+a = 1
+b = 2
+x = and (= a 1) (= b 2)
+y = or (= b 0) (= a 1)
+z = and true false
+""", "")
+expect toBool(value(eAndOr, "x")), "and sees the caller's a and b"
+expect toBool(value(eAndOr, "y")), "or sees the caller's a and b"
+expect not toBool(value(eAndOr, "z")), "and is false when an operand is false"
+
+# Commands are hygienic: arguments arrive as syntax that evaluates in the
+# caller's scope, and the body runs in the scope the command was defined in.
+let eHygiene = runOk("""
+command my-or a b:
+  va = eval a
+  if va:
+    va
+    eval b
+
+command twice x:
+  n = eval x
+  + n n
+
+command let-ten name:
+  bind name 10
+
+command run-all body+:
+  forms = body
+  while (not (= (length forms) 0)):
+    eval (pop-front forms)
+
+a = false
+b = 7
+va = 99
+n = 4
+got = my-or a b
+locals = my-or false va
+doubled = twice (+ n 1)
+let-ten fresh
+forms = 1
+run-all:
+  made = 5
+  forms = + forms 1
+""", "")
+expect toNumber(value(eHygiene, "got")) == 7.0, "a command's parameters never shadow the caller's a and b"
+expect toNumber(value(eHygiene, "locals")) == 99.0, "a command's locals never shadow the caller's names"
+expect toNumber(value(eHygiene, "doubled")) == 10.0, "a command's local n does not capture the caller's n"
+expect toNumber(value(eHygiene, "fresh")) == 10.0, "bind defines a syntax name in the caller's scope"
+expect toNumber(value(eHygiene, "made")) == 5.0, "a command's block runs in the caller's scope"
+expect toNumber(value(eHygiene, "forms")) == 2.0, "the block sees the caller's forms, not the command's"
+
+let eScoped = runOk("""
+command each-twice name body+:
+  i = 0
+  while (< i 2):
+    do:
+      bind name i
+      forms = body
+      while (not (= (length forms) 0)):
+        eval (pop-front forms)
+      do:
+        bind name (+ i 100)
+        forms = body
+        while (not (= (length forms) 0)):
+          eval (pop-front forms)
+    set i (+ i 1)
+
+seen = ([])
+i = 7
+each-twice k:
+  append seen (+ k i)
+  local = k
+outer = 1
+do:
+  outer = 2
+  hidden = 3
+""", "")
+expect stringify(value(eScoped, "seen")) == "[] 7 107 8 108",
+  "a do in a command scopes bind on the caller's side; nested dos nest"
+expect lookup(eScoped, symbol("k")).isNone, "a name bound in a command's do ends with the do"
+expect lookup(eScoped, symbol("local")).isNone, "names the block defines inside a command's do end with it"
+expect toNumber(value(eScoped, "outer")) == 1.0, "= inside a do defines a new local"
+expect lookup(eScoped, symbol("hidden")).isNone, "a top-level do's names end with it"
+
+let eBlocks = runOk("""
+if true:
+  in-then = 1
+  in-else = 1
+if false:
+  in-then2 = 1
+  in-else2 = 1
+when true:
+  in-when = 1
+i = 0
+fresh = 0
+while (< i 3):
+  in-while = (+ i 1)
+  set fresh (+ fresh in-while)
+  set i (+ i 1)
+cond:
+  true = (in-cond = 1)
+try (error "x"):
+  in-try = 1
+kept = 5
+when true:
+  kept = 6
+""", "")
+for name in ["in-then", "in-else2", "in-when", "in-while", "in-cond", "in-try"]:
+  expect lookup(eBlocks, symbol(name)).isNone, name & " ends with its block"
+expect toNumber(value(eBlocks, "fresh")) == 6.0, "each while pass gets its own scope"
+expect toNumber(value(eBlocks, "kept")) == 5.0, "= in a block defines a local, leaving the outer name"
+
+let eScopes = runOk("""
+s = (new-scope)
+eval-in s (quote (hidden = 41))
+got = eval-in s (quote (+ hidden 1))
+""", "")
+expect toNumber(value(eScopes, "got")) == 42.0, "eval-in keeps definitions in its scope between calls"
+expect lookup(eScopes, symbol("hidden")).isNone, "a new-scope's definitions stay out of the creator's scope"
+
+let eLexical = runOk("""
+k = 1
+command get-k:
+  k
+fun shadow:
+  k = 2
+  (get-k)
+inner = (shadow)
+""", "")
+expect toNumber(value(eLexical, "inner")) == 1.0, "a command's free names resolve where it was defined"
+
+let eDynamic = runOk("""
+dynamic-command peek:
+  secret
+
+dynamic-command form-of x:
+  x
+
+dynamic-command set-here name:
+  eval (pair name 3)
+
+fun probe:
+  secret = 42
+  (peek)
+
+shown = (probe)
+code = form-of (+ 1 2)
+set-here q
+""", "")
+let qFound = lookup(eDynamic, symbol("q"))
+expect toNumber(value(eDynamic, "shown")) == 42.0, "a dynamic-command body sees the caller's scope"
+expect stringify(value(eDynamic, "code")) == "+ 1 2", "a dynamic-command gets bare forms"
+expect qFound.isNone, "a dynamic-command's bindings stay in its own frame"
 
 finish "evaluator"
