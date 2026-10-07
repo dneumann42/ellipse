@@ -136,3 +136,35 @@ The overlay doesn't disturb what it measures. It is painted onto the
 backbuffer after layout, outside the app's commands and damage tracking.
 It updates itself twice a second with render-only passes that never run
 =update=, so an idle app reads =frames 0/s= with the overlay up.
+
+* Docked windows (wlr-layer-shell)
+
+=bootup= takes a =WindowConfig=. With =layer.enabled= the window becomes a
+layer surface docked to a screen edge, on compositors that implement
+=zwlr_layer_shell_v1= (Sway, Hyprland, KDE Plasma, niri, river, labwc,
+COSMIC):
+
+#+begin_src nim
+
+  bootup(WindowConfig(title: "bar", layer: LayerConfig(enabled: true,
+    edge: edgeTop, thickness: 30, namespace: "ellipse-bar")))
+
+#+end_src
+
+=thickness= is the size across the edge. Along the edge the surface spans
+the output unless =length= is set. =exclusive= reserves space: -1 (the
+default) reserves =thickness=, 0 overlaps other windows. =level= picks the
+stacking layer, and =keyboard= picks whether the surface takes keyboard
+focus.
+
+Under the hood, SDL creates the window's surface without a role (its
+custom-surface mode), and =wayland/layer_shell.c= gives it the layer role
+on SDL's own display, so SDL keeps input and rendering. Such windows use
+the OpenGL renderer: SDL resizes an EGL window when the compositor
+reconfigures the size, but its Vulkan and GPU renderers keep their
+creation-time swapchain.
+
+GNOME (Mutter) doesn't implement the protocol. There, and on X11 and
+Windows, the same config opens a borderless always-on-top window of the
+dock's shape. It doesn't reserve screen space, and it logs that. =docked()=
+reports which one you got.

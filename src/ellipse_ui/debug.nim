@@ -72,28 +72,6 @@ proc debugActive*(): bool =
   ## The overlay is showing.
   active
 
-proc setDebugActive*(on: bool) =
-  if on == active:
-    return
-  active = on
-  setWidgetTrace(on)
-  setRefreshRecording(on)
-  history.setLen(0)
-  widgetStats = initTable[uint64, WidgetStat]()
-  boxes.setLen(0)
-  requestFullRedraw()      # paint the overlay on, or wipe it off
-
-proc debugKeys() =
-  ## The input hook: F1 toggles, and nobody else sees it.
-  var toggled = false
-  let evs = keyEvents()
-  for ev in evs:
-    if ev.kind == kevF1:
-      toggled = not toggled
-  if toggled:
-    setDebugActive(not active)
-  consumeKeys(kevF1)
-
 ## --- per-frame recording ---------------------------------------------------------
 
 proc mix(a, b: uint64): uint64 =
@@ -389,10 +367,34 @@ proc drawOverlay() {.raises.} =
   drawPanel(now)
   requestOverlayAt(now + OverlayEveryNs)
 
+proc setDebugActive*(on: bool) =
+  if on == active:
+    return
+  active = on
+  # The hook only while shown: an installed overlay makes every render
+  # present, which a hidden one must not cost.
+  setOverlay(if on: drawOverlay else: nil)
+  setWidgetTrace(on)
+  setRefreshRecording(on)
+  history.setLen(0)
+  widgetStats = initTable[uint64, WidgetStat]()
+  boxes.setLen(0)
+  requestFullRedraw()      # paint the overlay on, or wipe it off
+
+proc debugKeys() =
+  ## The input hook: F1 toggles, and nobody else sees it.
+  var toggled = false
+  let evs = keyEvents()
+  for ev in evs:
+    if ev.kind == kevF1:
+      toggled = not toggled
+  if toggled:
+    setDebugActive(not active)
+  consumeKeys(kevF1)
+
 proc installDebugMode*() =
   ## Make F1 toggle the debug overlay in this app. Call once after `bootup`.
   if installed:
     return
   installed = true
   onInputFrame(debugKeys)
-  setOverlay(drawOverlay)

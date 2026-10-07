@@ -27,15 +27,24 @@ import std/[monotimes, tables]
 
 ## --- clocks ------------------------------------------------------------------
 
-type
-  CTimespec {.importc: "struct timespec", header: "<time.h>".} = object
-    tv_sec: int
-    tv_nsec: int
+when defined(windows):
+  type
+    CFileTime {.importc: "FILETIME", header: "<windows.h>".} = object
+      dwLowDateTime: uint32
+      dwHighDateTime: uint32
 
-var CLOCK_REALTIME {.importc: "CLOCK_REALTIME", header: "<time.h>".}: int32
+  proc c_GetSystemTimePreciseAsFileTime(ft: ptr CFileTime) {.
+    importc: "GetSystemTimePreciseAsFileTime", header: "<windows.h>".}
+else:
+  type
+    CTimespec {.importc: "struct timespec", header: "<time.h>".} = object
+      tv_sec: int
+      tv_nsec: int
 
-proc c_clock_gettime(clk: int32; ts: ptr CTimespec): int32 {.
-  importc: "clock_gettime", header: "<time.h>".}
+  var CLOCK_REALTIME {.importc: "CLOCK_REALTIME", header: "<time.h>".}: int32
+
+  proc c_clock_gettime(clk: int32; ts: ptr CTimespec): int32 {.
+    importc: "clock_gettime", header: "<time.h>".}
 
 const
   NsPerMs* = 1_000_000'i64
@@ -55,10 +64,17 @@ type
 proc systemMono(): int64 = getMonoTime().ticks
 
 proc systemWall(): int64 =
-  var ts = CTimespec()
-  if c_clock_gettime(CLOCK_REALTIME, addr ts) != 0:
-    return 0
-  int64(ts.tv_sec) * NsPerSec + int64(ts.tv_nsec)
+  ## Nanoseconds since the Unix epoch.
+  when defined(windows):
+    var ft = CFileTime()
+    c_GetSystemTimePreciseAsFileTime(addr ft)
+    let ticks = (int64(ft.dwHighDateTime) shl 32) or int64(ft.dwLowDateTime)
+    (ticks - 116_444_736_000_000_000'i64) * 100   # 100 ns since 1601
+  else:
+    var ts = CTimespec()
+    if c_clock_gettime(CLOCK_REALTIME, addr ts) != 0:
+      return 0
+    int64(ts.tv_sec) * NsPerSec + int64(ts.tv_nsec)
 
 var
   monoClock: ClockFn = systemMono

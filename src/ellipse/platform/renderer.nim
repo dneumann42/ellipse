@@ -455,12 +455,7 @@ proc measureText*(text: string; cfg: TextConfig): Size =
   return Size(width: float32(text.len) * float32(cfg.fontSize),
               height: float32(cfg.fontSize))
 
-proc bootup*(width, height: float32 = 0.0) {.raises.} =
-  ## The whole GUI startup dance in one call: platform window + renderer,
-  ## a clay context at `width`x`height` (0 takes the live window size) and
-  ## this renderer's `measureText` wired into clay's layout. The one
-  ## sequence every ellipse app's `main` repeats.
-  initialize()
+proc bootContext(width, height: float32) {.raises.} =
   initializeRenderer()
   var w = width
   var h = height
@@ -470,6 +465,20 @@ proc bootup*(width, height: float32 = 0.0) {.raises.} =
     h = winH
   setCurrentContext(initContext(size(w, h)))
   setMeasureText(measureText)
+
+proc bootup*(width, height: float32 = 0.0) {.raises.} =
+  ## The whole GUI startup dance in one call: platform window + renderer,
+  ## a clay context at `width`x`height` (0 takes the live window size) and
+  ## this renderer's `measureText` wired into clay's layout. The one
+  ## sequence every ellipse app's `main` repeats.
+  initialize()
+  bootContext(width, height)
+
+proc bootup*(cfg: WindowConfig) {.raises.} =
+  ## `bootup` with a window description -- a title, a size, or a docked
+  ## layer-shell bar (`cfg.layer`).
+  initialize(cfg)
+  bootContext(0.0, 0.0)
 
 func toSdlRect(r: Rect): SDL_Rect =
   SDL_Rect(x: r.x.int32, y: r.y.int32, w: r.width.int32, h: r.height.int32)

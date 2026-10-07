@@ -167,7 +167,7 @@ proc update() {.raises.} =
   let t = activeTheme
   layout:
     clay "root", col(width = grow(), height = grow()).bg(bgColor):
-      clay "bar", row(width = grow(), height = fixedPx(30), gap = 12,
+      clay "bar", row(width = grow(), height = grow(), gap = 12,
                       padding = padAll(4), alignY = centerY).bg(panelBg)
           .border(t.metrics.borderHairline, t.palette.panelBorder):
         workspaces()
@@ -183,9 +183,11 @@ proc render() {.raises.} =
 
 when isMainModule:
   try:
-    bootup()
+    # Docked along the top edge on layer-shell compositors (Sway, Hyprland,
+    # KDE, niri, ...), reserving its height; a borderless strip elsewhere.
+    bootup(WindowConfig(title: "bar", layer: LayerConfig(enabled: true,
+      edge: edgeTop, thickness: 30, namespace: "ellipse-bar")))
     installDebugMode()   # F1: widget boxes, per-widget fps, frame timeline
-    setWindowTitle("bar")
     fillTitles()
     start(update, render)
   except ErrorCode:

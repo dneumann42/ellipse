@@ -1,10 +1,15 @@
-{.passL: "-lSDL3 -no-pie".}
+when defined(windows):
+  {.passL: "-lSDL3".}
+else:
+  {.passL: "-lSDL3 -no-pie".}
 
 import std/[monotimes, strutils, envvars]
 
 import ../logger
 import ./pacing
 export pacing
+import ./layershell
+export layershell
 
 const
   Audio = 0x00000010'u32
@@ -30,6 +35,7 @@ const
   WindowMouseFocus   = 0x00000400'u32
   WindowForeign      = 0x00000800'u32
   WindowAllowHighDPI = 0x00002000'u32
+  WindowAlwaysOnTop  = 0x00010000'u32
   WindowMouseCapture = 0x00004000'u32
 
 const
@@ -117,6 +123,8 @@ type
   SDL_Event {.importc: "SDL_Event", header: "<SDL3/SDL.h>".} = object
   SDL_DisplayMode {.importc: "SDL_DisplayMode", header: "<SDL3/SDL.h>".} = object
     refresh_rate: float32
+  SDL_IRect {.importc: "SDL_Rect", header: "<SDL3/SDL.h>".} = object
+    x, y, w, h: int32
 
   SDL_CommonEvent = object
     typ: uint32
@@ -211,6 +219,44 @@ proc SDL_DestroyWindow(win: ptr SDL_Window) {.importc: "SDL_DestroyWindow", head
 proc SDL_DestroyRenderer(ren: ptr SDL_Renderer) {.importc: "SDL_DestroyRenderer", header: "<SDL3/SDL.h>".}
 proc SDL_PollEvent(event: ptr SDL_Event): bool {.importc: "SDL_PollEvent", header: "<SDL3/SDL.h>".}
 proc SDL_PushEvent(event: ptr SDL_Event): bool {.importc: "SDL_PushEvent", header: "<SDL3/SDL.h>".}
+proc SDL_CreateProperties(): uint32 {.importc: "SDL_CreateProperties", header: "<SDL3/SDL.h>".}
+proc SDL_DestroyProperties(props: uint32) {.importc: "SDL_DestroyProperties", header: "<SDL3/SDL.h>".}
+proc SDL_SetBooleanProperty(props: uint32; name: cstring; value: bool): bool {.
+  importc: "SDL_SetBooleanProperty", header: "<SDL3/SDL.h>".}
+proc SDL_SetNumberProperty(props: uint32; name: cstring; value: int64): bool {.
+  importc: "SDL_SetNumberProperty", header: "<SDL3/SDL.h>".}
+proc SDL_SetStringProperty(props: uint32; name: cstring; value: cstring): bool {.
+  importc: "SDL_SetStringProperty", header: "<SDL3/SDL.h>".}
+proc SDL_GetPointerProperty(props: uint32; name: cstring; default: nil pointer): nil pointer {.
+  importc: "SDL_GetPointerProperty", header: "<SDL3/SDL.h>".}
+proc SDL_GetWindowProperties(win: ptr SDL_Window): uint32 {.
+  importc: "SDL_GetWindowProperties", header: "<SDL3/SDL.h>".}
+proc SDL_GetGlobalProperties(): uint32 {.importc: "SDL_GetGlobalProperties", header: "<SDL3/SDL.h>".}
+proc SDL_CreateWindowWithProperties(props: uint32): nil ptr SDL_Window {.
+  importc: "SDL_CreateWindowWithProperties", header: "<SDL3/SDL.h>".}
+proc SDL_CreateRenderer(win: ptr SDL_Window; name: nil cstring): nil ptr SDL_Renderer {.
+  importc: "SDL_CreateRenderer", header: "<SDL3/SDL.h>".}
+proc SDL_SetWindowSize(win: ptr SDL_Window; w, h: int32): bool {.
+  importc: "SDL_SetWindowSize", header: "<SDL3/SDL.h>".}
+proc SDL_GetWindowSizeInPixels(win: ptr SDL_Window; w, h: ptr int32): bool {.
+  importc: "SDL_GetWindowSizeInPixels", header: "<SDL3/SDL.h>".}
+proc SDL_GetPrimaryDisplay(): uint32 {.importc: "SDL_GetPrimaryDisplay", header: "<SDL3/SDL.h>".}
+proc SDL_GetDisplayBounds(display: uint32; r: ptr SDL_IRect): bool {.
+  importc: "SDL_GetDisplayBounds", header: "<SDL3/SDL.h>".}
+proc SDL_GetDisplayUsableBounds(display: uint32; r: ptr SDL_IRect): bool {.
+  importc: "SDL_GetDisplayUsableBounds", header: "<SDL3/SDL.h>".}
+
+let
+  PropCreateFlags {.importc: "SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER", header: "<SDL3/SDL.h>".}: cstring
+  PropCreateTitle {.importc: "SDL_PROP_WINDOW_CREATE_TITLE_STRING", header: "<SDL3/SDL.h>".}: cstring
+  PropCreateWidth {.importc: "SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER", header: "<SDL3/SDL.h>".}: cstring
+  PropCreateHeight {.importc: "SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER", header: "<SDL3/SDL.h>".}: cstring
+  PropCreateOpenGL {.importc: "SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN", header: "<SDL3/SDL.h>".}: cstring
+  PropCustomRole {.importc: "SDL_PROP_WINDOW_CREATE_WAYLAND_SURFACE_ROLE_CUSTOM_BOOLEAN", header: "<SDL3/SDL.h>".}: cstring
+  PropWlDisplay {.importc: "SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER", header: "<SDL3/SDL.h>".}: cstring
+  PropWlSurface {.importc: "SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER", header: "<SDL3/SDL.h>".}: cstring
+  PropGlobalWlDisplay {.importc: "SDL_PROP_GLOBAL_VIDEO_WAYLAND_WL_DISPLAY_POINTER", header: "<SDL3/SDL.h>".}: cstring
+
 proc SDL_WaitEventTimeout(event: nil ptr SDL_Event; timeoutMS: int32): bool {.
   importc: "SDL_WaitEventTimeout", header: "<SDL3/SDL.h>".}
 proc SDL_DelayNS(ns: uint64) {.importc: "SDL_DelayNS", header: "<SDL3/SDL.h>".}
@@ -294,6 +340,7 @@ type
     doubleFrame: bool           ## counter >= 2, per input frame
     vsync: bool                 ## presents are paced by the display
     visible: bool               ## not hidden / minimized: worth presenting
+    docked: bool                ## a wlr-layer-shell surface (see `layershell`)
 
 proc `=destroy`(app: var PlatformApplication) =
   `=destroy`(app.renderer)
@@ -322,7 +369,84 @@ proc sdlRenderer*(): ptr SDL_Renderer =
 type
   FrameFn* = proc() {.closure, raises.}
 
-proc initialize*() {.raises.} =
+type
+  WindowConfig* = object
+    ## What `initialize` opens. With `layer.enabled` the window becomes a
+    ## docked layer surface where the compositor supports wlr-layer-shell,
+    ## and a borderless always-on-top window of the same shape elsewhere
+    ## (GNOME, X11, Windows) -- see `docked()`.
+    title*: string = "ellipse"
+    width*: int32 = 1280
+    height*: int32 = 720
+    resizable*: bool = true
+    layer*: LayerConfig
+
+proc createPlainWindow(app: var PlatformApplication; cfg: WindowConfig;
+                       w, h: int32; flags: uint32) {.raises.} =
+  var title = cfg.title
+  sdlHandle(SDL_CreateWindowAndRenderer(title.toCString, w, h, flags,
+    addr app.window.raw, addr app.renderer.raw), "SDL_CreateWindowAndRenderer()")
+  app.width = float32(w)
+  app.height = float32(h)
+
+proc tryLayerWindow(app: var PlatformApplication; cfg: WindowConfig): bool {.raises.} =
+  ## The layer-shell path: a roleless SDL surface given the layer role.
+  ## False (nothing created) when the compositor lacks the protocol.
+  if fromCString(SDL_GetCurrentVideoDriver()) != "wayland":
+    return false
+  let display = SDL_GetPointerProperty(SDL_GetGlobalProperties(),
+                                       PropGlobalWlDisplay, nil)
+  if display == nil or not layerShellAvailable(display):
+    return false
+  let (rw, rh) = requestSize(cfg.layer)
+  # Start at the size the compositor will most likely configure -- the
+  # output's span along the edge -- so the first buffer already fits.
+  var bounds = SDL_IRect()
+  var iw = rw
+  var ih = rh
+  if SDL_GetDisplayBounds(SDL_GetPrimaryDisplay(), addr bounds):
+    if iw <= 0: iw = bounds.w
+    if ih <= 0: ih = bounds.h
+  let props = SDL_CreateProperties()
+  var title = cfg.title
+  discard SDL_SetStringProperty(props, PropCreateTitle, title.toCString)
+  discard SDL_SetBooleanProperty(props, PropCustomRole, true)
+  # OpenGL (an EGL window): SDL resizes it on `SDL_SetWindowSize`, which is
+  # the only size signal a custom surface has. Its Vulkan/GPU renderers keep
+  # the swapchain they were created with, so they are not asked for.
+  discard SDL_SetBooleanProperty(props, PropCreateOpenGL, true)
+  discard SDL_SetNumberProperty(props, PropCreateWidth, int64(max(iw, 1'i32)))
+  discard SDL_SetNumberProperty(props, PropCreateHeight, int64(max(ih, 1'i32)))
+  let win = SDL_CreateWindowWithProperties(props)
+  SDL_DestroyProperties(props)
+  if win == nil:
+    return false
+  app.window.raw = win
+  var drivers = "opengl,opengles2,software"
+  let ren = SDL_CreateRenderer(win, drivers.toCString)
+  if ren == nil:
+    return false
+  app.renderer.raw = ren
+  let wins = SDL_GetWindowProperties(win)
+  let wlDisplay = SDL_GetPointerProperty(wins, PropWlDisplay, nil)
+  let wlSurface = SDL_GetPointerProperty(wins, PropWlSurface, nil)
+  if wlDisplay == nil or wlSurface == nil:
+    return false
+  if not attachLayer(wlDisplay, wlSurface, cfg.layer):
+    return false
+  # The compositor picked the size (the spanned edge's length): tell SDL,
+  # whose custom surfaces get no size notifications of their own.
+  let (_, w, h) = takeLayerSize()
+  let fw = if w > 0: w else: max(iw, 1'i32)
+  let fh = if h > 0: h else: max(ih, 1'i32)
+  discard SDL_SetWindowSize(win, fw, fh)
+  app.width = float32(fw)
+  app.height = float32(fh)
+  app.docked = true
+  return true
+
+proc initialize*(cfg: WindowConfig) {.raises.} =
+  ## Start SDL and open the app's window as `cfg` describes.
   activeApp = PlatformApplication()
 
   var an = "ellipse"
@@ -331,7 +455,29 @@ proc initialize*() {.raises.} =
 
   sdlHandle(SDL_SetAppMetadata(an.toCString, av.toCString, aid.toCString), "SDL_SetAppMetadata()")
   sdlHandle(SDL_Init(Video or Audio), "SDL_Init()")
-  sdlHandle(SDL_CreateWindowAndRenderer("ellipse/renderer", 1280, 720, WindowResizable, addr activeApp.window.raw, addr activeApp.renderer.raw), "SDL_CreateWindowAndRenderer()")
+  if cfg.layer.enabled:
+    if not tryLayerWindow(activeApp, cfg):
+      `=destroy`(activeApp.renderer)
+      `=destroy`(activeApp.window)
+      # No layer shell (GNOME, X11, Windows): a borderless always-on-top
+      # window of the dock's shape. It does not reserve screen space.
+      var bounds = SDL_IRect()
+      var spanW = 1280'i32
+      var spanH = 720'i32
+      if SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), addr bounds):
+        spanW = bounds.w
+        spanH = bounds.h
+      let t = cfg.layer.thickness
+      let along = cfg.layer.length
+      let (w, h) = case cfg.layer.edge
+        of edgeTop, edgeBottom: ((if along > 0: along else: spanW), t)
+        of edgeLeft, edgeRight: (t, (if along > 0: along else: spanH))
+      info "layer shell unavailable (", fromCString(SDL_GetCurrentVideoDriver()),
+        "): opening a plain borderless window; it will not dock or reserve space"
+      createPlainWindow(activeApp, cfg, w, h, WindowBorderless or WindowAlwaysOnTop)
+  else:
+    createPlainWindow(activeApp, cfg, cfg.width, cfg.height,
+      if cfg.resizable: WindowResizable else: 0'u32)
   # NOTE: text input (SDL_StartTextInput / the IME path) is deliberately NOT
   # started here. SDL >= 3.4 only emits SDL_EVENT_TEXT_INPUT once it is on --
   # and while it is on, active input methods (X11/ibus, Wayland text-input-v3)
@@ -339,8 +485,6 @@ proc initialize*() {.raises.} =
   # default mode derives printable characters from the keydown events'
   # keycodes themselves (see keyEventFor); `setTextInputEnabled(true)` opts
   # into the IME path when full international composition is wanted.
-  activeApp.width = 1280.0
-  activeApp.height = 720.0
   activeApp.visible = true
   # Present on vsync: frames that run at all run at the display rate, and the
   # swap paces them. Drivers without it (offscreen) fall back to a timer.
@@ -365,6 +509,14 @@ proc setTextInputEnabled*(enabled: bool) =
       discard SDL_StartTextInput(activeApp.window.raw)
     else:
       discard SDL_StopTextInput(activeApp.window.raw)
+
+proc initialize*() {.raises.} =
+  ## The default window: 1280x720, resizable.
+  initialize(WindowConfig())
+
+proc docked*(): bool =
+  ## The window is a wlr-layer-shell surface (not the fallback window).
+  activeApp.docked
 
 proc textInputEnabled*(): bool =
   textImeActive
@@ -552,6 +704,25 @@ proc pumpEvents(app: var PlatformApplication) =
       app.wheelPending.x += e.x
       app.wheelPending.y += e.y
       wake()
+
+proc pumpLayer(app: var PlatformApplication) =
+  ## Fold layer-surface configures (dispatched inside SDL's event pump) into
+  ## the window size, the way a pixel-size event would be.
+  if not app.docked:
+    return
+  if layerClosed():
+    app.running = false
+    wake()
+    return
+  let (changed, w, h) = takeLayerSize()
+  if changed and w > 0 and h > 0:
+    discard SDL_SetWindowSize(app.window.raw, w, h)
+    var pw = w
+    var ph = h
+    discard SDL_GetWindowSizeInPixels(app.window.raw, addr pw, addr ph)
+    app.width = float32(pw)
+    app.height = float32(ph)
+    noteResize(monoNow())
 
 proc pointerState*(): PointerState =
   ## The pointer as of the most recent event pump; feed it to
@@ -775,6 +946,7 @@ proc start*(update: FrameFn; render: FrameFn) {.raises.} =
   var lastReport = monoNow()
   while activeApp.running:
     pumpEvents(activeApp)
+    pumpLayer(activeApp)
     if not activeApp.running:
       break
     var now = monoNow()
