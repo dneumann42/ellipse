@@ -34,7 +34,7 @@
 ## opaque Notepad-blue would bury the text. The washed accent reads like
 ## a modern editor's highlight.
 
-import std/[monotimes, strutils]
+import std/[math, monotimes, strutils]
 
 import clay
 import ../ui
@@ -57,6 +57,9 @@ type
     readOnly*: bool = false
     maxLines*: int = 0     ## 0: fill the parent, scrolling once the text
                            ## outgrows it; N: hug the text, up to N lines
+    indent*: string = "    "  ## what Tab inserts (and Shift+Tab takes off a
+                              ## line's front); "" leaves Tab alone
+    autoIndent*: bool = false ## Enter copies the line's leading whitespace
 
   EditorStats* = object
     ## What one editor frame produced.
@@ -346,9 +349,65 @@ proc editorSetAll*(id: ElementId, text: var string, replacement: string,
 ## Clay wraps text between its sizing passes; `wrappedLines` re-runs that
 ## pass for any box width. An editor's text element is laid out at either
 ## the viewport width (wrap) or its own unwrapped width (no wrap), so
-## feeding the last frame's box width back in yields *exactly* the line
-## grid the renderer drew -- what the caret geometry, the selection
-## rectangles, the pointer hit-test and the scroll-follow all agree on.
+## `gridWidth` -- the viewport's inner width, or the text box's own --
+## yields *exactly* the line grid the renderer draws -- what the caret
+## geometry, the selection rectangles, the pointer hit-test and the
+## scroll-follow all agree on. (Not the text box's last width when
+## wrapping: that is the *old* text's, a glyph short of a just-typed line.)
+
+proc barsAlways(opts: EditorOpts): bool =
+  ## A page-filling editor keeps its scrollbars up whether or not the text
+  ## overflows; one that hugs its text (`maxLines`) shows them on demand.
+  opts.maxLines == 0
+
+proc editorPadding(opts: EditorOpts): Padding =
+  ## The text area's inset, plus a gutter along each edge a scrollbar
+  ## always sits on, so the text never runs underneath the bar.
+  let sb = activeTheme.scrollbar
+  let gutter = int(ceil(sb.width + sb.margin))
+  result = padAll(editorPad)
+  if barsAlways(opts):
+    result.right = editorPad + gutter
+    if not opts.wrap:
+      result.bottom = editorPad + gutter
+
+proc gutterStrip(id: ElementId, vertical: bool, thick: float32) =
+  ## Back a scrollbar gutter with the field's own fill, floated over the
+  ## text (an unwrapped line scrolls sideways under the gutter, which the
+  ## container's clip doesn't stop) and under the bar itself (zIndex 220).
+  let t = activeTheme
+  let d = elementData(id)
+  if not d.found:
+    return
+  let inset = float32(t.metrics.borderHairline)
+  let (w, h) = if vertical: (thick, d.box.height - 2.0 * inset)
+               else: (d.box.width - 2.0 * inset, thick)
+  let (points, offset) = if vertical:
+    (AttachPoints(element: pointRightTop, parent: pointRightTop),
+     vec2(-inset, inset))
+  else:
+    (AttachPoints(element: pointLeftBottom, parent: pointLeftBottom),
+     vec2(inset, -inset))
+  openElement(localId(if vertical: "editor.vgutter" else: "editor.hgutter",
+    id.id))
+  configureOpenElement(col(width = fixedPx(max(w, 0.0)),
+                           height = fixedPx(max(h, 0.0)))
+    .bg(t.palette.fieldBg)
+    .floating(attachElementId, offset = offset, zIndex = 210,
+              points = points, parentId = id.id,
+              capture = passThroughPointer))
+  closeElement()
+
+proc gridWidth(id, textEl: ElementId, opts: EditorOpts): float32 =
+  if opts.wrap:
+    let d = elementData(id)
+    if d.found:
+      let p = editorPadding(opts)
+      let w = d.box.width - float32(p.left) - float32(p.right)
+      if w > 0.0:
+        return w
+  let prev = elementData(textEl)
+  if prev.found: prev.box.width else: 0.0
 
 proc pitchOf(ctx: Context, text: string, cfg: TextConfig): float32 =
   if cfg.lineHeight > 0:
@@ -462,12 +521,13 @@ proc selRectAt(textElId: uint32, li: int, x, y, w, h: float32,
   closeElement()
 
 proc selectionOverlay*(textElId: uint32, text: string, cfg: TextConfig,
-                       lo, hi: int) =
+                       lo, hi: int, wrapWidth = 0.0'f32) =
   ## Paint the range `[lo, hi)` over the text element `textElId`: one
   ## rectangle per grid line it touches, called inside the editor while
   ## its text element has a last-frame box. Ranges crossing a line edge
   ## wash the full line width; the newline between selected lines earns a
   ## space cell so the highlight stays continuous down the left.
+  ## `wrapWidth` as for `caretOverlay` (0: the text box's last width).
   if hi <= lo:
     return
   let ctx = currentContext()
@@ -476,7 +536,8 @@ proc selectionOverlay*(textElId: uint32, text: string, cfg: TextConfig,
   let prev = elementData(ElementId(id: textElId))
   if not prev.found or prev.box.width <= 0:
     return
-  let lines = wrappedLines(ctx, text, cfg, prev.box.width)
+  let lines = wrappedLines(ctx, text, cfg,
+    if wrapWidth > 0.0: wrapWidth else: prev.box.width)
   if lines.len == 0:
     return
   let pitch = pitchOf(ctx, text, cfg)
@@ -502,15 +563,15 @@ proc selectionOverlay*(textElId: uint32, text: string, cfg: TextConfig,
     selRectAt(textElId, li, x0, float32(li) * pitch, x1 - x0, pitch, fill)
 
 proc pageStep(s: string, cfg: TextConfig, id, textEl: ElementId,
-              up: bool, extend: bool) =
+              up: bool, extend: bool, gridW: float32) =
   ## PageUp/PageDown: jump the caret a viewport of lines, keeping its
   ## column where the target line has room, and turn the page so the new
   ## line lands where the old one was on screen.
   let ctx = currentContext()
   let prev = elementData(textEl)
-  if not prev.found or prev.box.width <= 0:
+  if not prev.found or gridW <= 0:
     return
-  let lines = wrappedLines(ctx, s, cfg, prev.box.width)
+  let lines = wrappedLines(ctx, s, cfg, gridW)
   let pitch = pitchOf(ctx, s, cfg)
   let sd = scrollContainerData(id)
   let viewH = if sd.found: sd.containerDimensions.height
@@ -518,7 +579,7 @@ proc pageStep(s: string, cfg: TextConfig, id, textEl: ElementId,
   var pageLines = int(viewH / max(pitch, 1.0)) - 1
   if pageLines < 1:
     pageLines = 1
-  let g = caretGeom(s, caretPos(), cfg, prev.box.width)
+  let g = caretGeom(s, caretPos(), cfg, gridW)
   let maxLine = max(lines.len - 1, 0)
   var li = g.lineIdx
   li = if up: max(li - pageLines, 0) else: min(li + pageLines, maxLine)
@@ -536,6 +597,106 @@ proc pageStep(s: string, cfg: TextConfig, id, textEl: ElementId,
     p.y += (float32(li) - float32(g.lineIdx)) * pitch
     setScrollPosition(id, p)
 
+## --- indentation -------------------------------------------------------------------
+##
+## Tab and Shift+Tab, the way code editors have them: a selection across
+## lines indents (or outdents) every line it touches, keeping the same
+## text selected; otherwise Tab types the indent and Shift+Tab takes one
+## off the caret's line. Outdenting removes one leading tab, or up to an
+## indent's width of spaces.
+
+func leadingWs(s: string, bol, stop: int): string =
+  ## The run of spaces and tabs at `bol`, cut off at `stop`.
+  result = ""
+  var i = bol
+  while i < stop and i < s.len and (s[i] == ' ' or s[i] == '\t'):
+    result.add s[i]
+    inc i
+
+func carried(pos: int, collapsed: bool, starts, removes: seq[int],
+             width: int, outdent: bool): int =
+  ## Where `pos` lands once `shiftLines` edited the line fronts at
+  ## `starts`. Indenting pushes along what lies past a front -- and a
+  ## bare caret on it; a selection edge at column 0 stays at column 0.
+  ## Outdenting pulls positions back, those inside a removed run to the
+  ## line's new front.
+  result = pos
+  for k in 0 ..< starts.len:
+    let st = starts[k]
+    if outdent:
+      let r = removes[k]
+      if pos >= st + r: result -= r
+      elif pos > st: result -= pos - st
+    elif pos > st or (pos == st and collapsed):
+      result += width
+
+proc shiftLines(s: var string, indent: string, outdent: bool) =
+  ## Indent or outdent the lines the selection (or the caret) is on.
+  let c = caretPos()
+  let a = anchorPos()
+  let lo = min(c, a)
+  var hi = max(c, a)
+  # A selection ending at a line's very start leaves that line alone.
+  if hi > lo and s[hi - 1] == '\n':
+    dec hi
+  var starts: seq[int] = @[]
+  var removes: seq[int] = @[]
+  var p = lineBol(s, lo)
+  while true:
+    starts.add p
+    var r = 0
+    if outdent:
+      if p < s.len and s[p] == '\t':
+        r = 1
+      else:
+        while p + r < s.len and s[p + r] == ' ' and r < indent.len:
+          inc r
+    removes.add r
+    let e = lineEol(s, p)
+    if e >= hi or e >= s.len:
+      break
+    p = e + 1
+  var outp = ""
+  var last = 0
+  for k in 0 ..< starts.len:
+    outp.add substr(s, last, starts[k] - 1)
+    if outdent:
+      last = starts[k] + removes[k]
+    else:
+      outp.add indent
+      last = starts[k]
+  outp.add substr(s, last, s.len - 1)
+  s = outp
+  setCarets(s, carried(c, c == a, starts, removes, indent.len, outdent),
+            carried(a, c == a, starts, removes, indent.len, outdent))
+
+proc tabKey(s: var string, indent: string, outdent: bool) =
+  let c = caretPos()
+  let a = anchorPos()
+  let lo = min(c, a)
+  let hi = max(c, a)
+  var multiLine = false
+  for i in lo ..< hi:
+    if s[i] == '\n':
+      multiLine = true
+  if outdent or multiLine:
+    shiftLines(s, indent, outdent)
+  else:
+    insertAtCaret(s, indent)
+
+proc runEngine(id: ElementId, s: var string, evs: var seq[KeyEvent]) =
+  ## Hand the pending plain keys to the shared engine, as one history step.
+  if evs.len == 0:
+    return
+  let prevSnap = snapFrom(id, s)
+  var inp = s   # the engine sinks its input; `s` stays pristine here
+  let step = editStepWith(inp, evs)
+  evs.setLen(0)
+  if step.text != s:
+    s = step.text
+    syncCaret(s.len)
+    pushEdit(id, prevSnap, s)
+
 ## --- the widget -------------------------------------------------------------------
 
 widget editor(id: ElementId, text: string,
@@ -549,10 +710,12 @@ widget editor(id: ElementId, text: string,
   ## Mouse: a click places the caret (`hitTest` on the rendered line
   ## grid), holding and dragging sweeps a selection, a double click picks
   ## the word under the pointer. Keys: everything `common`'s engine does,
-  ## plus Enter as a newline, Ctrl+A select-all, Ctrl+Z / Ctrl+Y undo /
-  ## redo and PageUp/PageDown -- consumed here before the shared map
-  ## sees them. While `blocked` the widget paints as normal but hears no
-  ## keys and takes no clicks: a modal dialog owns the session meanwhile.
+  ## plus Enter as a newline (indented like its line with `autoIndent`),
+  ## Tab / Shift+Tab indent and outdent, Ctrl+A select-all, Ctrl+Z undo,
+  ## Ctrl+Y / Ctrl+Shift+Z redo and PageUp/PageDown -- handled here, in
+  ## the order they were pressed, before the shared map sees the rest.
+  ## While `blocked` the widget paints as normal but hears no keys and
+  ## takes no clicks: a modal dialog owns the session meanwhile.
   ## Emits `TextChanged` with the new text when this frame edited it.
   emits TextChanged
   let t = activeTheme
@@ -565,6 +728,7 @@ widget editor(id: ElementId, text: string,
   let textEl = ElementId(id: textChildId(id.id))
   let ppos = currentContext().pointerData().position
   let wasLive = focused(id)
+  let gridW = gridWidth(id, textEl, opts)
   let caretBefore = editorCaret(id, text)
   let anchorBefore = editorAnchor(id, text)
 
@@ -575,7 +739,8 @@ widget editor(id: ElementId, text: string,
     # ---- focus & pointer ------------------------------------------------
     let was = wasLive
     if clickedIn(id):
-      let prev = elementData(textEl)
+      var prev = elementData(textEl)
+      prev.box.width = gridW
       var pos = s.len
       if prev.found:
         pos = hitTest(s, cfg, prev.box, ppos.x - prev.box.x,
@@ -591,7 +756,8 @@ widget editor(id: ElementId, text: string,
       blur()
     elif focused(id) and pressing(id):
       # Held after the placing click: drag-select, anchor where it is.
-      let prev = elementData(textEl)
+      var prev = elementData(textEl)
+      prev.box.width = gridW
       if prev.found:
         let pos = hitTest(s, cfg, prev.box, ppos.x - prev.box.x,
                           ppos.y - prev.box.y)
@@ -607,46 +773,52 @@ widget editor(id: ElementId, text: string,
       discard takeRedo(id, s)
 
     # ---- keys --------------------------------------------------------------
+    # The editor's own keys act in sequence with the engine's: plain keys
+    # queue up and run through the engine before each key handled here.
     if focused(id) and not opts.readOnly:
       var rest: seq[KeyEvent] = @[]
       let evs = frameKeys()
       for ev in evs:
-        var consumed = true
+        let newline = ev.kind == kevEnter or
+          (ev.kind == kevLetter and ev.ctrl and not ev.alt and ev.ch == 'm')
+        if newline:
+          # Newline, not a commit: the document never "leaves" the field.
+          runEngine(id, s, rest)
+          var nl = "\n"
+          if opts.autoIndent:
+            let c = min(caretPos(), anchorPos())
+            nl.add leadingWs(s, lineBol(s, c), c)
+          rest.add KeyEvent(kind: kevText, text: nl)
+          continue
         case ev.kind
         of kevLetter:
-          consumed = false
-          if ev.ctrl:
-            case ev.ch
-            of 'a':
+          if ev.ctrl and not ev.alt and
+              (ev.ch == 'a' or ev.ch == 'z' or ev.ch == 'y'):
+            runEngine(id, s, rest)
+            if ev.ch == 'a':
               editorSelectAll(id, s)
-              consumed = true
-            of 'z':
-              discard takeUndo(id, s)
-              consumed = true
-            of 'y':
+            elif ev.ch == 'y' or ev.shift:
               discard takeRedo(id, s)
-              consumed = true
-            of 'm':
-              rest.add KeyEvent(kind: kevText, text: "\n")
-              consumed = true
-            else: discard
-        of kevEnter:
-          # Newline, not a commit: the document never "leaves" the field.
-          rest.add KeyEvent(kind: kevText, text: "\n")
+            else:
+              discard takeUndo(id, s)
+          else:
+            rest.add ev
+        of kevTab:
+          if opts.indent.len > 0 and not ev.ctrl and not ev.alt:
+            runEngine(id, s, rest)
+            let prevSnap = snapFrom(id, s)
+            tabKey(s, opts.indent, ev.shift)
+            if s != prevSnap.text:
+              groupKind = 0   # an indent is its own undo step
+              pushEdit(id, prevSnap, s)
+          else:
+            rest.add ev
         of kevPageUp, kevPageDown:
-          pageStep(s, cfg, id, textEl, ev.kind == kevPageUp, ev.shift)
+          runEngine(id, s, rest)
+          pageStep(s, cfg, id, textEl, ev.kind == kevPageUp, ev.shift, gridW)
         else:
-          consumed = false
-        if not consumed:
           rest.add ev
-      if rest.len > 0:
-        let prevSnap = snapFrom(id, s)
-        var inp = s   # the engine sinks its input; `s` stays pristine here
-        let step = editStepWith(inp, rest)
-        if step.text != s:
-          s = step.text
-          syncCaret(s.len)
-          pushEdit(id, prevSnap, s)
+      runEngine(id, s, rest)
 
   # ---- mirror refresh: the editor's position is whatever the engine
   # holds while it runs, and the mirror is everything else.
@@ -662,8 +834,9 @@ widget editor(id: ElementId, text: string,
       let pitch = linePitch(cfg)
       fit(min = pitch + pad2, max = float32(opts.maxLines) * pitch + pad2)
     else: grow()
+  let pads = editorPadding(opts)
   item(id, fieldDecl(id, grow(), height, dir = topToBottom,
-      padding = padAll(editorPad))
+      padding = pads)
       .clip(horizontal = not opts.wrap, vertical = true,
             childOffset = currentScrollOffset())):
     textElement(s, TextConfig(fontSize: size, color: t.palette.textColor,
@@ -674,13 +847,18 @@ widget editor(id: ElementId, text: string,
       # caret hides while a modal owns the keyboard: a blinking bar floated
       # at max zIndex would punch through the dialog it sits over.
       let (slo, shi) = editorSel(id, s)
-      selectionOverlay(textEl.id, s, cfg, slo, shi)
+      let wrapW = if opts.wrap: gridW else: 0.0'f32
+      selectionOverlay(textEl.id, s, cfg, slo, shi, wrapW)
       if focused(id) and not opts.blocked:
-        caretOverlay(textEl.id, s, cfg, t.palette.textColor)
+        caretOverlay(textEl.id, s, cfg, t.palette.textColor, wrapW)
       scrollCaretIntoView(id, textEl, s, cfg, editorCaret(id, s),
-                          float32(editorPad), float32(editorPad),
-                          followX = not opts.wrap)
-    scrollbar(localId("editor.bar"), id)
+                          float32(pads.right), float32(pads.bottom),
+                          followX = not opts.wrap, wrapWidth = wrapW)
+    if barsAlways(opts):
+      gutterStrip(id, true, float32(pads.right - editorPad))
+      if not opts.wrap:
+        gutterStrip(id, false, float32(pads.bottom - editorPad))
+    scrollbar(localId("editor.bar"), id, always = barsAlways(opts))
 
   let moved = editorCaret(id, s) != caretBefore or
     editorAnchor(id, s) != anchorBefore

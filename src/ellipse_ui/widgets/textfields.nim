@@ -64,7 +64,7 @@ widget multilineField(id: ElementId, text: string, placeholder = "",
     # Remap Enter (and C-m) to a newline so the shared engine treats it as
     # text; everything else -- Emacs chords included -- flows through.
     var frame: seq[KeyEvent] = @[]
-    let evs = keyEvents()
+    let evs = frameKeys()
     for ev in evs:
       if ev.kind == kevEnter or
           (ev.kind == kevLetter and ev.ctrl and ev.ch == 'm'):
@@ -90,9 +90,11 @@ widget multilineField(id: ElementId, text: string, placeholder = "",
             childOffset = currentScrollOffset())):
     textElement(shown, TextConfig(fontSize: fontSize, color: color))
     if focused(id):
-      caretOverlay(textEl.id, edited, cfg)
+      let wrapW = wrapWidthIn(id, float32(t.metrics.padFieldX))
+      caretOverlay(textEl.id, edited, cfg, wrapWidth = wrapW)
       scrollCaretIntoView(id, textEl, edited, cfg, caretPos(),
-                          float32(t.metrics.padFieldX), padY)
+                          float32(t.metrics.padFieldX), padY,
+                          wrapWidth = wrapW)
     scrollbar(localId("multiline.bar"), id)
   if edited != text:
     emit TextChanged(id: id, text: edited)

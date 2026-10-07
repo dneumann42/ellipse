@@ -197,7 +197,7 @@ func defaultMetrics*(): Metrics =
 func defaultScrollbarStyle*(): ScrollbarStyle =
   ScrollbarStyle(
     width: 10.0, margin: 4.0, radius: 5.0, minThumb: 28.0,
-    track: rgb(6, 6, 9, 120),
+    track: rgb(118, 124, 148, 45),
     thumb: rgb(118, 124, 148, 170),
     thumbHot: rgb(168, 176, 205, 235))
 

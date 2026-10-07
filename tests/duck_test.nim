@@ -39,13 +39,14 @@ proc nearly(a, b: float32): bool =
 
 var text = ""
 var lastSt = EditorStats()
+var editOpts = EditorOpts()
 
 let eid = hashId("t.edit")
 
 proc draw() =
   beginLayout()
   clay "root", col(width = grow(), height = grow(), gap = 0):
-    lastSt = editor(eid, text)
+    lastSt = editor(eid, text, editOpts)
     text = lastSt.text
     discard button(hashId("t.out"), "out")   # a click target outside the editor
   endLayout()
@@ -283,6 +284,121 @@ proc main() {.raises.} =
   typeStr("!")
   expect(text == "xyz!" and lastSt.edited,
     "editor: keystrokes report as edits, got " & text)
+
+  # --- the caret rides the text end while typing ------------------------------------
+  # Wrapping must use the box's width, not the text box's last-frame width
+  # (the old text's): that put a just-typed caret on a phantom next line.
+  text = ""
+  frame()
+  editorPlaceCaret(eid, text, 0)
+  let caretEl = ElementId(id: hashNumber(1'u32, tel.id))
+  var drift = 0
+  for ch in "typing along":
+    var one = ""
+    one.add ch
+    typeStr(one)
+    let cb = boxOf(caretEl)
+    let tb = boxOf(tel)
+    if not nearly(cb.y, tb.y) or not nearly(cb.x, tb.x + tb.width):
+      inc drift
+  expect(drift == 0, "editor: caret at the text end on typing frames, " &
+    $drift & " frames off")
+
+  # --- code editing: Tab, Shift+Tab, auto-indent -------------------------------------
+  text = "ab"
+  frame()
+  editorPlaceCaret(eid, text, 0)
+  pressKey(kevTab)
+  expect(text == "    ab" and caretPos() == 4,
+    "editor: Tab inserts the indent, got '" & text & "'")
+  pressKey(kevTab, shift = true)
+  expect(text == "ab" and caretPos() == 0,
+    "editor: Shift+Tab outdents the line, got '" & text & "'")
+  text = "one\ntwo\nthree"
+  frame()
+  editorSelect(eid, text, 1, 6)            # "ne\ntw": two lines touched
+  pressKey(kevTab)
+  expect(text == "    one\n    two\nthree",
+    "editor: Tab indents every selected line, got '" & text & "'")
+  expect(selNow() == (5, 14),
+    "editor: the selection follows the indented text, got " & $selNow().lo &
+    ".." & $selNow().hi)
+  pressKey(kevTab, shift = true)
+  expect(text == "one\ntwo\nthree" and selNow() == (1, 6),
+    "editor: Shift+Tab outdents them back, got '" & text & "'")
+  pressChord('z', ctrl = true)
+  expect(text == "    one\n    two\nthree",
+    "editor: an outdent undoes on its own, got '" & text & "'")
+  pressChord('z', ctrl = true, shift = true)
+  expect(text == "one\ntwo\nthree", "editor: Ctrl+Shift+Z redoes, got '" &
+    text & "'")
+  editOpts.autoIndent = true
+  text = "  if x:"
+  frame()
+  editorPlaceCaret(eid, text, text.len)
+  pressKey(kevEnter)
+  typeStr("y")
+  expect(text == "  if x:\n  y",
+    "editor: autoIndent keeps the line's indent, got '" & text & "'")
+  editOpts.autoIndent = false
+  # keys act in the order pressed: the Tab lands between the two letters
+  text = ""
+  frame()
+  editorPlaceCaret(eid, text, 0)
+  pushKeyEvent KeyEvent(kind: kevText, text: "a")
+  pushKeyEvent KeyEvent(kind: kevTab)
+  pushKeyEvent KeyEvent(kind: kevText, text: "b")
+  frame()
+  expect(text == "a    b", "editor: same-frame keys keep their order, got '" &
+    text & "'")
+
+  # --- word deletes and Shift+Up/Down -------------------------------------------------
+  text = "alpha beta gamma"
+  frame()
+  editorPlaceCaret(eid, text, text.len)
+  pressKey(kevBackspace, ctrl = true)
+  expect(text == "alpha beta ", "editor: Ctrl+Backspace deletes a word, got '" &
+    text & "'")
+  editorPlaceCaret(eid, text, 0)
+  pressKey(kevDelete, ctrl = true)
+  expect(text == " beta ", "editor: Ctrl+Delete deletes a word, got '" & text &
+    "'")
+  text = "abc\ndef"
+  frame()
+  editorPlaceCaret(eid, text, 1)
+  pressKey(kevDown, shift = true)
+  expect(selNow() == (1, 5), "editor: Shift+Down extends the selection, got " &
+    $selNow().lo & ".." & $selNow().hi)
+  pressKey(kevUp, shift = true)
+  expect(selNow() == (1, 1), "editor: Shift+Up shrinks it back, got " &
+    $selNow().lo & ".." & $selNow().hi)
+
+  # --- scrollbars stay up, wrap on or off, and the text keeps clear of them --------
+  proc barTracks(): seq[Rect] =
+    result = @[]
+    let cmds = renderCommands()
+    for c in cmds:
+      if c.kind == renderRectangle and c.zIndex == 220'i16:
+        result.add c.box
+  for w in [true, false]:
+    editOpts.wrap = w
+    for n in [3, 400]:
+      var doc = ""
+      for i in 0 ..< n:
+        doc.add "a line of text\n"
+      text = doc
+      frame()
+      frame()
+      frame()
+      let bars = barTracks()
+      let want = if w: 1 else: 2
+      expect(bars.len == want, "editor: wrap=" & $w & " lines=" & $n &
+        " shows " & $want & " scrollbar(s), got " & $bars.len)
+      if bars.len > 0:
+        let tb = boxOf(tel)
+        expect(tb.x + tb.width <= bars[0].x,
+          "editor: wrap=" & $w & " text stops before the vertical bar")
+  editOpts.wrap = true
 
   expect(takeErrors().len == 0, "editor: no clay errors after the session")
 

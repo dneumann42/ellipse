@@ -45,6 +45,7 @@ test: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/widgets_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/theme_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/keyboard_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/keys_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/duck_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/pacing_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/pacing_loop_test.nim

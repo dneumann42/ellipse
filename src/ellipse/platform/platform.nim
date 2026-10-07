@@ -97,25 +97,36 @@ const
   ScanF10 = 67'i32
   ScanF11 = 68'i32
   ScanF12 = 69'i32
-  ## The chords a text app binds beyond letters: minus(45), equals(46) and
-  ## the digits 1..9,0 (30..39); with Ctrl they arrive as `kevLetter`
-  ## carrying the *unshifted meaning* char ('-', '+', '1'..'9', '0').
-  ScanMinus = 45'i32
-  ScanEquals = 46'i32
+  ## Insert, and the digit row 1..9,0 (30..39): with Ctrl/Alt a digit
+  ## chord carries its digit whatever the layout prints on the key (the
+  ## French row types '&' unshifted).
+  ScanInsert = 73'i32
   ScanDigit1 = 30'i32
   ScanDigit0 = 39'i32
-  ## Keypad minus / plus, same `kevLetter` treatment as the chords above.
+  ## The keypad: / * - + (84..87), 1..9 (89..97), 0 (98), . (99). With
+  ## NumLock on they type their symbol; off, the digits are the navigation
+  ## keys printed under them.
+  ScanKPDivide = 84'i32
+  ScanKPMultiply = 85'i32
   ScanKPMinus = 86'i32
   ScanKPPlus = 87'i32
+  ScanKP1 = 89'i32
+  ScanKP9 = 97'i32
+  ScanKP0 = 98'i32
+  ScanKPPeriod = 99'i32
   ## QWERTY home-row letters, as SDL3 scancodes: A..Z run 4..29, so a
   ## scancode in this range maps to `chr('a' + scancode - 4)`.
   ScanA = 4'i32
   ScanZ = 29'i32
   ## SDL3 keymods: Shift = LSHIFT | RSHIFT, Ctrl = LCTRL | RCTRL,
-  ## Alt = LALT | RALT.
+  ## Alt = LALT | RALT; NumLock, CapsLock and Mode (AltGr, the third
+  ## level some layouts type '@', '{' or '|' on).
   ModShift = 0x00000003'i32
   ModCtrl = 0x000000C0'i32
   ModAlt = 0x00000300'i32
+  ModNum = 0x00001000'i32
+  ModCaps = 0x00002000'i32
+  ModMode = 0x00004000'i32
 
 type
   SDL_Window {.importc: "SDL_Window", header: "<SDL3/SDL.h>".} = object
@@ -304,25 +315,27 @@ type
 
 type
   KeyEventKind* = enum
-    ## What a `KeyEvent` carries. Printable input arrives as `kevText`
-    ## (SDL text events, keyboard-layout independent); the rest are the
-    ## navigation keys the UI widgets edit with. Ctrl/Alt + a letter (the
-    ## Emacs-style editing chords) arrive as `kevLetter` with `ch` set --
-    ## and so do the Ctrl/Alt chords on '-', '+' and the digits, carrying
-    ## that char. `kevNone` marks ignored keys and never enters the queue.
+    ## What a `KeyEvent` carries. Printable input arrives as `kevText`:
+    ## the composed string, layout, Shift, CapsLock and AltGr applied. The
+    ## rest are the named keys the UI edits and navigates with. Ctrl/Alt
+    ## held on any printable key makes a chord instead: `kevLetter` with
+    ## `ch` the key's *unshifted* char -- the lowered letter, the digit,
+    ## '-', '=', '/', '[', ... (Shift travels in `shift`). `kevNone` marks
+    ## ignored keys and never enters the queue.
     kevNone, kevText, kevLetter, kevBackspace, kevDelete, kevLeft, kevRight,
     kevUp, kevDown, kevHome, kevEnd, kevEnter, kevEscape,
     kevPageUp, kevPageDown,
     kevF1, kevF2, kevF3, kevF4, kevF5, kevF6,
     kevF7, kevF8, kevF9, kevF10, kevF11, kevF12,
-    kevTab   ## Tab / Shift+Tab: focus traversal (see `ellipse_ui/focus`)
+    kevTab,   ## Tab / Shift+Tab: focus traversal (see `ellipse_ui/focus`)
+    kevInsert
 
   KeyEvent* = object
     kind*: KeyEventKind
     shift*: bool
     ctrl*: bool
     alt*: bool
-    ch*: char          ## kevLetter only: the lowered letter of the chord
+    ch*: char          ## kevLetter only: the chord's unshifted char
     text*: string      ## kevText only: the composed string of one keypress
 
 type
@@ -550,26 +563,77 @@ proc utf8Of(cp: int32): string =
     result.add char(0x80 or ((cp shr 6) and 0x3F))
     result.add char(0x80 or (cp and 0x3F))
 
+proc printable(cp: int32): bool =
+  ## A keycode that is a character (not a control or a named key).
+  cp >= 32 and cp != 127 and (cp and 0x40000000) == 0
+
+proc keypadKey(scancode: int32, numLock: bool): tuple[kind: KeyEventKind, ch: char] =
+  ## The keypad: its operators always type, its digits and '.' type with
+  ## NumLock on and are the navigation keys printed under them with it off.
+  ## `kevNone` with `ch` = 0 for scancodes off the keypad.
+  case scancode
+  of ScanKPDivide: (kevText, '/')
+  of ScanKPMultiply: (kevText, '*')
+  of ScanKPMinus: (kevText, '-')
+  of ScanKPPlus: (kevText, '+')
+  of ScanKP1 .. ScanKP9, ScanKP0, ScanKPPeriod:
+    let d =
+      if scancode == ScanKP0: '0'
+      elif scancode == ScanKPPeriod: '.'
+      else: char(ord('1') + int(scancode - ScanKP1))
+    if numLock:
+      (kevText, d)
+    else:
+      case d
+      of '1': (kevEnd, '\0')
+      of '2': (kevDown, '\0')
+      of '3': (kevPageDown, '\0')
+      of '4': (kevLeft, '\0')
+      of '6': (kevRight, '\0')
+      of '7': (kevHome, '\0')
+      of '8': (kevUp, '\0')
+      of '9': (kevPageUp, '\0')
+      of '0': (kevInsert, '\0')
+      of '.': (kevDelete, '\0')
+      else: (kevNone, '\0')
+  else: (kevNone, '\0')
+
+proc chordChar(scancode: int32): char =
+  ## The char a Ctrl/Alt chord on `scancode` carries: letters by position
+  ## (QWERTY, so `Ctrl+Z` stays put on any layout), digits likewise, the
+  ## rest the layout's unshifted symbol. 0 when the key types nothing.
+  if scancode >= ScanA and scancode <= ScanZ:
+    return char(ord('a') + int(scancode - ScanA))
+  if scancode >= ScanDigit1 and scancode <= ScanDigit0:
+    # 30..38 are '1'..'9'; 39 is '0' -- wrap the tenth step back.
+    return char(ord('0') + (int(scancode - ScanDigit1) + 1) mod 10)
+  let cp = SDL_GetKeyFromScancode(scancode, 0'i32, false)
+  if printable(cp) and cp < 127:
+    return char(cp)
+  return '\0'
+
 proc keyEventFor(scancode, key, modifiers: int32): KeyEvent =
   ## Maps a keydown to a `KeyEvent`; unknown keys yield `kevNone`.
-  ## Ctrl/Alt + letter becomes a `kevLetter` chord -- and so do Ctrl/Alt
-  ## chords on '-', '+', the keypad +/-. and the digit row, carrying that
-  ## char. The function row arrives as `kevF1`..`kevF12`, PgUp/PgDn as
-  ## `kevPageUp`/`kevPageDown`. With the IME path off, printable keys also
-  ## synthesize a `kevText` from the event's keycode -- the platform
-  ## keymap already resolved the layout, shift and dead keys into it --
-  ## so text entry works without StartTextInput stealing raw key presses
-  ## from an input method.
+  ## Named keys (Enter, arrows, F1..F12, ...) keep their kind whatever the
+  ## modifiers. Ctrl or Alt on a printable key makes a `kevLetter` chord
+  ## carrying the key's unshifted char (see `chordChar`). AltGr (`Mode`)
+  ## is not Alt: it selects a layout level, so AltGr+Q types '@' on a
+  ## German board. With the IME path off, printable keys synthesize a
+  ## `kevText` from the platform keymap with Shift, CapsLock and AltGr
+  ## applied -- *not* from the event's keycode, which SDL3 reports
+  ## unshifted for symbols (Shift+1 is SDLK_1 there, not '!').
+  let mode = (modifiers and ModMode) != 0
   result = KeyEvent(kind: kevNone,
     shift: (modifiers and ModShift) != 0,
     ctrl: (modifiers and ModCtrl) != 0,
-    alt: (modifiers and ModAlt) != 0)
+    alt: (modifiers and ModAlt) != 0 and not mode)
   case scancode
   of ScanEnter, ScanKeypadEnter: result.kind = kevEnter
   of ScanEscape: result.kind = kevEscape
   of ScanTab: result.kind = kevTab
   of ScanBackspace: result.kind = kevBackspace
   of ScanDelete: result.kind = kevDelete
+  of ScanInsert: result.kind = kevInsert
   of ScanHome: result.kind = kevHome
   of ScanEnd: result.kind = kevEnd
   of ScanPageUp: result.kind = kevPageUp
@@ -591,32 +655,26 @@ proc keyEventFor(scancode, key, modifiers: int32): KeyEvent =
   of ScanF11: result.kind = kevF11
   of ScanF12: result.kind = kevF12
   else:
-    if scancode >= ScanA and scancode <= ScanZ and (result.ctrl or result.alt):
-      result.kind = kevLetter
-      result.ch = char(ord('a') + int(scancode - ScanA))
+    let pad = keypadKey(scancode, (modifiers and ModNum) != 0)
+    if pad.kind != kevNone and pad.kind != kevText:
+      result.kind = pad.kind            # NumLock off: a navigation key
     elif result.ctrl or result.alt:
-      # The chords a text app binds beyond letters: minus, equals (delivered
-      # as '+', its shifted meaning), the keypad +/-. and the digit row.
-      case scancode
-      of ScanMinus, ScanKPMinus:
+      let ch = if pad.kind == kevText: pad.ch else: chordChar(scancode)
+      if ch != '\0':
         result.kind = kevLetter
-        result.ch = '-'
-      of ScanEquals, ScanKPPlus:
-        result.kind = kevLetter
-        result.ch = '+'
-      of ScanDigit1 .. ScanDigit0:
-        result.kind = kevLetter
-        # 30..38 are '1'..'9'; 39 is '0' -- wrap the tenth step back.
-        result.ch = char(ord('0') + (int(scancode - ScanDigit1) + 1) mod 10)
-      else:
-        discard
-    elif not result.ctrl and not result.alt and not textImeActive:
-      var cp = key
-      if cp == 0:   # some backends leave `key` unset; consult the keymap
-        # key_event=false = full modifier translation (shift applies to all
-        # layers); with true, SDL only applies caps-lock to letters.
-        cp = SDL_GetKeyFromScancode(scancode, modifiers, false)
-      if cp >= 32 and cp != 127 and (cp and 0x40000000) == 0:
+        result.ch = ch
+    elif pad.kind == kevText:
+      if not textImeActive:
+        result.kind = kevText
+        result.text = ""
+        result.text.add pad.ch
+    elif not textImeActive:
+      # The keymap, with the modifiers that pick a character applied.
+      var cp = SDL_GetKeyFromScancode(scancode,
+        modifiers and (ModShift or ModCaps or ModMode), false)
+      if not printable(cp) and printable(key):
+        cp = key                        # a backend the keymap can't answer
+      if printable(cp):
         result.kind = kevText
         result.text = utf8Of(cp)
 
@@ -766,6 +824,12 @@ proc consumeKeys*(kind: KeyEventKind) =
 proc keyEvents*(): seq[KeyEvent] =
   ## Keyboard/text events collected since the last `beginInputFrame`.
   activeApp.keyFrame
+
+proc setKeyEvents*(evs: seq[KeyEvent]) =
+  ## Replace this input frame's events: the seam key routing layers (the
+  ## keymaps of `ellipse_ui/keys`) take the keys they handled out through,
+  ## so nothing downstream sees them again.
+  activeApp.keyFrame = evs
 
 proc wheelDelta*(): tuple[x, y: float32] =
   ## Accumulated scroll-wheel movement since the last `beginInputFrame`,

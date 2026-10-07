@@ -14,6 +14,9 @@ export theme
 import ./focus
 export focus
 
+import ./keys
+export keys
+
 import ./events
 export events
 
@@ -172,6 +175,9 @@ proc updateUI*(skipWheel: bool = false) =
   wheelHeld = false
   for hook in inputHooks:
     hook()
+
+  # App shortcuts take their keys before focus and the widgets see them.
+  runKeymaps()
 
   let pointer = pointerState()
   setPointerState(vec2(pointer.x, pointer.y), pointer.down)

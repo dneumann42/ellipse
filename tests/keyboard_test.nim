@@ -25,6 +25,7 @@ proc expect(cond: bool, msg: string) =
 const
   ModS = 0x00000003'i32     # KMOD_SHIFT
   ModC = 0x000000C0'i32     # KMOD_CTRL
+  ModNumLock = 0x00001000'i32  # KMOD_NUM
 
 var seenEvents: seq[KeyEvent] = @[]
 var seenImeMode: seq[KeyEvent] = @[]
@@ -72,13 +73,25 @@ proc main() {.raises.} =
   pushKeyboard(42, 8, 0)           # Backspace
   pushKeyboard(4, 97, 0)           # 'a' -> synthesized kevText
   pushKeyboard(5, 0, ModS)         # B, keycode unset -> keymap fallback
+  # Shifted symbols: SDL3 hands these keydowns their *unshifted* keycode
+  # ('1', '=', '/', '['); the typed text must still be the symbol.
+  pushKeyboard(30, 49, ModS)       # Shift+1 -> "!"
+  pushKeyboard(31, 50, ModS)       # Shift+2 -> "@"
+  pushKeyboard(46, 61, ModS)       # Shift+= -> "+"
+  pushKeyboard(56, 47, ModS)       # Shift+/ -> "?"
+  pushKeyboard(47, 91, ModS)       # Shift+[ -> "{"
+  pushKeyboard(56, 47, ModC)       # Ctrl+/ -> chord '/'
+  pushKeyboard(46, 61, ModC)       # Ctrl+= -> chord '='
+  pushKeyboard(93, 0, ModNumLock)  # keypad 5, NumLock on -> "5"
+  pushKeyboard(96, 0, 0)           # keypad 8, NumLock off -> Up
+  pushKeyboard(73, 0, 0)           # Insert
   pushSdlWheel(0.0, 2.0)
 
   start(update, render)   # three pumped frames, then the pushed quit lands
 
-  expect(seenEvents.len == 5, "keyboard pump: all five key events arrive, got " &
+  expect(seenEvents.len == 15, "keyboard pump: all fifteen key events arrive, got " &
     $seenEvents.len)
-  if seenEvents.len == 5:
+  if seenEvents.len == 15:
     expect(seenEvents[0].kind == kevText and seenEvents[0].text == "hi",
       "keyboard pump: SDL text input reaches keyEvents")
     expect(seenEvents[1].kind == kevLetter and seenEvents[1].ch == 'a' and
@@ -91,6 +104,23 @@ proc main() {.raises.} =
     expect(seenEvents[4].kind == kevText and seenEvents[4].text == "B",
       "keyboard pump: shift+B resolves via the keymap fallback, got " &
       $seenEvents[4].text)
+    let typed = ["!", "@", "+", "?", "{"]
+    for i in 0 ..< typed.len:
+      let ev = seenEvents[5 + i]
+      expect(ev.kind == kevText and ev.text == typed[i],
+        "keyboard pump: shifted symbol types " & typed[i] & ", got " & ev.text)
+    expect(seenEvents[10].kind == kevLetter and seenEvents[10].ch == '/' and
+        seenEvents[10].ctrl,
+      "keyboard pump: Ctrl+/ is a chord on '/'")
+    expect(seenEvents[11].kind == kevLetter and seenEvents[11].ch == '=' and
+        seenEvents[11].ctrl,
+      "keyboard pump: Ctrl+= is a chord on '='")
+    expect(seenEvents[12].kind == kevText and seenEvents[12].text == "5",
+      "keyboard pump: keypad 5 with NumLock types 5")
+    expect(seenEvents[13].kind == kevUp,
+      "keyboard pump: keypad 8 without NumLock is Up")
+    expect(seenEvents[14].kind == kevInsert,
+      "keyboard pump: Insert arrives")
   expect(seenImeMode.len == 0,
     "keyboard pump: IME mode disables keydown synthesis, got " &
     $seenImeMode.len)

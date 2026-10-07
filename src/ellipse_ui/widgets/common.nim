@@ -64,11 +64,13 @@ proc clickedOut*(id: ElementId): bool =
 ##
 ## Keys follow the Emacs/readline default map: C-a/C-e line edges, C-b/C-f
 ## and arrows characters (M-b/M-f, M-Left/M-Right words), C-p/C-n and
-## Up/Down lines, C-d/C-h and Delete/Backspace deletion, C-k/C-u/C-w/M-d
-## kills into a yank-able kill buffer (C-y), C-c/C-x/C-v the *system*
-## clipboard, Ctrl+Home/End the document edges, Enter/C-m commit and
-## Escape/C-g cancel. Single-line fields never contain `\n`, so their
-## "line" motions degenerate to buffer edges automatically.
+## Up/Down lines, C-d/C-h and Delete/Backspace deletion,
+## Ctrl+Backspace/Ctrl+Delete a word, C-k/C-u/C-w/M-d kills into a
+## yank-able kill buffer (C-y), C-c/C-x/C-v the *system* clipboard,
+## Ctrl+Home/End the document edges, Enter/C-m commit and Escape/C-g
+## cancel. Every motion extends the selection while Shift is held.
+## Single-line fields never contain `\n`, so their "line" motions
+## degenerate to buffer edges automatically.
 
 type
   EditOutcome* = enum
@@ -95,6 +97,7 @@ proc acceptAll*(c: char): bool = true
 
 var
   bootTime = getMonoTime().ticks
+  blinkStart = bootTime  ## the caret's blink phase restarts here on input
   snapshot = ""          ## the text as it was when focused (Escape target)
   caret = 0
   selAnchor = 0
@@ -236,7 +239,7 @@ proc gotoWord(s: string, dir: int, extend: bool) =
   if not extend:
     selAnchor = caret
 
-proc gotoLine(s: string, delta: int) =
+proc gotoLine(s: string, delta: int, extend = false) =
   ## Up/Down and C-p/C-n: keep the column where the target line has room.
   let col = caret - bolOf(s, caret)
   if delta < 0:
@@ -248,7 +251,8 @@ proc gotoLine(s: string, delta: int) =
     let le = eolOf(s, caret)         # le is the newline below, when any
     if le < s.len:
       caret = min(le + 1 + col, s.len)
-  selAnchor = caret
+  if not extend:
+    selAnchor = caret
 
 ## --- delete & kill -------------------------------------------------------------
 ##
@@ -283,6 +287,21 @@ proc deleteForward(s: var string) =
     while pos < s.len and isContByte(s[pos]):
       inc pos
     splice(s, caret, pos, "")
+
+proc deleteWordBackward(s: var string) =
+  ## Ctrl+Backspace: the selection, else back to the previous word start.
+  ## A plain delete -- unlike C-w it leaves the kill buffer alone.
+  if selHi() > selLo():
+    splice(s, selLo(), selHi(), "")
+  elif caret > 0:
+    splice(s, prevWordStart(s, caret), caret, "")
+
+proc deleteWordForward(s: var string) =
+  ## Ctrl+Delete: the selection, else on to the next word end.
+  if selHi() > selLo():
+    splice(s, selLo(), selHi(), "")
+  elif caret < s.len:
+    splice(s, caret, nextWordEnd(s, caret), "")
 
 proc takeKill(s: var string, lo, hi: int) =
   if hi > lo:
@@ -340,6 +359,7 @@ proc caretTo*(s: string, pos: int, extend: bool) =
   caret = min(max(pos, 0), s.len)
   if not extend:
     selAnchor = caret
+  blinkStart = getMonoTime().ticks
 
 proc selectRange*(s: string, lo, hi: int) =
   ## Select the half-open range `[lo, hi)` (clamped): caret at `hi`, anchor
@@ -451,6 +471,8 @@ proc applyKeys(text: sink string, evs: seq[KeyEvent],
   ## selection while Shift is held, as with the arrow keys.
   result = EditResult(text: text)
   var s = result.text
+  if evs.len > 0:
+    blinkStart = getMonoTime().ticks   # a solid caret while keys arrive
   for ev in evs:
     case ev.kind
     of kevText:
@@ -470,8 +492,8 @@ proc applyKeys(text: sink string, evs: seq[KeyEvent],
         of 'e': gotoLineEdge(s, true, ev.shift)
         of 'b': moveCaret(s, -1, ev.shift)
         of 'f': moveCaret(s, 1, ev.shift)
-        of 'p': gotoLine(s, -1)
-        of 'n': gotoLine(s, 1)
+        of 'p': gotoLine(s, -1, ev.shift)
+        of 'n': gotoLine(s, 1, ev.shift)
         of 'h': deleteBackward(s)
         of 'd': deleteForward(s)
         of 'k': killLine(s)
@@ -491,9 +513,11 @@ proc applyKeys(text: sink string, evs: seq[KeyEvent],
         of 'd': killNextWord(s)
         else: discard
     of kevBackspace:
-      deleteBackward(s)
+      if ev.ctrl or ev.alt: deleteWordBackward(s)
+      else: deleteBackward(s)
     of kevDelete:
-      deleteForward(s)
+      if ev.ctrl or ev.alt: deleteWordForward(s)
+      else: deleteForward(s)
     of kevLeft:
       if ev.alt or ev.ctrl: gotoWord(s, -1, ev.shift)
       else: moveCaret(s, -1, ev.shift)
@@ -501,9 +525,9 @@ proc applyKeys(text: sink string, evs: seq[KeyEvent],
       if ev.alt or ev.ctrl: gotoWord(s, 1, ev.shift)
       else: moveCaret(s, 1, ev.shift)
     of kevUp:
-      gotoLine(s, -1)
+      gotoLine(s, -1, ev.shift)
     of kevDown:
-      gotoLine(s, 1)
+      gotoLine(s, 1, ev.shift)
     of kevHome:
       if ev.ctrl or ev.alt:
         # Document edges: the classic editor's Ctrl+Home / Ctrl+End.
@@ -551,10 +575,16 @@ proc syncCaret*(textLen: int) =
   if selAnchor > textLen:
     selAnchor = textLen
 
+proc restartBlink*() =
+  ## Show the caret solid from now, blinking again half a second on: what
+  ## typing and caret motion do, so the bar never vanishes mid-keystroke.
+  blinkStart = getMonoTime().ticks
+
 proc caretVisible*(): bool =
-  ## Half-second blink phase from wall-clock time. A caret on screen keeps
-  ## the loop waking at each flip; nothing else needs to run for it.
-  let ms = (getMonoTime().ticks - bootTime) div 1_000_000'i64
+  ## Half-second blink phase, counted from the last key or caret move
+  ## (`restartBlink`). A caret on screen keeps the loop waking at each
+  ## flip; nothing else needs to run for it.
+  let ms = (getMonoTime().ticks - blinkStart) div 1_000_000'i64
   requestFrameIn((500'i64 - ms mod 500'i64) * 1_000_000'i64)
   (ms div 500) mod 2 == 0
 
@@ -640,21 +670,37 @@ proc caretGeom*(text: string, pos: int, cfg: TextConfig,
                                  cfg).unwrapped.width
     result.y = yBase
 
+proc wrapWidthIn*(id: ElementId, padX: float32): float32 =
+  ## The width word-wrapped text inside box `id` wraps at: the box's
+  ## last-frame width less `padX` on each side, 0 before it was laid out.
+  ## The box sizes by its parent, not its text, so this is the width the
+  ## renderer will wrap *this* frame's text at -- what `caretOverlay`,
+  ## `scrollCaretIntoView` and pointer hit-tests take as `wrapWidth`.
+  let d = elementData(id)
+  if not d.found:
+    return 0.0
+  max(d.box.width - 2.0 * padX, 0.0)
+
 proc caretOverlay*(textElId: uint32, text: string, cfg: TextConfig,
-                   color: Color = textColor) =
+                   color: Color = textColor, wrapWidth = 0.0'f32) =
   ## Paint the blinking caret as a 2px bar *floated over* the field's text
   ## element (`textElId` = that element's auto id, see `textChildId`): the
   ## bar is attached to the text box and offset to the caret's line and
   ## column, so it rides on top of the glyphs instead of displacing them.
   ## Call right after the field's `textElement`, still inside the field,
   ## only while the field holds focus. Geometry comes from `caretGeom` --
-  ## Clay's own wrapping pass over the text box's previous-frame width.
+  ## Clay's own wrapping pass. Word-wrapped text must pass `wrapWidth`,
+  ## the width its box *may* take (the field's inner width): the text
+  ## box's own last-frame width is the old text's, one glyph short of a
+  ## just-typed line, and wrapping at it would drop the caret a line.
+  ## 0 uses the text box's last width -- right for unwrapped text.
   if focusedId() == 0'u32 or not caretVisible():
     return
   let prev = elementData(ElementId(id: textElId))
   if not prev.found:
     return                       # text never laid out yet: no geometry
-  let g = caretGeom(text, caret, cfg, prev.box.width)
+  let g = caretGeom(text, caret, cfg,
+    if wrapWidth > 0.0: wrapWidth else: prev.box.width)
   if not g.found:
     return
   openElement(ElementId(id: hashNumber(1'u32, textElId)))
@@ -700,13 +746,14 @@ proc caretNeedsFollow(id: uint32, pos, len: int): bool =
 
 proc scrollCaretIntoView*(id, textEl: ElementId, text: string,
                           cfg: TextConfig, pos: int, padX, padY: float32,
-                          followX = false) =
+                          followX = false, wrapWidth = 0.0'f32) =
   ## Nudge the scroll container `id` so the caret's line (and column, with
   ## `followX` for unwrapped text) sits inside its viewport inset by
   ## `padX`/`padY` -- what a real editor does on typing, arrowing, and a
   ## programmatic jump. Only a caret that moved (or text that changed)
   ## pulls the view; call it every frame. `textEl` is the scrolled text
-  ## element; geometry is last frame's, like `caretOverlay`.
+  ## element; geometry is last frame's, and `wrapWidth` means what it
+  ## does for `caretOverlay`.
   if not caretNeedsFollow(id.id, pos, text.len):
     return
   let sd = scrollContainerData(id)
@@ -716,7 +763,8 @@ proc scrollCaretIntoView*(id, textEl: ElementId, text: string,
   let ctx = currentContext()
   if not ctx.measureTextInstalled():
     return
-  let g = caretGeom(text, pos, cfg, prev.box.width)
+  let g = caretGeom(text, pos, cfg,
+    if wrapWidth > 0.0: wrapWidth else: prev.box.width)
   if not g.found:
     return
   let cbox = elementData(id).box

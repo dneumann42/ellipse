@@ -5,8 +5,10 @@
 ## translucent track plus a proportional thumb -- anchored over the right
 ## edge (or bottom edge) of the scroll container currently being declared.
 ## Geometry comes from the container's previous-frame layout, so a bar
-## appears one frame after its container and hides whenever the content
-## fits. The thumb is grabbable: press it and the container follows the
+## appears one frame after its container. It hides whenever the content
+## fits, unless the caller asks for `always`: then every clipped axis
+## keeps its bar, with a full-length thumb while there is nothing to
+## scroll -- a document area that shouldn't flicker its chrome as it grows. The thumb is grabbable: press it and the container follows the
 ## pointer 1:1 through `setScrollPosition`; a press on the bare track
 ## jumps the thumb to the click.
 ##
@@ -56,7 +58,7 @@ var drags: seq[Drag] = @[]
 type
   BarGeom = object
     ## One axis' worth of scrollbar geometry, from last frame's data.
-    scrollable: bool   ## axis overflows and is clipped: draw the bar
+    scrollable: bool   ## axis is clipped and overflows (or `always`): draw it
     dragging: bool     ## a thumb grab is live on this axis
     view: float32      ## container extent along the axis
     track: float32     ## usable length inside the margins
@@ -67,25 +69,44 @@ type
 proc axisPosition(d: ScrollContainerData; axis: BarAxis): float32 =
   if axis == vertical: d.position.y else: d.position.x
 
+proc clips(d: ScrollContainerData; axis: BarAxis): bool =
+  if axis == vertical: d.vertical else: d.horizontal
+
+proc overflows(d: ScrollContainerData; axis: BarAxis): bool =
+  if axis == vertical:
+    d.contentDimensions.height > d.containerDimensions.height + 1
+  else:
+    d.contentDimensions.width > d.containerDimensions.width + 1
+
 proc barGeom(container: ElementId, axis: BarAxis,
-             style: ScrollbarStyle): BarGeom =
+             style: ScrollbarStyle, always = false): BarGeom =
   ## Last frame's geometry for one axis; `scrollable` false when the axis
-  ## isn't clipped, the data isn't published yet, or the content fits.
+  ## isn't clipped, the data isn't published yet, or the content fits
+  ## (and the bar isn't `always` shown). A container clipping both axes
+  ## has a bar on each; when both show, each stops short of the corner
+  ## the other one ends in.
   let d = scrollContainerData(container)
-  if not d.found or (axis == vertical) != d.vertical or
-      (axis == horizontal) != d.horizontal:
+  if not d.found or not clips(d, axis):
+    return BarGeom(scrollable: false)
+  if not always and not overflows(d, axis):
     return BarGeom(scrollable: false)
   let (view, content) = if axis == vertical:
-    (d.containerDimensions.height, d.contentDimensions.height)
+    (d.containerDimensions.height, max(d.contentDimensions.height,
+                                       d.containerDimensions.height))
   else:
-    (d.containerDimensions.width, d.contentDimensions.width)
-  if content <= view + 1:
-    return BarGeom(scrollable: false)
-  let track = view - 2 * style.margin
+    (d.containerDimensions.width, max(d.contentDimensions.width,
+                                      d.containerDimensions.width))
+  let other = if axis == vertical: horizontal else: vertical
+  var track = view - 2 * style.margin
+  if clips(d, other) and (always or overflows(d, other)):
+    track -= style.width + style.margin
+  track = max(track, 0.0)
   let maxScroll = content - view
-  let thumb = clamp(view / content * view, min(style.minThumb, track), track)
+  let thumb = clamp(view / content * track, min(style.minThumb, track), track)
   let scrolled = clamp(-axisPosition(d, axis), 0.0, maxScroll)
   let span = max(track - thumb, 0.0)
+  if maxScroll <= 0:
+    return BarGeom(scrollable: true, view: view, track: track, thumb: track)
   result = BarGeom(
     scrollable: true,
     view: view, track: track, thumb: thumb, maxScroll: maxScroll,
@@ -134,12 +155,12 @@ proc beginDrag(container: ElementId, axis: BarAxis, grab: float32) =
   drags.add Drag(container: container.id, axis: axis, grab: grab)
 
 proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
-                   style: ScrollbarStyle) =
+                   style: ScrollbarStyle, always: bool) =
   ## Draw one bar: track, then thumb, both floating over the container's
   ## edge, positioned by last frame's scroll state. The thumb is declared
   ## later and floats above the track, so a press on the thumb never
   ## reaches the track's page-jump handler.
-  let geom = barGeom(container, axis, style)
+  let geom = barGeom(container, axis, style, always)
   if not geom.scrollable:
     return
 
@@ -174,8 +195,8 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
     thumbToPointer(container, axis, local - geom.thumb / 2.0, geom, style)
   closeElement()
 
-  if geom.track - geom.thumb <= 0:
-    return # content nearly fills the view: nothing left to grab
+  if geom.thumb <= 0:
+    return # no room for a thumb at all
 
   # Thumb: press to start a drag; `advanceDrag` keeps it glued while held.
   let (tw, th) = if axis == vertical:
@@ -192,7 +213,7 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
     .floating(attachElementId,
       offset = toffset, zIndex = 221, points = points,
       parentId = container.id))
-  if pressedNow() and pointerOver(thumbId):
+  if pressedNow() and pointerOver(thumbId) and geom.track > geom.thumb:
     let grab = pointerAlong(axis) -
       containerStart(container, axis) - style.margin - geom.top
     beginDrag(container, axis, grab)
@@ -215,16 +236,17 @@ proc advanceDrags*(container: ElementId, style: ScrollbarStyle) =
       inc i
 
 proc scrollbar*(id: ElementId, container: ElementId,
-                style = activeTheme.scrollbar) =
+                style = activeTheme.scrollbar, always = false) =
   ## Draw and drive the floating scrollbar(s) of the scroll container
   ## `container`. Declare inside that container's scope, after its
   ## children. A vertical bar hugs the right edge, a horizontal one the
-  ## bottom; each appears only while its axis actually overflows, and both
-  ## hide whenever the content fits. The look comes from the live theme's
-  ## `scrollbar` tokens unless a style is passed.
+  ## bottom, one per axis the container clips. Each appears only while
+  ## its axis actually overflows -- or, with `always`, all the time. The
+  ## look comes from the live theme's `scrollbar` tokens unless a style
+  ## is passed.
   advanceDrags(container, style)
-  scrollbarAxis(id, container, vertical, style)
-  scrollbarAxis(id, container, horizontal, style)
+  scrollbarAxis(id, container, vertical, style, always)
+  scrollbarAxis(id, container, horizontal, style, always)
 
 template scrollPanel*(label: untyped, decl: untyped, body: untyped): untyped =
   ## A framed, scrollable container with its scrollbar attached: opens the

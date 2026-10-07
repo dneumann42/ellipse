@@ -11,11 +11,13 @@
 ## Input reaches the app as widget events: the menu bar (`DuckMenus`)
 ## catches `MenuPicked`, the document (`DocArea`) the editor's
 ## `TextChanged`, and each dialog in `duck/session` the `Pressed` /
-## `TextChanged` / `Toggled` / `Picked` of its controls. Only the raw
-## keyboard chords (`appChords`) are read outside the widget tree.
+## `TextChanged` / `Toggled` / `Picked` of its controls. The keyboard
+## chords are two keymaps (`ellipse_ui/keys`): the app's, and the open
+## dialog's, which is modal over it.
 ##
 ## Run:            make run_duck [path/to/file.txt]
 ## Chords:         Ctrl+N/O/S, Ctrl+Shift+S, Ctrl+F/H/G, Ctrl+Z/Y,
+##                 Tab/Shift+Tab to indent/outdent,
 ##                 Ctrl+X/C/V/A, F3/F5, Ctrl+wheel or Ctrl+Plus/Minus/0
 ##                 to zoom, Emacs bindings inside the document (see
 ##                 ellipse_ui/widgets/common), F1 the debug overlay
@@ -37,65 +39,45 @@ proc zoomBy(delta: int) =
     elif v > 96: 96.uint16
     else: v.uint16
 
-## --- key routing -----------------------------------------------------------------
+## --- keymaps ---------------------------------------------------------------------
+##
+## The app's chords act whether or not the document holds focus, exactly
+## like menu items, and take their keys from the widgets: Ctrl+N is New,
+## not the engine's C-n line-down, and Ctrl+F opens Find without also
+## stepping the caret. A dialog's keymap is modal: while one is up the
+## app chords are dead, and Enter / Escape run its primary button and
+## its back-out instead of reaching its fields.
 
-proc routeKeys(evs: seq[KeyEvent]): seq[KeyEvent] =
-  ## The widgets' view of this frame's keystrokes. A modal dialog takes
-  ## Enter and Escape for itself (the app runs `primary`/`dismiss` from
-  ## the raw queue), and while it's up the app chords don't reach the
-  ## document either way -- `blocked` freezes it. Closed dialogs: Ctrl+N
-  ## (new) and Ctrl+H (replace) mean Duck's things, not the engine's
-  ## Ctrl-N line-down / Ctrl-H rub-out, so they leave the stream too.
-  var outp: seq[KeyEvent] = @[]
-  for ev in evs:
-    if session.open():
-      if ev.kind != kevEnter and ev.kind != kevEscape:
-        outp.add ev
-    else:
-      if ev.kind == kevLetter and ev.ctrl and (ev.ch == 'n' or ev.ch == 'h'):
-        discard
-      else:
-        outp.add ev
-  outp
+proc dialogOpen(): bool = session.open()
+proc noDialog(): bool = not session.open()
 
-proc appChords() {.raises.} =
-  ## App-level keys read from the raw queue: they act whether or not the
-  ## document holds focus, exactly like menu items.
-  let evs = keyEvents()
-  if session.open():
-    for ev in evs:
-      case ev.kind
-      of kevEnter: primary()
-      of kevEscape:
-        if kind == kAsk:
-          askBack()
-        else:
-          dismiss()
-      else:
-        discard
-    return
-  for ev in evs:
-    case ev.kind
-    of kevLetter:
-      if ev.ctrl:
-        case ev.ch
-        of 'n': beginNew()
-        of 'o': beginOpen()
-        of 's':
-          if ev.shift: beginSave()
-          else: quickSave()
-        of 'f': beginFind()
-        of 'h': beginReplace()
-        of 'g': beginGoto()
-        of '+': zoomBy(2)
-        of '-': zoomBy(-2)
-        of '0': zoomSize = baseZoom
-        else: discard
-    of kevF3: doFind(ev.shift)
-    of kevF5: doStamp()
-    of kevF4:
-      if ev.alt: beginExit()
-    else: discard
+proc escapeDialog() =
+  if kind == kAsk:
+    askBack()
+  else:
+    dismiss()
+
+proc installKeys() =
+  var app = Keymap(name: "duck", active: noDialog)
+  app.bindKey("Ctrl+N", beginNew)
+  app.bindKey("Ctrl+O", beginOpen)
+  app.bindKey("Ctrl+S", quickSave)
+  app.bindKey("Ctrl+Shift+S", beginSave)
+  app.bindKey("Ctrl+F", beginFind)
+  app.bindKey("Ctrl+H", beginReplace)
+  app.bindKey("Ctrl+G", beginGoto)
+  app.bindKey("Ctrl+Plus", proc () = zoomBy(2))
+  app.bindKey("Ctrl+Minus", proc () = zoomBy(-2))
+  app.bindKey("Ctrl+0", proc () = zoomSize = baseZoom)
+  app.bindKey("F3", proc () = doFind(false))
+  app.bindKey("Shift+F3", proc () = doFind(true))
+  app.bindKey("F5", doStamp)
+  app.bindKey("Alt+F4", beginExit)
+  installKeymap(app)
+  var dialog = Keymap(name: "duck.dialog", active: dialogOpen, modal: true)
+  dialog.bindKey("Enter", primary)
+  dialog.bindKey("Escape", escapeDialog)
+  installKeymap(dialog)
 
 ## --- the menu strip ----------------------------------------------------------------
 
@@ -246,7 +228,8 @@ widget DocArea():
       document.text = e.text
       noteEdited()
   discard editor(editorId, document.text,
-    EditorOpts(wrap: wrapOn, fontSize: zoomSize, blocked: open()))
+    EditorOpts(wrap: wrapOn, fontSize: zoomSize, blocked: open(),
+               autoIndent: true))
 
 proc wheelZoom() =
   ## Ctrl + wheel zooms, and that notch must not scroll the document too.
@@ -273,7 +256,7 @@ proc afterFrame() {.raises.} =
   syncTitle()
 
 proc setup() {.raises.} =
-  installKeyFilter(routeKeys)
+  installKeys()
   initLists()
   # an initial file rides on the command line like notepad's
   if paramStr(1).len > 0 and fileExists(paramStr(1)):
@@ -333,8 +316,8 @@ proc shot() {.raises.} =
   saveShot(base & "-file.bmp")
 
 when isMainModule:
-  let notepad = App(setup: setup, input: wheelZoom, before: appChords,
-                 view: view, after: afterFrame)
+  let notepad = App(setup: setup, input: wheelZoom, view: view,
+                 after: afterFrame)
   if getEnv("DUCK_SHOT").len > 0:
     run(notepad, script = shot)
   else:
