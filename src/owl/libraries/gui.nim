@@ -126,7 +126,7 @@ proc stringsOf(o: Object, what: string): seq[string] {.raises.} =
 
 proc blockFn(a: Args): Object =
   # The `:` block as a fun over the caller's scope.
-  newCommand("", @[], a.blk, a.env, true)
+  newCommand("", newSeq[Object](), a.blk, a.env, true)
 
 proc runBlock(a: Args): Object {.raises.} =
   result = evalForms(newEnvironment(a.env), a.blk)

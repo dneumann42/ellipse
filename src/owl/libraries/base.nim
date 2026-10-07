@@ -207,14 +207,14 @@ proc tryBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
   var failed = false
   result = nothing()
   try:
-    result = evalForms(env, args[0 ..< attempt])
+    result = evalRange(env, args, 0, attempt)
   except:
     failed = true
   errorReport = saved
   if failed:
     let child = blockScope(env)
     define(child, symbol("failure"), str(lastErrorMessage))
-    result = evalForms(child, args[attempt ..< args.len])
+    result = evalRange(child, args, attempt, args.len)
 
 proc ifBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len == 0:
@@ -224,7 +224,7 @@ proc ifBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object 
   if toBool(eval(args[0], env)):
     eval(args[bodyStart], blockScope(env))
   else:
-    evalForms(blockScope(env), args[bodyStart + 1 ..< args.len])
+    evalRange(blockScope(env), args, bodyStart + 1, args.len)
 
 proc doBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   let scope = callerBlockScope(env)
@@ -239,7 +239,7 @@ proc whileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
     err("while needs at least one body form")
   # each pass gets a fresh scope
   while toBool(eval(args[0], env)):
-    discard evalForms(blockScope(env), args[bodyStart ..< args.len])
+    discard evalRange(blockScope(env), args, bodyStart, args.len)
   nothing()
 
 proc whenBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
@@ -248,7 +248,7 @@ proc whenBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   if bodyStart >= args.len:
     err("when needs at least one body form")
   if toBool(eval(args[0], env)):
-    evalForms(blockScope(env), args[bodyStart ..< args.len])
+    evalRange(blockScope(env), args, bodyStart, args.len)
   else:
     nothing()
 
@@ -326,23 +326,18 @@ proc pairBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
     err("pair needs a symbol name, got " & stringify(key))
   pair(key, eval(args[1], env))
 
-proc nums(env: ref Environment, args: seq[Object]): seq[float64] {.raises.} =
-  numbersIn(env, args, "comparison")
-
 proc ordered(env: ref Environment, args: seq[Object], ascending: bool): Object {.raises.} =
-  let ns = nums(env, args)
-  if ns.len < 2:
+  # Every argument is evaluated (and checked) before the answer is known.
+  var ok = true
+  var previous = 0.0
+  for i in 0 ..< args.len:
+    let n = numberIn(env, args[i], "comparison")
+    if i > 0 and ok:
+      ok = if ascending: previous < n else: previous > n
+    previous = n
+  if args.len < 2:
     err("comparisons need at least two arguments")
-  result = boolean(true)
-  for i in 1 ..< ns.len:
-    if ascending:
-      if not (ns[i - 1] < ns[i]):
-        result = boolean(false)
-        return
-    else:
-      if not (ns[i - 1] > ns[i]):
-        result = boolean(false)
-        return
+  boolean(ok)
 
 proc ltBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   ordered(env, args, true)
@@ -435,7 +430,7 @@ proc lambdaBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
   result = newCommand("", args[0 ..< bodyStart], args[bodyStart ..< args.len], env, true)
 
 proc recordBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
-  var fields: seq[Object] = @[]
+  var fields = newSeqOfCap[Object](args.len)
   for form in args:
     if not isPair(form):
       err("{} needs (name = value) forms")
@@ -445,7 +440,7 @@ proc recordBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
   record(fields)
 
 proc listBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
-  var xs: seq[Object] = @[]
+  var xs = newSeqOfCap[Object](args.len)
   for form in args:
     xs.add eval(form, env)
   list(xs)
@@ -543,7 +538,7 @@ proc listVar(env: ref Environment, form: Object, what: string): Object {.raises.
   if not isList(result):
     err(what & " needs a list variable, got " & stringify(result))
 
-proc storeList(env: ref Environment, name: Object, items: seq[Object]) =
+proc storeList(env: ref Environment, name: Object, items: sink seq[Object]) =
   discard assign(env, name, list(items))
 
 proc appendBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
@@ -552,8 +547,9 @@ proc appendBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
   var items = toSeq(listVar(env, args[0], "append"))
   for i in 1 ..< args.len:
     items.add eval(args[i], env)
-  storeList(env, args[0], items)
-  list(items)
+  # lists are values: the variable and the result share the new one
+  result = list(items)
+  discard assign(env, args[0], result)
 
 proc prependBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len < 1:
@@ -561,10 +557,11 @@ proc prependBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
   var items: seq[Object] = @[]
   for i in 1 ..< args.len:
     items.add eval(args[i], env)
-  for x in toSeq(listVar(env, args[0], "prepend")):
-    items.add x
-  storeList(env, args[0], items)
-  list(items)
+  let old = listVar(env, args[0], "prepend")
+  for i in 0 ..< itemCount(old):
+    items.add itemAt(old, i)
+  result = list(items)
+  discard assign(env, args[0], result)
 
 proc insertBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len < 2:
@@ -583,31 +580,33 @@ proc insertBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
     grown.add eval(args[i], env)
   for i in at ..< items.len:
     grown.add items[i]
-  storeList(env, args[0], grown)
-  list(grown)
+  result = list(grown)
+  discard assign(env, args[0], result)
 
 proc popBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len != 1:
     err("pop needs one variable")
-  let items = toSeq(listVar(env, args[0], "pop"))
-  if items.len == 0:
+  let old = listVar(env, args[0], "pop")
+  let n = itemCount(old)
+  if n == 0:
     err("pop from an empty list")
-  result = items[^1]
+  result = itemAt(old, n - 1)
   var rest: seq[Object] = @[]
-  for i in 0 ..< items.len - 1:
-    rest.add items[i]
+  for i in 0 ..< n - 1:
+    rest.add itemAt(old, i)
   storeList(env, args[0], rest)
 
 proc popFrontBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len != 1:
     err("pop-front needs one variable")
-  let items = toSeq(listVar(env, args[0], "pop-front"))
-  if items.len == 0:
+  let old = listVar(env, args[0], "pop-front")
+  let n = itemCount(old)
+  if n == 0:
     err("pop-front from an empty list")
-  result = items[0]
+  result = itemAt(old, 0)
   var rest: seq[Object] = @[]
-  for i in 1 ..< items.len:
-    rest.add items[i]
+  for i in 1 ..< n:
+    rest.add itemAt(old, i)
   storeList(env, args[0], rest)
 
 proc argvValue(): Object =

@@ -1,4 +1,4 @@
-.PHONY: clean setup cli run run_gallery run_tome build_owl run_owl run_duck run_bar test run_owl_gallery gallery_parity
+.PHONY: clean setup cli run run_gallery run_tome build_owl run_owl run_duck run_bar test run_owl_gallery gallery_parity bench
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -44,6 +44,10 @@ run_owl_gallery: bin/owl
 
 gallery_parity: bin/owl
 	./tests/gallery_cmp/run.sh
+
+# Interpreter benchmarks against tests/bench/baseline.json (see tests/bench/run.py).
+bench: bin/owl
+	python3 -I ./tests/bench/run.py
 
 bin/duck: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./apps/duck.nim

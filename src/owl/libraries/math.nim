@@ -5,23 +5,22 @@ proc nums(env: ref Environment, args: seq[Object]): seq[float64] {.raises.} =
 
 proc plusBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   var total = 0.0
-  for v in nums(env, args):
-    total += v
+  for a in args:
+    total += numberIn(env, a, "arithmetic")
   number(total)
 
 proc subBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
-  let ns = nums(env, args)
-  if ns.len == 0:
+  if args.len == 0:
     err("- needs at least one argument")
-  var total = ns[0]
-  for i in 1 ..< ns.len:
-    total -= ns[i]
+  var total = numberIn(env, args[0], "arithmetic")
+  for i in 1 ..< args.len:
+    total -= numberIn(env, args[i], "arithmetic")
   number(total)
 
 proc mulBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   var total = 1.0
-  for v in nums(env, args):
-    total *= v
+  for a in args:
+    total *= numberIn(env, a, "arithmetic")
   number(total)
 
 proc divBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =

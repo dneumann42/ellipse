@@ -1,0 +1,13 @@
+use io
+use base
+use math
+use fs
+
+; The reader: parse a large owl source again and again.
+src = read-file (concat (env-var "OWL_BENCH_DIR") "/../../src/owl/scripts/repl.owl")
+n = 0
+i = 0
+while (< i 40):
+    set n (+ n (length (parse src)))
+    set i (+ i 1)
+echo n

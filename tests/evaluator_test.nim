@@ -925,7 +925,7 @@ expect toCode(value(printed, "tasks"), 30) == """[]:
         title = "Bye"
         descr = """"", "records break into name = value lines:\n" & toCode(value(printed, "tasks"), 30)
 expect toCode(str("hi"), 80) == "\"hi\"", "strings are quoted"
-expect toCode(list(@[]), 80) == "([])", "the empty list"
+expect toCode(list(newSeq[Object]()), 80) == "([])", "the empty list"
 
 let source = """fun f x (y = 2):
     when (> x y):

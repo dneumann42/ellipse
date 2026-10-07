@@ -108,13 +108,11 @@ proc hasModule*(lib: Library, name: string): bool =
 
 proc headSymbol(f: Object): string =
   result = ""
-  if isList(f):
-    let it = toSeq(f)
-    if it.len > 0:
-      result = toSymbol(it[0])
+  if itemCount(f) > 0:
+    result = toSymbol(headOf(f))
 
 proc isUseForm(f: Object): bool =
-  headSymbol(f) == "use" and bodyStart(f) < 0 and toSeq(f).len > 1
+  headSymbol(f) == "use" and bodyStart(f) < 0 and itemCount(f) > 1
 
 proc useNames(f: Object): seq[string] =
   result = @[]
@@ -125,7 +123,7 @@ proc useNames(f: Object): seq[string] =
       result.add name
 
 proc isExportForm(f: Object): bool =
-  headSymbol(f) == "export" and toSeq(f).len > 1
+  headSymbol(f) == "export" and itemCount(f) > 1
 
 proc exportEntries(f: Object): seq[Object] =
   result = @[]
@@ -172,8 +170,8 @@ proc hoistDefinitions(env: ref Environment, forms: seq[Object]) =
 
 proc isExportAll*(f: Object): bool =
   # `export all`: everything the module binds itself is public.
-  isExportForm(f) and bodyStart(f) < 0 and toSeq(f).len == 2 and
-    toSymbol(toSeq(f)[1]) == "all"
+  isExportForm(f) and bodyStart(f) < 0 and itemCount(f) == 2 and
+    toSymbol(itemAt(f, 1)) == "all"
 
 proc registerExports(m: Module) {.raises.} =
   # Exports of a name are known before any statement runs, so a module in a

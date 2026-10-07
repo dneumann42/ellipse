@@ -15,16 +15,18 @@ proc err*(msg: string) {.raises.} =
   errorReport(msg)
   raise ValueError
 
-proc operandsOf(o: Object): seq[Object] =
-  let it = toSeq(o)
-  result = @[]
-  for i in 1 ..< it.len:
-    result.add it[i]
-
 proc bodyStartOf(o: Object): int =
-  let it = toSeq(o)
+  let n = itemCount(o)
   let bs = bodyStart(o)
-  result = if bs >= 1 and bs < it.len: bs - 1 else: max(it.len - 1, 0)
+  result = if bs >= 1 and bs < n: bs - 1 else: max(n - 1, 0)
+
+# numberIn env form what: the value of form as a number, as numbersIn
+# checks it, for the builtins that fold numbers without gathering them.
+proc numberIn*(env: ref Environment, form: Object, what: string): float64 {.raises.} =
+  let v = eval(form, env)
+  if not isNumber(v) and not isBoolean(v):
+    err(what & " needs numbers, got " & stringify(v))
+  toNumber(v)
 
 proc numbersIn*(env: ref Environment, args: seq[Object], what: string): seq[float64] {.raises.} =
   result = @[]
@@ -36,17 +38,15 @@ proc numbersIn*(env: ref Environment, args: seq[Object], what: string): seq[floa
 
 proc headSymbol(o: Object): string =
   result = ""
-  if isList(o):
-    let it = toSeq(o)
-    if it.len > 0:
-      result = toSymbol(it[0])
+  if itemCount(o) > 0:
+    result = toSymbol(headOf(o))
 
-proc paramName(p: Object): Object {.raises.} =
+proc paramNameOrNothing(p: Object): Object =
   result = p
   if isPair(p):
     result = car(p)
   if not isSymbol(result):
-    err("a parameter must be a symbol or a (name = default) pair")
+    result = nothing()
 
 proc restName(p: Object): Object =
   # A command's last parameter ending in '+' collects the caller's block.
@@ -77,6 +77,37 @@ proc blockName(p: Object): Object =
     name = car(p)
   symbol(toSymbol(name)[1 ..< toSymbol(name).len])
 
+proc makeShape(cmd: Object, withBlock: bool): CallShape =
+  # What bindParams binds for a call of cmd with or without a `:` block.
+  var params = cmdParams(cmd)
+  result = CallShape(names: @[], defaults: @[], fixed: 0,
+    rest: nothing(), blockAt: blockParam(params), blockSym: nothing(), emptyBlock: false)
+  if result.blockAt >= 0:
+    let blockAt = result.blockAt
+    result.blockSym = blockName(params[blockAt])
+    let blockDefault = params[blockAt]
+    var kept: seq[Object] = @[]
+    for i in 0 ..< params.len:
+      if i != blockAt:
+        kept.add params[i]
+    params = kept
+    if not withBlock:
+      if isPair(blockDefault):
+        params.add pair(result.blockSym, cdr(blockDefault))
+      elif isFun(cmd):
+        params.add pair(result.blockSym, symbol("nothing"))
+      else:
+        result.emptyBlock = true
+  result.fixed = params.len
+  if not isFun(cmd) and params.len > 0:
+    result.rest = restName(params[^1])
+    if not result.rest.isNothing:
+      result.fixed = params.len - 1
+  for p in params:
+    result.names.add paramNameOrNothing(p)
+    if isPair(p):
+      result.defaults.add p
+
 proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
     child: ref Environment, bodyStart: int) {.raises.} =
   # A fun gets its arguments' values. A command gets them unevaluated: as
@@ -87,90 +118,78 @@ proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
   # fun gets them as a closure over the caller's scope, (name) runs them;
   # a command gets the list of forms (syntax, for a hygienic one). Without
   # a block it can still be passed by name, or keeps its default.
-  var params = cmdParams(cmd)
-  var argObjs = allArgs
-  let blockAt = blockParam(params)
-  if blockAt >= 0:
-    let blockSym = blockName(params[blockAt])
-    let blockDefault = params[blockAt]
-    var kept: seq[Object] = @[]
-    for i in 0 ..< params.len:
-      if i != blockAt:
-        kept.add params[i]
-    params = kept
-    if bodyStart >= 0 and bodyStart < allArgs.len:
-      argObjs = allArgs[0 ..< bodyStart]
-      let forms = allArgs[bodyStart ..< allArgs.len]
+  if not hasShapes(cmd):
+    setShapes(cmd, makeShape(cmd, true), makeShape(cmd, false))
+  let hasBlock = bodyStart >= 0 and bodyStart < allArgs.len
+  let shape = shapeOf(cmd, hasBlock)
+  var argEnd = allArgs.len
+  if shape.blockAt >= 0:
+    if hasBlock:
+      argEnd = bodyStart
       if isFun(cmd):
-        define(child, blockSym, newCommand("", @[], forms, callerEnv, true))
+        let forms = allArgs[bodyStart ..< allArgs.len]
+        define(child, shape.blockSym, newCommand("", newSeq[Object](), forms, callerEnv, true))
       elif not isDynamic(cmd):
         var wrapped: seq[Object] = @[]
-        for x in forms:
-          wrapped.add syntax(x, callerEnv)
-        define(child, blockSym, list(wrapped))
+        for i in bodyStart ..< allArgs.len:
+          wrapped.add syntax(allArgs[i], callerEnv)
+        define(child, shape.blockSym, list(wrapped))
       else:
-        define(child, blockSym, list(forms))
-    elif isPair(blockDefault):
-      params.add pair(blockSym, cdr(blockDefault))
-    elif isFun(cmd):
-      params.add pair(blockSym, symbol("nothing"))
-    else:
-      define(child, blockSym, list(@[]))
+        let forms = allArgs[bodyStart ..< allArgs.len]
+        define(child, shape.blockSym, list(forms))
+    elif shape.emptyBlock:
+      define(child, shape.blockSym, list(newSeq[Object]()))
   let hygienic = not isFun(cmd) and not isDynamic(cmd)
-  var fixed = params.len
-  var rest = nothing()
-  if not isFun(cmd) and params.len > 0:
-    rest = restName(params[^1])
-    if not rest.isNothing:
-      fixed = params.len - 1
+  let fun = isFun(cmd)
+  let hasRest = not shape.rest.isNothing
   var pos = 0
   var extras: seq[Object] = @[]
-  for a in argObjs:
-    var name = a
-    var value = a
-    if not rest.isNothing and pos >= fixed:
+  for ai in 0 ..< argEnd:
+    let a = allArgs[ai]
+    if hasRest and pos >= shape.fixed:
       extras.add a
       continue
-    if isPair(a) and isSymbol(car(a)):
-      name = car(a)
-      value = cdr(a)
-      if isFun(cmd):
-        value = eval(value, callerEnv)
+    if isPair(a) and isSymbol(carOf(a)):
+      if fun:
+        define(child, carOf(a), eval(cdrOf(a), callerEnv))
       elif hygienic:
-        value = syntax(value, callerEnv)
+        define(child, carOf(a), syntax(cdrOf(a), callerEnv))
+      else:
+        define(child, carOf(a), cdrOf(a))
     else:
-      if pos < fixed:
-        name = paramName(params[pos])
+      if pos < shape.fixed:
+        let name = shape.names[pos]
+        if isNothing(name):
+          err("a parameter must be a symbol or a (name = default) pair")
         inc pos
-        if isFun(cmd):
-          value = eval(value, callerEnv)
+        if fun:
+          define(child, name, eval(a, callerEnv))
         elif hygienic:
-          value = syntax(value, callerEnv)
-      elif rest.isNothing:
+          define(child, name, syntax(a, callerEnv))
+        else:
+          define(child, name, a)
+      elif not hasRest:
         err("too many arguments for " & cmdName(cmd))
       else:
         extras.add a
-        continue
-    define(child, name, value)
-  if not rest.isNothing:
+  if hasRest:
     if hygienic:
       var wrapped: seq[Object] = @[]
       for x in extras:
         wrapped.add syntax(x, callerEnv)
-      define(child, rest, list(wrapped))
+      define(child, shape.rest, list(wrapped))
     else:
-      define(child, rest, list(extras))
-  for p in params:
-    if isPair(p):
-      let name = car(p)
-      if not hasOwn(child, name):
-        var value = cdr(p)
-        if isFun(cmd):
-          value = eval(value, child)
-        elif hygienic:
-          # a default is written in the definition, so it belongs to it
-          value = syntax(value, child)
-        define(child, name, value)
+      define(child, shape.rest, list(extras))
+  for p in shape.defaults:
+    let name = car(p)
+    if not hasOwn(child, name):
+      var value = cdr(p)
+      if fun:
+        value = eval(value, child)
+      elif hygienic:
+        # a default is written in the definition, so it belongs to it
+        value = syntax(value, child)
+      define(child, name, value)
 
 proc apply(cmd: Object, callerEnv: ref Environment, args: seq[Object],
     bodyStart: int): Object {.raises.} =
@@ -189,7 +208,9 @@ proc apply(cmd: Object, callerEnv: ref Environment, args: seq[Object],
   if not isFun(cmd) and not isDynamic(cmd):
     setCaller(child, callerEnv)
   bindParams(cmd, args, callerEnv, child, bodyStart)
-  evalForms(child, cmdBody(cmd))
+  result = nothing()
+  for f in bodyOf(cmd):
+    result = eval(f, child)
 
 proc invoke*(cmd: Object, values: seq[Object]): Object {.raises.} =
   ## Call a command value from Nim with already evaluated arguments: each
@@ -210,56 +231,63 @@ proc evalForms*(env: ref Environment, forms: seq[Object]): Object {.raises.} =
   for f in forms:
     result = eval(f, env)
 
+# evalRange env forms a b is evalForms env forms[a ..< b], without the copy.
+proc evalRange*(env: ref Environment, forms: seq[Object], a, b: int): Object {.raises.} =
+  result = nothing()
+  for i in a ..< b:
+    result = eval(forms[i], env)
+
 proc eval*(obj: Object, env: ref Environment): Object {.raises.} =
-  if isNumber(obj) or isBoolean(obj) or isNothing(obj) or isRecord(obj) or isString(obj):
-    return obj
-  if isSymbol(obj):
-    let found = lookup(env, obj)
-    if found.isSome:
-      return found.get()
-    err("unbound symbol: " & toSymbol(obj))
-  if isSyntax(obj):
+  case objectKind(obj)
+  of List:
+    if itemCount(obj) == 0:
+      return nothing()
+    var cmd = nothing()
+    if isSymbol(headOf(obj)):
+      var found = false
+      cmd = getVar(env, headOf(obj), found)
+      if not found:
+        err("unbound symbol: " & toSymbol(headOf(obj)))
+    else:
+      cmd = eval(headOf(obj), env)
+    if not isCommand(cmd):
+      err("the head of a call must be a command, got " & stringify(cmd))
+    result = apply(cmd, env, operands(obj), bodyStartOf(obj))
+  of Symbol:
+    var found = false
+    result = getVar(env, obj, found)
+    if not found:
+      err("unbound symbol: " & toSymbol(obj))
+  of Number, Boolean, Nothing, Record, String:
+    result = obj
+  of Syntax:
     let scope = syntaxScope(obj)
     if scope == nil:
       err("syntax without a scope: " & stringify(obj))
+      result = nothing()
     else:
-      return eval(syntaxForm(obj), resolveScope(env, scope))
-  if isPair(obj):
-    let name = car(obj)
-    let value = eval(cdr(obj), env)
+      result = eval(formOf(obj), resolveScope(env, scope))
+  of Pair:
+    result = eval(cdrOf(obj), env)
     # A name that came in as syntax binds in the scope it was written in.
-    let scope = syntaxScope(name)
-    if scope != nil:
-      if isSymbol(syntaxForm(name)):
-        define(resolveScope(env, scope), syntaxForm(name), value)
-        return value
-    if not isSymbol(name):
+    if isSyntax(carOf(obj)):
+      let scope = syntaxScope(carOf(obj))
+      if scope != nil:
+        if isSymbol(formOf(carOf(obj))):
+          define(resolveScope(env, scope), formOf(carOf(obj)), result)
+          return
+    if not isSymbol(carOf(obj)):
       err("a binding needs a symbol on the left of '='")
-    define(env, name, value)
-    return value
-  if isList(obj):
-    let it = toSeq(obj)
-    if it.len == 0:
-      return nothing()
-    var cmd = it[0]
-    if isSymbol(cmd):
-      let found = lookup(env, cmd)
-      if found.isSome:
-        cmd = found.get()
-      else:
-        err("unbound symbol: " & toSymbol(it[0]))
-    else:
-      cmd = eval(cmd, env)
-    if not isCommand(cmd):
-      err("the head of a call must be a command, got " & stringify(cmd))
-    return apply(cmd, env, operandsOf(obj), bodyStartOf(obj))
-  if isCommand(obj):
+    define(env, carOf(obj), result)
+  of Command:
     err("cannot evaluate command " & cmdName(obj) & " directly, call it")
-  result = nothing()
+    result = nothing()
+  of Scope:
+    result = nothing()
 
 proc isDefinition*(f: Object, kw: string): bool =
-  isList(f) and bodyStart(f) >= 2 and toSeq(f).len >= 3 and headSymbol(f) == kw and
-    isSymbol(toSeq(f)[1])
+  isList(f) and bodyStart(f) >= 2 and itemCount(f) >= 3 and headSymbol(f) == kw and
+    isSymbol(itemAt(f, 1))
 
 proc makeDefinition*(env: ref Environment, f: Object, isFun: bool,
     dynamic: bool = false) =

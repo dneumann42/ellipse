@@ -1,0 +1,4 @@
+use io
+
+; Startup: parsing and evaluating every built-in module, then this file.
+echo "ok"

@@ -45,7 +45,7 @@ expect stringify(symbol("foo")) == "foo", "stringify symbol"
 expect stringify(boolean(true)) == "true", "stringify true"
 expect stringify(boolean(false)) == "false", "stringify false"
 expect stringify(nothing()) == "()", "stringify nothing"
-expect stringify(list(@[])) == "[]", "stringify empty list"
+expect stringify(list(newSeq[Object]())) == "[]", "stringify empty list"
 expect stringify(list(@[number(1), symbol("x"), list(@[number(2), number(3)])])) ==
   "[] 1 x ([] 2 3)", "stringify nested list"
 expect stringify(pair(symbol("k"), number(7))) == "(k = 7)", "stringify pair"
@@ -66,9 +66,9 @@ expect rec == record(@[pair(symbol("x"), number(100)), pair(symbol("y"), number(
 expect rec != record(@[pair(symbol("x"), number(100))]), "records differ by field count"
 expect hash(rec) == hash(record(@[pair(symbol("x"), number(100)), pair(symbol("y"), number(200))])),
   "equal records hash equal"
-expect $record(@[]) == "(kind: Record, fields: @[])", "$ of empty record"
+expect $record(newSeq[Object]()) == "(kind: Record, fields: @[])", "$ of empty record"
 expect stringify(rec) == "{} (x = 100) (y = 200)", "stringify record as code"
-expect stringify(record(@[])) == "{}", "stringify empty record"
+expect stringify(record(newSeq[Object]())) == "{}", "stringify empty record"
 expect stringify(record(@[pair(symbol("p"), record(@[pair(symbol("q"), number(7))]))])) ==
   "{} (p = {} (q = 7))", "stringify nested record"
 

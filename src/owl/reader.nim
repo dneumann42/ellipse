@@ -12,8 +12,9 @@ type
     of Object: value: objects.Object
     of Eq, Colon, Dot: discard
 
+  # The lines being read are passed beside the parser, not kept in it, so
+  # reading one never copies it.
   Parser = object
-    lines: seq[Line]
     pos: int
     num: int
     err: string
@@ -53,13 +54,16 @@ func tryNumber*(text: string): (bool, float64) =
     result = (true, sign * value)
 
 func atom*(text: string): objects.Object =
+  # only a word starting with a digit or a sign can be a number
+  if text.len == 0 or text[0] notin {'0'..'9', '+', '-'}:
+    return symbol(text)
   let (isNum, value) = tryNumber(text)
   if isNum:
     result = number(value)
   else:
     result = symbol(text)
 
-proc assemble(p: var Parser, items: seq[Item], bodyAt: int = -1): objects.Object =
+proc assemble(p: var Parser, items: var seq[Item], bodyAt: int = -1): objects.Object =
   result = nothing()
   # '=' names the equality command when it heads an expression: first in the form
   # or right behind the '=' that opens a binding. Any other '=' is the binding.
@@ -84,13 +88,16 @@ proc assemble(p: var Parser, items: seq[Item], bodyAt: int = -1): objects.Object
       p.fail("'.' needs a value before it")
       return
 
-  var before, after: seq[objects.Object]
+  var before = newSeqOfCap[objects.Object](items.len)
+  var after: seq[objects.Object] = @[]
+  if eqAt >= 0:
+    after = newSeqOfCap[objects.Object](items.len - eqAt)
   for i in 0 ..< items.len:
     var value: objects.Object
     var keep = false
     case items[i].kind
     of Object:
-      value = items[i].value
+      value = move(items[i].value)
       keep = true
     of Eq:
       if i == cmdAt:
@@ -150,7 +157,8 @@ proc foldDots(p: var Parser, items: seq[Item]): seq[Item] =
       inc i
 
 proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
-  result = @[]
+  result = newSeqOfCap[Item](toks.len - i)
+  var dots = false
   while i < toks.len:
     case toks[i].kind
     of Word:
@@ -167,10 +175,11 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
       inc i
     of Dot:
       result.add Item(kind: Dot)
+      dots = true
       inc i
     of Open:
       inc i
-      let inner = p.parseItems(toks, i)
+      var inner = p.parseItems(toks, i)
       if p.err.len > 0:
         return
       if i >= toks.len or toks[i].kind != Close:
@@ -184,32 +193,33 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
       result.add Item(kind: Object, value: value)
     of Close:
       break
-  result = p.foldDots(result)
+  if dots:
+    result = p.foldDots(result)
 
-proc parseExprs(p: var Parser, base: int): seq[objects.Object] =
+proc parseExprs(p: var Parser, lines: seq[Line], base: int): seq[objects.Object] =
   result = @[]
-  while p.pos < p.lines.len and p.err.len == 0:
-    let ln = p.lines[p.pos]
-    if ln.indent < base:
+  while p.pos < lines.len and p.err.len == 0:
+    let at = p.pos
+    if lines[at].indent < base:
       break
-    if ln.indent > base:
-      p.num = ln.num
+    if lines[at].indent > base:
+      p.num = lines[at].num
       p.fail("unexpected indentation")
       break
     inc p.pos
-    p.num = ln.num
+    p.num = lines[at].num
 
     var i = 0
-    var items = p.parseItems(ln.toks, i)
-    if p.err.len == 0 and i < ln.toks.len:
+    var items = p.parseItems(lines[at].toks, i)
+    if p.err.len == 0 and i < lines[at].toks.len:
       p.fail("unexpected ')'")
 
     var bodyAt = -1
     if p.err.len == 0 and items.len > 0 and items[^1].kind == Colon:
       items.setLen(items.len - 1)
       bodyAt = items.len
-      if p.pos < p.lines.len and p.lines[p.pos].indent > ln.indent:
-        for form in p.parseExprs(p.lines[p.pos].indent):
+      if p.pos < lines.len and lines[p.pos].indent > lines[at].indent:
+        for form in p.parseExprs(lines, lines[p.pos].indent):
           items.add Item(kind: Object, value: form)
       else:
         p.fail("missing block after ':'")
@@ -224,11 +234,11 @@ proc parseOwl*(source: string): Result[seq[objects.Object], string] =
     lines = scanLines(t, source)
   except:
     discard
-  var p = Parser(lines: lines)
+  var p = Parser(pos: 0, num: 0, err: "")
   if t.err.len > 0:
     p.num = if t.line > 0: t.line else: 1
     p.fail(t.err)
-  let forms = p.parseExprs(0)
+  let forms = p.parseExprs(lines, 0)
   if p.err.len > 0:
     result = err(p.err)
   else:

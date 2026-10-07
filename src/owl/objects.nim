@@ -1,9 +1,22 @@
 import std/[tables, hashes, options, strutils]
 
 type
+  # A scope's names, in the order they were made (like Table). Small scopes,
+  # a call's parameters or a block's locals, are searched in a row; bigger
+  # ones get a hash index. A lookup finds a slot once and reads or writes it.
+  Binding = object
+    key: Object
+    val: Object
+    hash: Hash
+
+  Bindings = object
+    entries: seq[Binding]
+    # open addressing over the positions: position + 1, 0 is empty
+    index: seq[int]
+
   Environment* = object
     up: nil ref Environment
-    bindings: Table[Object, Object]
+    bindings: Bindings
     # Set on a hygienic command's frame: the scope it was called from.
     caller: nil ref Environment
     # Set on a `do` scope inside a command: while it runs, syntax written in
@@ -20,12 +33,12 @@ type
   # renames).
   Exports* = object
     env: ref Environment
-    names: Table[Object, Object]
+    names: Bindings
     # `export all`: every binding of the module's own scope is public too,
     # including ones made after the use (a repl document grows).
     all: bool
 
-  ObjectKind = enum
+  ObjectKind* = enum
     Nothing
     Number
     String
@@ -48,27 +61,23 @@ type
       str: string
     of Symbol:
       symbol: string
+      # hash(symbol), computed once: symbols are looked up in every scope.
+      symHash: Hash
     of Boolean:
       isTrue: bool
     of List:
       items: ref ItemsBox
       bodyStart: int
     of Pair:
-      a, b: nil ref Object
+      a, b: ref Object
     of Record:
-      fields: seq[Object]
+      rec: ref ItemsBox
     of Command:
-      name: string
-      params: seq[Object]
-      body: seq[Object]
-      env: nil ref Environment
-      isFun: bool
-      dynamic: bool
-      call: CommandProc
+      cmd: ref CommandBox
     of Syntax:
       # An unevaluated argument of a command together with the scope it was
       # written in, so evaluating it never sees the command's own names.
-      form: nil ref Object
+      form: ref Object
       scope: nil ref Environment
     of Scope:
       # A scope as a value, from new-scope, for eval-in.
@@ -79,6 +88,39 @@ type
   # every variable read does, costs a reference count instead of the items.
   ItemsBox = object
     xs: seq[Object]
+    # xs without its head, made the first time the list runs as a call, so a
+    # call hands its arguments over without building them anew.
+    ops: seq[Object]
+    hasOps: bool
+
+  # A command's parts, shared like a list's items: a command value is read
+  # (copied) on every call of it.
+  CommandBox = object
+    name: string
+    params: seq[Object]
+    body: seq[Object]
+    env: nil ref Environment
+    isFun: bool
+    dynamic: bool
+    call: CommandProc
+    # How a call binds its arguments, worked out from params on the first
+    # call (the evaluator fills it): shapes[0] for a call with a `:` block,
+    # shapes[1] for one without.
+    shapes: seq[ref CallShape]
+
+  # The parameters a call binds, after the `&block` parameter is taken out
+  # (or, without a block, possibly put back as a plain one).
+  CallShape* = object
+    # paramName of each parameter, or nothing when it is not a valid one
+    names*: seq[Object]
+    # the parameters with a default, as (name = default) pairs
+    defaults*: seq[Object]
+    fixed*: int
+    rest*: Object
+    blockAt*: int
+    blockSym*: Object
+    # a command called without a block gets an empty list for it
+    emptyBlock*: bool
 
   CommandProc* = nil proc (env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.}
 
@@ -88,17 +130,18 @@ func nothing*(): Object =
 func number*(n: float64): Object =
   Object(kind: Number, number: n)
 
-func str*(s: string): Object =
+func str*(s: sink string): Object =
   Object(kind: String, str: s)
 
 func symbol*(name: string): Object =
-  Object(kind: Symbol, symbol: name)
+  Object(kind: Symbol, symbol: name, symHash: hash(name))
 
 func boolean*(b: bool): Object =
   Object(kind: Boolean, isTrue: b)
 
-func list*(items: seq[Object], bodyStart: int = -1): Object =
-  Object(kind: List, items: (ref ItemsBox)(xs: items), bodyStart: bodyStart)
+func list*(items: sink seq[Object], bodyStart: int = -1): Object =
+  Object(kind: List, items: (ref ItemsBox)(xs: items, ops: @[], hasOps: false),
+    bodyStart: bodyStart)
 
 func box(o: Object): ref Object =
   result = (ref Object)(kind: Nothing)
@@ -107,13 +150,13 @@ func box(o: Object): ref Object =
 func pair*(key, val: Object): Object =
   Object(kind: Pair, a: box(key), b: box(val))
 
-func record*(fields: seq[Object]): Object =
-  Object(kind: Record, fields: fields)
+func record*(fields: sink seq[Object]): Object =
+  Object(kind: Record, rec: (ref ItemsBox)(xs: fields, ops: @[], hasOps: false))
 
-func newCommand*(name: string, params, body: seq[Object], env: nil ref Environment,
+func newCommand*(name: string, params, body: sink seq[Object], env: nil ref Environment,
     isFun: bool, dynamic: bool = false): Object =
-  Object(kind: Command, name: name, params: params, body: body, env: env, isFun: isFun,
-    dynamic: dynamic, call: nil)
+  Object(kind: Command, cmd: (ref CommandBox)(name: name, params: params, body: body,
+    env: env, isFun: isFun, dynamic: dynamic, call: nil, shapes: @[]))
 
 func syntax*(form: Object, scope: ref Environment): Object =
   Object(kind: Syntax, form: box(form), scope: scope)
@@ -122,7 +165,10 @@ func scopeValue*(env: ref Environment): Object =
   Object(kind: Scope, scopeRef: env)
 
 func newBuiltin*(name: string, call: CommandProc, isFun: bool): Object =
-  Object(kind: Command, name: name, isFun: isFun, call: call)
+  Object(kind: Command, cmd: (ref CommandBox)(name: name, params: @[], body: @[],
+    env: nil, isFun: isFun, dynamic: false, call: call, shapes: @[]))
+
+func objectKind*(o: Object): ObjectKind = o.kind
 
 func isNothing*(o: Object): bool = o.kind == Nothing
 func isNumber*(o: Object): bool = o.kind == Number
@@ -169,7 +215,7 @@ func syntaxScope*(o: Object): nil ref Environment =
 func isDynamic*(o: Object): bool =
   result = false
   if o.kind == Command:
-    result = o.dynamic
+    result = o.cmd.dynamic
 
 func bodyStart*(o: Object): int =
   result = -1
@@ -183,37 +229,60 @@ func setBodyStart*(o: var Object, at: int) =
 func cmdName*(o: Object): string =
   result = ""
   if o.kind == Command:
-    result = o.name
+    result = o.cmd.name
 
 func cmdParams*(o: Object): seq[Object] =
   result = @[]
   if o.kind == Command:
-    result = o.params
+    result = o.cmd.params
 
 func cmdBody*(o: Object): seq[Object] =
   result = @[]
   if o.kind == Command:
-    result = o.body
+    result = o.cmd.body
+
+# A command's parameters and body without copying them; o must be a command.
+func paramsOf*(o: Object): lent seq[Object] =
+  o.cmd.params
+
+func bodyOf*(o: Object): lent seq[Object] =
+  o.cmd.body
+
+# The cached call shapes of a command (see CommandBox); o must be a command.
+proc hasShapes*(o: Object): bool =
+  o.cmd.shapes.len > 0
+
+proc setShapes*(o: Object, withBlock, withoutBlock: CallShape) =
+  o.cmd.shapes = @[(ref CallShape)(), (ref CallShape)()]
+  o.cmd.shapes[0][] = withBlock
+  o.cmd.shapes[1][] = withoutBlock
+
+proc shapeOf*(o: Object, withBlock: bool): ref CallShape =
+  o.cmd.shapes[if withBlock: 0 else: 1]
+
+# The head of a call form without copying it; o must be a non-empty list.
+func headOf*(o: Object): lent Object =
+  o.items.xs[0]
 
 func cmdEnv*(o: Object): nil ref Environment =
   result = nil
   if o.kind == Command:
-    result = o.env
+    result = o.cmd.env
 
 func isFun*(o: Object): bool =
   result = false
   if o.kind == Command:
-    result = o.isFun
+    result = o.cmd.isFun
 
 func isBuiltin*(o: Object): bool =
   result = false
   if o.kind == Command:
-    result = o.call != nil
+    result = o.cmd.call != nil
 
 func builtinCall*(o: Object): CommandProc =
   result = nil
   if o.kind == Command:
-    result = o.call
+    result = o.cmd.call
 
 func toNumber*(o: Object): float64 =
   result = 0.0
@@ -271,6 +340,24 @@ func itemAt*(o: Object, i: int): Object =
   if o.kind == List and i >= 0 and i < o.items.xs.len:
     result = o.items.xs[i]
 
+# The items of a call form after its head. The list must be non-empty.
+proc operands*(o: Object): lent seq[Object] =
+  if not o.items.hasOps:
+    o.items.ops = o.items.xs[1 ..< o.items.xs.len]
+    o.items.hasOps = true
+  result = o.items.ops
+
+# carOf, cdrOf and formOf read a pair's halves and a syntax's form without
+# copying them; o must be a pair (a syntax for formOf).
+func carOf*(o: Object): lent Object =
+  o.a[]
+
+func cdrOf*(o: Object): lent Object =
+  o.b[]
+
+func formOf*(o: Object): lent Object =
+  o.form[]
+
 func car*(o: Object): Object =
   result = nothing()
   case o.kind
@@ -294,27 +381,34 @@ func cdr*(o: Object): Object =
 func recordFields*(o: Object): seq[Object] =
   result = @[]
   if o.kind == Record:
-    result = o.fields
+    result = o.rec.xs
 
 func fieldNames*(o: Object): seq[string] =
   result = @[]
   if o.kind == Record:
-    for f in o.fields:
+    for f in o.rec.xs:
       result.add toSymbol(car(f))
+
+func fieldNamed(f: Object, name: string): bool =
+  # toSymbol(car(f)) == name, without copying the field
+  if f.kind == Pair and f.a[].kind == Symbol:
+    result = f.a[].symbol == name
+  else:
+    result = name.len == 0
 
 func hasField*(o: Object, name: string): bool =
   result = false
   if o.kind == Record:
-    for f in o.fields:
-      if toSymbol(car(f)) == name:
+    for i in 0 ..< o.rec.xs.len:
+      if fieldNamed(o.rec.xs[i], name):
         return true
 
 func field*(o: Object, name: string): Object =
   result = nothing()
   if o.kind == Record:
-    for f in o.fields:
-      if toSymbol(car(f)) == name:
-        return cdr(f)
+    for i in 0 ..< o.rec.xs.len:
+      if fieldNamed(o.rec.xs[i], name):
+        return cdr(o.rec.xs[i])
 
 func `==`*(a, b: Object): bool =
   if a.kind != b.kind:
@@ -323,8 +417,10 @@ func `==`*(a, b: Object): bool =
   of Nothing:
     result = true
   of Command:
-    result = a.name == b.name and a.isFun == b.isFun and a.dynamic == b.dynamic and
-      a.env == b.env and (a.call == b.call or (a.call != nil and b.call != nil))
+    let x = a.cmd
+    let y = b.cmd
+    result = x.name == y.name and x.isFun == y.isFun and x.dynamic == y.dynamic and
+      x.env == y.env and (x.call == y.call or (x.call != nil and y.call != nil))
   of Syntax:
     result = a.scope == b.scope and syntaxForm(a) == syntaxForm(b)
   of Scope:
@@ -334,7 +430,7 @@ func `==`*(a, b: Object): bool =
   of String:
     result = a.str == b.str
   of Symbol:
-    result = a.symbol == b.symbol
+    result = a.symHash == b.symHash and a.symbol == b.symbol
   of Boolean:
     result = a.isTrue == b.isTrue
   of List:
@@ -359,10 +455,10 @@ func `==`*(a, b: Object): bool =
         return false
     result = true
   of Record:
-    if a.fields.len != b.fields.len:
+    if a.rec.xs.len != b.rec.xs.len:
       return false
-    for i in 0 ..< a.fields.len:
-      if a.fields[i] != b.fields[i]:
+    for i in 0 ..< a.rec.xs.len:
+      if a.rec.xs[i] != b.rec.xs[i]:
         return false
     result = true
 
@@ -376,7 +472,7 @@ func hash*(o: Object): Hash =
   of String:
     result = result !& hash(o.str)
   of Symbol:
-    result = result !& hash(o.symbol)
+    result = result !& o.symHash
   of Boolean:
     result = result !& hash(o.isTrue)
   of List:
@@ -389,10 +485,10 @@ func hash*(o: Object): Hash =
     if tail != nil:
       result = result !& hash(tail[])
   of Record:
-    result = result !& hash(o.fields)
+    result = result !& hash(o.rec.xs)
   of Command:
-    result = result !& hash(o.name)
-    result = result !& hash(o.isFun)
+    result = result !& hash(o.cmd.name)
+    result = result !& hash(o.cmd.isFun)
   of Syntax:
     result = result !& hash(syntaxForm(o))
   of Scope:
@@ -405,7 +501,7 @@ func `$`*(o: Object): string =
   of Nothing:
     discard
   of Command:
-    result.add ", name: " & o.name
+    result.add ", name: " & o.cmd.name
   of Syntax:
     result.add ", form: " & $syntaxForm(o)
   of Scope:
@@ -440,10 +536,10 @@ func `$`*(o: Object): string =
       result.add "nil"
   of Record:
     result.add ", fields: @["
-    for i in 0 ..< o.fields.len:
+    for i in 0 ..< o.rec.xs.len:
       if i > 0:
         result.add ", "
-      result.add $o.fields[i]
+      result.add $o.rec.xs[i]
     result.add "]"
   result.add ")"
 
@@ -500,12 +596,12 @@ func stringify*(o: Object): string =
     result.add ")"
   of Record:
     result = "{}"
-    for i in 0 ..< o.fields.len:
+    for i in 0 ..< o.rec.xs.len:
       result.add " "
-      result.add stringifyArg(o.fields[i])
+      result.add stringifyArg(o.rec.xs[i])
   of Command:
-    let kw = if o.isFun: "fun" elif o.dynamic: "dynamic-command" else: "command"
-    result = "<" & kw & " " & o.name & ">"
+    let kw = if o.cmd.isFun: "fun" elif o.cmd.dynamic: "dynamic-command" else: "command"
+    result = "<" & kw & " " & o.cmd.name & ">"
   of Syntax:
     result = stringify(syntaxForm(o))
   of Scope:
@@ -592,10 +688,10 @@ func inlineCode(o: Object, asArg: bool): string =
   of Pair:
     result = "(" & inlineCode(car(o), false) & " = " & inlineCode(cdr(o), false) & ")"
   of Record:
-    if o.fields.len == 0:
+    if o.rec.xs.len == 0:
       return "({})"
     result = "{}"
-    for f in o.fields:
+    for f in o.rec.xs:
       result.add " "
       result.add inlineCode(f, true)
     if asArg:
@@ -618,7 +714,7 @@ func needsBlock(o: Object): bool =
       if needsBlock(x):
         return true
   of Record:
-    for f in o.fields:
+    for f in o.rec.xs:
       if needsBlock(cdr(f)):
         return true
   of Pair:
@@ -700,10 +796,10 @@ func lineCode(o: Object, indent, col, width: int): string =
       else:
         result = "[]:" & blockItems(o.items.xs, inner, width)
   of Record:
-    if o.fields.len == 0:
+    if o.rec.xs.len == 0:
       return flat
     result = "{}:"
-    for f in o.fields:
+    for f in o.rec.xs:
       result.add "\n"
       result.add indentText(inner)
       result.add lineCode(f, inner, inner, width)
@@ -714,32 +810,105 @@ func lineCode(o: Object, indent, col, width: int): string =
 
 func definitionCode(o: Object, width: int): string =
   # a command made in owl, written out as its definition
-  let kw = if o.name.len == 0: "lambda" elif o.isFun: "fun"
-    elif o.dynamic: "dynamic-command" else: "command"
+  let kw = if o.cmd.name.len == 0: "lambda" elif o.cmd.isFun: "fun"
+    elif o.cmd.dynamic: "dynamic-command" else: "command"
   result = kw
-  if o.name.len > 0:
+  if o.cmd.name.len > 0:
     result.add " "
-    result.add o.name
-  for p in o.params:
+    result.add o.cmd.name
+  for p in o.cmd.params:
     result.add " "
     result.add inlineCode(p, true)
   result.add ":"
-  result.add blockItems(o.body, 4, width)
+  result.add blockItems(o.cmd.body, 4, width)
 
 # toCode o width: o as owl code, at most width columns where owl allows a
 # break. A command defined in owl is written out as its definition.
 func toCode*(o: Object, width: int = 80): string =
-  if o.kind == Command and o.call == nil and o.body.len > 0:
+  if o.kind == Command and o.cmd.call == nil and o.cmd.body.len > 0:
     result = definitionCode(o, width)
   else:
     result = lineCode(o, 0, 0, width)
 
+func keyHash(o: Object): Hash {.inline.} =
+  if o.kind == Symbol: o.symHash else: hash(o)
+
+func emptyBindings(): Bindings =
+  Bindings(entries: @[], index: @[])
+
+const IndexFrom = 8
+
+func find(b: Bindings, k: Object, h: Hash): int =
+  if b.index.len == 0:
+    for i in 0 ..< b.entries.len:
+      if b.entries[i].hash == h and b.entries[i].key == k:
+        return i
+    return -1
+  let mask = b.index.len - 1
+  var at = int(h) and mask
+  while b.index[at] != 0:
+    let i = b.index[at] - 1
+    if b.entries[i].hash == h and b.entries[i].key == k:
+      return i
+    at = (at + 1) and mask
+  result = -1
+
+func addToIndex(b: var Bindings, i: int) =
+  let mask = b.index.len - 1
+  var at = int(b.entries[i].hash) and mask
+  while b.index[at] != 0:
+    at = (at + 1) and mask
+  b.index[at] = i + 1
+
+func reindex(b: var Bindings) =
+  if b.entries.len <= IndexFrom:
+    b.index = @[]
+    return
+  var size = 16
+  while size < b.entries.len * 2:
+    size = size * 2
+  b.index = newSeq[int](size)
+  for i in 0 ..< b.entries.len:
+    addToIndex(b, i)
+
+func put(b: var Bindings, k, v: Object, h: Hash) =
+  let i = find(b, k, h)
+  if i >= 0:
+    b.entries[i].val = v
+    return
+  if b.entries.len == 0:
+    # most scopes hold a few names; start with room for them
+    b.entries = newSeqOfCap[Binding](4)
+  b.entries.add Binding(key: k, val: v, hash: h)
+  if b.entries.len > IndexFrom:
+    if b.index.len == 0 or b.entries.len * 2 > b.index.len:
+      reindex(b)
+    else:
+      addToIndex(b, b.entries.len - 1)
+
+func remove(b: var Bindings, k: Object) =
+  let i = find(b, k, keyHash(k))
+  if i < 0:
+    return
+  for j in i ..< b.entries.len - 1:
+    let e = b.entries[j + 1]
+    b.entries[j] = e
+  b.entries.setLen(b.entries.len - 1)
+  reindex(b)
+
+func hasKey(b: Bindings, k: Object): bool =
+  find(b, k, keyHash(k)) >= 0
+
+iterator keys(b: Bindings): lent Object =
+  for i in 0 ..< b.entries.len:
+    yield b.entries[i].key
+
 proc newEnvironment*(up: nil ref Environment = nil): ref Environment =
-  (ref Environment)(up: up, bindings: initTable[Object, Object](), caller: nil,
+  (ref Environment)(up: up, bindings: emptyBindings(), caller: nil,
     redirectFrom: nil, redirectTo: nil, imports: @[])
 
 proc newExports*(env: ref Environment): ref Exports =
-  (ref Exports)(env: env, names: initTable[Object, Object](), all: false)
+  (ref Exports)(env: env, names: emptyBindings(), all: false)
 
 proc setExportAll*(x: ref Exports, on: bool) =
   x.all = on
@@ -747,7 +916,7 @@ proc setExportAll*(x: ref Exports, on: bool) =
 proc exportsAll*(x: ref Exports): bool = x.all
 
 proc exportName*(x: ref Exports, public, internal: Object) =
-  x.names[public] = internal
+  put(x.names, public, internal, keyHash(public))
 
 proc exportedNames*(x: ref Exports): seq[Object] =
   result = @[]
@@ -771,7 +940,7 @@ proc clearImports*(env: ref Environment) =
   env.imports = @[]
 
 proc clearExportNames*(x: ref Exports) =
-  x.names = initTable[Object, Object]()
+  x.names = emptyBindings()
 
 proc setCaller*(frame: ref Environment, caller: ref Environment) =
   frame.caller = caller
@@ -784,7 +953,7 @@ proc setRedirect*(env: ref Environment, source, target: ref Environment) =
 # outside of any command.
 proc commandCaller*(env: ref Environment): nil ref Environment =
   result = nil
-  var cur: nil ref Environment = env
+  var cur {.cursor.}: nil ref Environment = env
   while cur != nil:
     let c = cur.caller
     if c != nil:
@@ -795,7 +964,7 @@ proc commandCaller*(env: ref Environment): nil ref Environment =
 # nearest `do` redirect for that scope, or the scope itself.
 proc resolveScope*(env: ref Environment, scope: ref Environment): ref Environment =
   result = scope
-  var cur: nil ref Environment = env
+  var cur {.cursor.}: nil ref Environment = env
   while cur != nil:
     let target = cur.redirectTo
     if cur.redirectFrom == scope and target != nil:
@@ -803,74 +972,96 @@ proc resolveScope*(env: ref Environment, scope: ref Environment): ref Environmen
     cur = cur.up
 
 proc define*(env: ref Environment, name, value: Object) =
-  env.bindings[name] = value
+  put(env.bindings, name, value, keyHash(name))
 
 proc undefine*(env: ref Environment, name: Object) =
-  env.bindings.del(name)
+  remove(env.bindings, name)
 
 func allBindings*(env: ref Environment): Table[Object, Object] =
-  result = env.bindings
+  result = initTable[Object, Object]()
+  for i in 0 ..< env.bindings.entries.len:
+    result[env.bindings.entries[i].key] = env.bindings.entries[i].val
 
 # Re-exports chain through modules; a cycle of exports that never reaches a
 # binding stops here instead of recursing forever.
 const MaxImportDepth = 32
 
-proc findCell(env: nil ref Environment, name: Object, depth: int,
-    key: var Object): nil ref Environment =
-  # The scope that holds name's binding, and the name it has there (in key),
+proc findCell(env: nil ref Environment, name: Object, h: Hash, depth: int,
+    pos: var int): nil ref Environment =
+  # The scope that holds name's binding, and its position there (in pos),
   # seen from env: own bindings first, then the scope's imports (the last
   # `use` wins), then the enclosing scope. nil when name is unbound.
-  var cur: nil ref Environment = env
+  var cur {.cursor.}: nil ref Environment = env
   while cur != nil:
-    if cur.bindings.hasKey(name):
-      key = name
+    let at = find(cur.bindings, name, h)
+    if at >= 0:
+      pos = at
       return cur
     if depth < MaxImportDepth:
       var i = cur.imports.len - 1
       while i >= 0:
-        let x = cur.imports[i]
-        if x.names.hasKey(name):
-          let found = findCell(x.env, x.names.getOrDefault(name, name), depth + 1, key)
+        let x {.cursor.} = cur.imports[i]
+        let n = find(x.names, name, h)
+        if n >= 0:
+          let found = findCell(x.env, x.names.entries[n].val, keyHash(x.names.entries[n].val),
+            depth + 1, pos)
           if found != nil:
             return found
-        elif x.all and x.env.bindings.hasKey(name):
-          key = name
-          return x.env
+        elif x.all:
+          let own = find(x.env.bindings, name, h)
+          if own >= 0:
+            pos = own
+            return x.env
         dec i
     cur = cur.up
   return nil
 
 proc has*(env: nil ref Environment, name: Object): bool =
-  var key = name
-  findCell(env, name, 0, key) != nil
+  var pos = 0
+  findCell(env, name, keyHash(name), 0, pos) != nil
 
 proc hasOwn*(env: nil ref Environment, name: Object): bool =
   result = false
   if env != nil:
     result = env.bindings.hasKey(name)
 
+# getVar env name found: the value name stands for in env; found tells
+# whether it is bound at all (the value is nothing when it is not).
+proc getVar*(env: nil ref Environment, name: Object, found: var bool): Object =
+  var pos = 0
+  let cell = findCell(env, name, keyHash(name), 0, pos)
+  if cell != nil:
+    found = true
+    result = cell.bindings.entries[pos].val
+  else:
+    found = false
+    result = nothing()
+
 proc lookup*(env: nil ref Environment, name: Object): Option[Object] =
-  var key = name
-  let found = findCell(env, name, 0, key)
+  var pos = 0
+  let found = findCell(env, name, keyHash(name), 0, pos)
   if found != nil:
-    return some(found.bindings.getOrDefault(key, nothing()))
+    return some(found.bindings.entries[pos].val)
   return none[Object]()
 
 # set reaches the binding a name stands for, which for an imported name is
 # the binding in the exporting module: `use` shares bindings, it never copies.
 proc assign*(env: ref Environment, name, value: Object): bool =
-  var key = name
-  let found = findCell(env, name, 0, key)
+  var pos = 0
+  let found = findCell(env, name, keyHash(name), 0, pos)
   result = false
   if found != nil:
-    found.bindings[key] = value
+    found.bindings.entries[pos].val = value
     result = true
 
 # The value a module exports under name, or none when it does not export it.
 proc lookupExport*(x: ref Exports, name: Object): Option[Object] =
-  if x.names.hasKey(name):
-    result = lookup(x.env, x.names.getOrDefault(name, name))
-  elif x.all and x.env.bindings.hasKey(name):
-    result = some(x.env.bindings.getOrDefault(name, nothing()))
+  let n = find(x.names, name, keyHash(name))
+  if n >= 0:
+    result = lookup(x.env, x.names.entries[n].val)
   else:
-    result = none[Object]()
+    let own = find(x.env.bindings, name, keyHash(name))
+    if x.all and own >= 0:
+      result = some(x.env.bindings.entries[own].val)
+    else:
+      result = none[Object]()

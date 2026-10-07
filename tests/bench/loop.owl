@@ -1,0 +1,11 @@
+use io
+use base
+use math
+
+; A tight while loop: lookup, set, arithmetic and comparison builtins.
+i = 0
+total = 0
+while (< i 150000):
+    set total (+ total (* i 2))
+    set i (+ i 1)
+echo total

@@ -1,0 +1,21 @@
+use io
+use base
+use math
+use fs
+use source
+
+; Real library code: source.owl splitting a module into items and editing it.
+src = read-file (concat (env-var "OWL_BENCH_DIR") "/../../src/owl/libraries/keys.owl")
+labels = ""
+n = 0
+round = 0
+while (< round 3):
+    items = source-items src
+    i = 0
+    while (< i (length items)):
+        set labels (concat labels (item-label (index items (+ i 0))) " ")
+        set i (+ i 1)
+    set n (+ n (length items))
+    set src (put-item src (concat "fun bench-extra x:" newline "    + x 1"))
+    set round (+ round 1)
+echo n (length labels) (length (split-lines src))

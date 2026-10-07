@@ -26,10 +26,10 @@ func indentOf*(text: string): int =
   while result < text.len and text[result] in {' ', '\t'}:
     inc result
 
-func numberDot(text: string, at: int): bool =
+func numberDot(text: string, at, stop: int): bool =
   if text[at - 1] notin Digits:
     return false
-  if at + 1 >= text.len:
+  if at + 1 >= stop:
     return true
   return text[at + 1] in Digits or text[at + 1] in Delimiters
 
@@ -38,10 +38,11 @@ proc fail(t: var Tokenizer, msg: string) {.raises.} =
     t.err = msg
   raise ValueError
 
-proc tokenize*(t: var Tokenizer, text: string): seq[Token] {.raises.} =
-  result = @[]
-  var i = 0
-  while i < text.len:
+# The tokens of text[start ..< stop], one line of a source.
+proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token] {.raises.} =
+  result = newSeqOfCap[Token](min(stop - start, 16))
+  var i = start
+  while i < stop:
     case text[i]
     of ' ', '\t', '\r':
       inc i
@@ -62,7 +63,7 @@ proc tokenize*(t: var Tokenizer, text: string): seq[Token] {.raises.} =
     of '"':
       var j = i + 1
       var closed = false
-      while j < text.len:
+      while j < stop:
         if text[j] == '"':
           closed = true
           break
@@ -77,22 +78,36 @@ proc tokenize*(t: var Tokenizer, text: string): seq[Token] {.raises.} =
     else:
       var j = i + 1
       var dotted = false
-      while j < text.len and text[j] notin Delimiters:
+      while j < stop and text[j] notin Delimiters:
         if text[j] == '.':
-          if dotted or not numberDot(text, j):
+          if dotted or not numberDot(text, j, stop):
             break
           dotted = true
         inc j
       result.add Token(kind: Word, text: text[i ..< j])
       i = j
 
+proc tokenize*(t: var Tokenizer, text: string): seq[Token] {.raises.} =
+  tokenizeRange(t, text, 0, text.len)
+
 proc scanLines*(t: var Tokenizer, text: string): seq[Line] {.raises.} =
-  result = @[]
+  # Each line of text, skipping blank lines and comment lines, read in place
+  # (no line is copied out of text).
+  result = newSeqOfCap[Line](text.len div 24 + 1)
   var num = 0
-  for raw in split(text, '\n'):
+  var start = 0
+  while start <= text.len:
+    var stop = start
+    while stop < text.len and text[stop] != '\n':
+      inc stop
     inc num
-    let content = strip(raw)
-    if content.len == 0 or content[0] == ';':
-      continue
-    t.line = num
-    result.add Line(num: num, indent: indentOf(raw), toks: tokenize(t, raw))
+    var first = start
+    while first < stop and text[first] in Whitespace:
+      inc first
+    if first < stop and text[first] != ';':
+      var indent = 0
+      while start + indent < stop and text[start + indent] in {' ', '\t'}:
+        inc indent
+      t.line = num
+      result.add Line(num: num, indent: indent, toks: tokenizeRange(t, text, start, stop))
+    start = stop + 1
