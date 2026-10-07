@@ -23,18 +23,10 @@
 
 import std/[syncio, strutils, os, envvars, cmdline]
 
-import clay
-import ellipse/logger
-import ellipse/platform/platform
-import ellipse/platform/renderer
-import ellipse_ui/ui
-import ellipse_ui/widgets
-import ellipse_ui/debug
+import ellipse_ui/app
 
 import duck/doc
 import duck/session
-
-addHandler initStandardLogger()
 
 let baseZoom = 18.uint16   ## the theme's control size: "100%"
 
@@ -66,7 +58,7 @@ proc routeKeys(evs: seq[KeyEvent]): seq[KeyEvent] =
         outp.add ev
   outp
 
-proc appChords() =
+proc appChords() {.raises.} =
   ## App-level keys read from the raw queue: they act whether or not the
   ## document holds focus, exactly like menu items.
   let evs = keyEvents()
@@ -256,32 +248,38 @@ widget DocArea():
   discard editor(editorId, document.text,
     EditorOpts(wrap: wrapOn, fontSize: zoomSize, blocked: open()))
 
-proc update() {.raises.} =
-  let mods = keyMods()
-  updateUI(skipWheel = mods.ctrl)
-  if mods.ctrl:
+proc wheelZoom() =
+  ## Ctrl + wheel zooms, and that notch must not scroll the document too.
+  if keyMods().ctrl:
+    holdWheel()
     let w = wheelDelta()
     if w.y > 0.0: zoomBy(2)
     elif w.y < 0.0: zoomBy(-2)
-  appChords()
 
-  layout:
-    clay "app", col(width = grow(), height = grow(), gap = 0)
-        .bg(bgColor):
-      toolBar("bar", menuStrip)
-      DocArea()
-      if statusOn:
-        drawStatus()
-      draw()
+proc view() {.raises.} =
+  clay "app", col(width = grow(), height = grow(), gap = 0)
+      .bg(bgColor):
+    toolBar("bar", menuStrip)
+    DocArea()
+    if statusOn:
+      drawStatus()
+    draw()
 
+proc afterFrame() {.raises.} =
   if restore:
     restore = false
     if not open():
       editorRestoreFocus(editorId, document.text)
   syncTitle()
 
-proc render() {.raises.} =
-  drawCommands()
+proc setup() {.raises.} =
+  installKeyFilter(routeKeys)
+  initLists()
+  # an initial file rides on the command line like notepad's
+  if paramStr(1).len > 0 and fileExists(paramStr(1)):
+    discard openPath(paramStr(1))
+  editorClearHistory()
+  focusAt(editorId, document.text, 0)
 
 ## --- screenshot mode -------------------------------------------------------------
 ##
@@ -298,56 +296,46 @@ proc typeForShot(s: string) {.raises.} =
     one.add s[i]
     pushKeyEvent KeyEvent(kind: kevText, text: one)
     inc i
-  update()
+  frame()
 
 proc saveShot(path: string) {.raises.} =
   ## The platform library's readback (clear, `drawCommands`, BMP save);
   ## black like the live app's clear color.
   discard saveScreenshot(path, bg = rgb(0, 0, 0))
 
-proc shot(path: string) {.raises.} =
+proc shot() {.raises.} =
+  let path = getEnv("DUCK_SHOT")
   let base =
     if path.endsWith(".bmp"): substr(path, 0, path.len - 5)
     else: path
-  update()
-  update()
+  frame()
+  frame()
   typeForShot("Duck quacks like Notepad: type, select, undo, find -- all on the ellipse_ui widget set.")
-  update()
-  update()
+  frame()
+  frame()
   saveShot(base & "-doc.bmp")
   # select a word the drag way? keep it deterministic: Ctrl+A then a word
   pushKeyEvent KeyEvent(kind: kevLetter, ch: 'a', ctrl: true)
-  update()
+  frame()
   # find dialog over a lit selection
   pushKeyEvent KeyEvent(kind: kevLetter, ch: 'f', ctrl: true)
-  update()
+  frame()
   pushKeyEvent KeyEvent(kind: kevText, text: "quack")
-  update()
-  update()
+  frame()
+  frame()
   saveShot(path)
   # Escape closes; Ctrl+O opens the file picker over the home directory
   pushKeyEvent KeyEvent(kind: kevEscape)
-  update()
+  frame()
   pushKeyEvent KeyEvent(kind: kevLetter, ch: 'o', ctrl: true)
-  update()
-  update()
+  frame()
+  frame()
   saveShot(base & "-file.bmp")
 
 when isMainModule:
-  try:
-    bootup()
-    installDebugMode()   # F1: widget boxes, per-widget fps, frame timeline
-    installKeyFilter(routeKeys)
-    initLists()
-    # an initial file rides on the command line like notepad's
-    if paramStr(1).len > 0 and fileExists(paramStr(1)):
-      discard openPath(paramStr(1))
-    editorClearHistory()
-    focusAt(editorId, document.text, 0)
-    let shotPath = getEnv("DUCK_SHOT")
-    if shotPath.len > 0:
-      shot(shotPath)
-    else:
-      start(update, render)
-  except ErrorCode:
-    discard
+  let notepad = App(setup: setup, input: wheelZoom, before: appChords,
+                 view: view, after: afterFrame)
+  if getEnv("DUCK_SHOT").len > 0:
+    run(notepad, script = shot)
+  else:
+    run(notepad)

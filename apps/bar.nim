@@ -19,16 +19,8 @@
 
 import std/[syncio, strutils]
 
-import clay
-import ellipse/logger
 import ellipse/clock
-import ellipse/platform/platform
-import ellipse/platform/renderer
-import ellipse_ui/ui
-import ellipse_ui/widgets
-import ellipse_ui/debug
-
-addHandler initStandardLogger()
+import ellipse_ui/app
 
 ## --- data sources ----------------------------------------------------------------
 
@@ -162,33 +154,26 @@ widget Clock():
 
 ## --- frame -----------------------------------------------------------------------
 
-proc update() {.raises.} =
-  updateUI()
+proc view() {.raises.} =
   let t = activeTheme
-  layout:
-    clay "root", col(width = grow(), height = grow()).bg(bgColor):
-      clay "bar", row(width = grow(), height = grow(), gap = 12,
-                      padding = padAll(4), alignY = centerY).bg(panelBg)
-          .border(t.metrics.borderHairline, t.palette.panelBorder):
-        workspaces()
-        spacer()
-        Title()
-        spacer()
-        Cpu()
-        Memory()
-        Clock()
+  clay "root", col(width = grow(), height = grow()).bg(bgColor):
+    clay "bar", row(width = grow(), height = grow(), gap = 12,
+                    padding = padAll(4), alignY = centerY).bg(panelBg)
+        .border(t.metrics.borderHairline, t.palette.panelBorder):
+      workspaces()
+      spacer()
+      Title()
+      spacer()
+      Cpu()
+      Memory()
+      Clock()
 
-proc render() {.raises.} =
-  drawCommands()
+proc setup() {.raises.} =
+  fillTitles()
 
 when isMainModule:
-  try:
-    # Docked along the top edge on layer-shell compositors (Sway, Hyprland,
-    # KDE, niri, ...), reserving its height; a borderless strip elsewhere.
-    bootup(WindowConfig(title: "bar", layer: LayerConfig(enabled: true,
-      edge: edgeTop, thickness: 30, namespace: "ellipse-bar")))
-    installDebugMode()   # F1: widget boxes, per-widget fps, frame timeline
-    fillTitles()
-    start(update, render)
-  except ErrorCode:
-    discard
+  # Docked along the top edge on layer-shell compositors (Sway, Hyprland,
+  # KDE, niri, ...), reserving its height; a borderless strip elsewhere.
+  run App(window: WindowConfig(title: "bar", layer: LayerConfig(enabled: true,
+            edge: edgeTop, thickness: 30, namespace: "ellipse-bar")),
+          setup: setup, view: view)

@@ -138,6 +138,13 @@ var motionFilterInstalled = false
 type InputHook* = proc () {.closure.}
 
 var inputHooks: seq[InputHook] = @[]
+var wheelHeld = false
+
+proc holdWheel*() =
+  ## Keep this frame's wheel away from the scroll containers -- called from
+  ## an input hook that spends the wheel on something else (Ctrl + wheel
+  ## zoom), so the same notch does not both zoom and scroll.
+  wheelHeld = true
 
 proc onInputFrame*(hook: InputHook) =
   ## Run `hook` in every `updateUI`, right after the input frame opens and
@@ -162,6 +169,7 @@ proc updateUI*(skipWheel: bool = false) =
     motionFilterInstalled = true
     setMotionFilter(motionChangesHover)
   beginInputFrame()
+  wheelHeld = false
   for hook in inputHooks:
     hook()
 
@@ -180,7 +188,7 @@ proc updateUI*(skipWheel: bool = false) =
   # scrollbars drive containers directly via `setScrollPosition`.
   let wheel = wheelDelta()
   let dt = frameDelta()
-  if skipWheel:
+  if skipWheel or wheelHeld:
     updateScrollContainers(false, vec2(0.0, 0.0), dt)
   else:
     updateScrollContainers(false,
