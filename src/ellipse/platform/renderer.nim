@@ -542,7 +542,15 @@ proc paintCommands(cmds: seq[RenderCommand]; area: Rect; limited: bool) =
       drawTextCmd(lineText(cmd), cmd.box.x, cmd.box.y, cmd.textColor,
                   cmd.fontSize.int)
     of renderClipStart:
-      clipStack.add toSdlRect(cmd.box)
+      # Clips nest: a clip inside a clip draws only where both allow -- a
+      # list scrolled half out of its page must not paint over the toolbar.
+      var r = cmd.box
+      if clipStack.len > 0:
+        r = intersect(r, toRect(clipStack[^1]))
+      var cr = toSdlRect(r)
+      if cr.w <= 0 or cr.h <= 0:
+        cr = SDL_Rect(x: 0, y: 0, w: 0, h: 0)
+      clipStack.add cr
       applyClip(ren, area, limited)
     of renderClipEnd:
       if clipStack.len > 0:

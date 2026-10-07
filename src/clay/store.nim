@@ -54,6 +54,8 @@ type
     elementIndex*: int32
     position*: Vec2
     nextChildOffset*: Vec2
+    hidden*: bool        ## inside a clip container that lies off screen:
+                         ## placed and published, but paints nothing
 
   ScrollData* = object
     ## Per clip/scroll-container state that persists across frames.

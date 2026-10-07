@@ -703,10 +703,13 @@ proc positionAndEmit(ctx: Context) =
       rootPos = vec2(pb.x + pf[colP] - ef[colE] + f.offset.x,
                      pb.y + pr[rowP] - er[rowE] + f.offset.y)
 
-    # ---- scissor for the whole floating subtree
+    # ---- scissor for the whole floating subtree. A floater clipped to a
+    # container that lies off screen is clipped away entirely: it paints
+    # nothing (Clay would draw it unclipped -- with no scissor emitted).
+    var rootHidden = false
     if root.clipElementId != 0:
       let clipItem = ctx.elementMap.getOrDefault(root.clipElementId, MapItem(elementIndex: -1))
-      if clipItem.elementIndex >= 0 and not offscreen(ctx, clipItem.box):
+      if clipItem.elementIndex >= 0:
         if ctx.externalScrollHandling and clipItem.elementIndex.int < ctx.elements.len and
             ctx.elements[clipItem.elementIndex].gen == clipItem.elementGen:
           # Floating attached to scrolled contents: re-apply the inner offset.
@@ -715,6 +718,8 @@ proc positionAndEmit(ctx: Context) =
             rootPos.x += clipEl.decl.clip.childOffset.x
           if clipEl.decl.clip.vertical:
             rootPos.y += clipEl.decl.clip.childOffset.y
+        rootHidden = offscreen(ctx, clipItem.box)
+      if clipItem.elementIndex >= 0 and not rootHidden:
         ctx.commands.add RenderCommand(
           kind: renderClipStart, box: clipItem.box, zIndex: root.zIndex,
           id: hashNumber(rootEl.id, uint32(rootEl.children.len + 10)),
@@ -729,7 +734,7 @@ proc positionAndEmit(ctx: Context) =
     var stack: seq[TreeNode] = @[]
     var visited: seq[bool] = @[]
     stack.add TreeNode(
-      elementIndex: root.elementIndex, position: rootPos,
+      elementIndex: root.elementIndex, position: rootPos, hidden: rootHidden,
       nextChildOffset: vec2(
         float32(if not rootEl.isText: rootEl.decl.layout.padding.left else: 0),
         float32(if not rootEl.isText: rootEl.decl.layout.padding.top else: 0)))
@@ -745,7 +750,8 @@ proc positionAndEmit(ctx: Context) =
         # ================= up-pass: close overlays / scissors / borders ====
         if not el.isText:
           var item = ctx.elementMap.getOrDefault(el.id, MapItem(elementIndex: -1))
-          if item.elementIndex >= 0 and not offscreen(ctx, item.box):
+          if item.elementIndex >= 0 and not stack[topIdx].hidden and
+              not offscreen(ctx, item.box):
             var closeClip = false
             var scrollOffset = Vec2()
             if isClipEl(el):
@@ -840,7 +846,10 @@ proc positionAndEmit(ctx: Context) =
                   scrollOffset = Vec2()
                 break
 
-        let off = offscreen(ctx, currentBox)
+        let off = node.hidden or offscreen(ctx, currentBox)
+        # An off-screen clip container clips its whole subtree away: content
+        # scrolled or overflowing past its box must not paint unclipped.
+        let childrenHidden = node.hidden or (not el.isText and isClipEl(el) and off)
 
         # ---- render commands for this element
         if not off:
@@ -979,7 +988,8 @@ proc positionAndEmit(ctx: Context) =
                   parent.position.y + parent.nextChildOffset.y + scrollOffset.y),
                 nextChildOffset: vec2(
                   float32(if not child.isText: child.decl.layout.padding.left else: 0),
-                  float32(if not child.isText: child.decl.layout.padding.top else: 0)))
+                  float32(if not child.isText: child.decl.layout.padding.top else: 0)),
+                hidden: childrenHidden)
               visited[visited.high - i] = false
               if layout.direction == leftToRight:
                 stack[topIdx].nextChildOffset.x += child.dims.width + float32(layout.gap)
@@ -987,9 +997,9 @@ proc positionAndEmit(ctx: Context) =
                 stack[topIdx].nextChildOffset.y += child.dims.height + float32(layout.gap)
 
     # close the floating subtree's scissor
-    if root.clipElementId != 0:
+    if root.clipElementId != 0 and not rootHidden:
       let clipItem = ctx.elementMap.getOrDefault(root.clipElementId, MapItem(elementIndex: -1))
-      if clipItem.elementIndex >= 0 and not offscreen(ctx, clipItem.box):
+      if clipItem.elementIndex >= 0:
         ctx.commands.add RenderCommand(
           kind: renderClipEnd,
           id: hashNumber(rootEl.id, uint32(rootEl.children.len + 11)))

@@ -277,6 +277,47 @@ proc testClipAndScroll() =
   expect(nearly(sd3.position.y, -200),
     "scroll: clamped to -(content-viewport), got " & $sd3.position.y)
 
+proc testOffscreenClip() =
+  ## A clip container scrolled off the top of the window: its content runs
+  ## on below its box -- back into view -- but it is clipped to that box,
+  ## so none of it may paint (Clay drops the scissor of an off-screen clip
+  ## and used to emit its children unclipped). Same for a floater clipped
+  ## to that container.
+  let ctx = fresh(200, 200)
+  let listId = elementId("list")
+  let rowId = elementId("row0")
+  beginLayout(ctx)
+  openElement(ctx, elementId("page"))
+  configureOpenElement(ctx, col(width = fixedPx(200), height = fixedPx(200))
+    .clip(false, true, childOffset = vec2(0, -150)))  # the page scrolled down
+  openElement(ctx, listId)
+  configureOpenElement(ctx, col(width = fixedPx(100), height = fixedPx(100))
+    .clip(false, true))                               # box at y -150 .. -50
+  openElement(ctx, rowId, col(width = fixedPx(100), height = fixedPx(400))
+    .bg(rgb(9, 9, 9)))                                # reaches y 250
+  closeElement(ctx)
+  openElement(ctx, elementId("tip"))
+  configureOpenElement(ctx, col(width = fixedPx(20), height = fixedPx(20))
+    .bg(rgb(8, 8, 8))
+    .floating(attachElementId, offset = vec2(0, 200), parentId = rowId.id,
+              clipTo = clipToAttachedParent))
+  closeElement(ctx)
+  closeElement(ctx)
+  closeElement(ctx)
+  endLayout(ctx)
+  var leaked = 0
+  var clips = 0
+  for c in ctx.commands:
+    if c.kind == renderRectangle and (c.fill.r == 9.0 or c.fill.r == 8.0):
+      inc leaked
+    if c.kind == renderClipStart:
+      inc clips
+  expect(leaked == 0, "clip: an off-screen clip paints none of its content, " &
+    $leaked & " leaked")
+  expect(clips == 1, "clip: only the page's scissor is emitted, got " & $clips)
+  expect(nearly(ctx.elementData(rowId).box.y, -150),
+    "clip: culled content still publishes its box")
+
 proc testFloating() =
   let ctx = fresh(400, 400)
   let anchorId = elementId("anchor")
@@ -475,6 +516,7 @@ proc main() {.raises.} =
   testAlignAndJustify()
   testBorder()
   testClipAndScroll()
+  testOffscreenClip()
   testFloating()
   testFloatingViewportFit()
   testZIndexOrdering()

@@ -29,6 +29,10 @@
 ##             childOffset = currentScrollOffset()):
 ##     for long things...
 ##
+## The bar floats, but inside whatever clips its container: a list
+## scrolled half out of its page shows only the part of its bar the page
+## shows (`clipToAttachedParent`).
+##
 ## Drag state lives here, keyed by container id -- like `menu`'s
 ## `openMenuId`, one frame's pointer decides the next frame's position.
 
@@ -188,7 +192,7 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
     .corner(style.radius)
     .floating(attachElementId,
       offset = offset, zIndex = 220, points = points,
-      parentId = container.id))
+      parentId = container.id, clipTo = clipToAttachedParent))
   if clickedIn(trackId):
     let local = pointerAlong(axis) -
       containerStart(container, axis) - style.margin
@@ -212,7 +216,7 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
     .corner(style.radius)
     .floating(attachElementId,
       offset = toffset, zIndex = 221, points = points,
-      parentId = container.id))
+      parentId = container.id, clipTo = clipToAttachedParent))
   if pressedNow() and pointerOver(thumbId) and geom.track > geom.thumb:
     let grab = pointerAlong(axis) -
       containerStart(container, axis) - style.margin - geom.top
