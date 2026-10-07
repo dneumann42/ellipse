@@ -37,6 +37,16 @@ proc spaceWidth(ctx: Context; cfg: TextConfig): float32 =
     return 0
   ctx.measureText(" ", cfg).width
 
+func gridOn*(ctx: Context): bool {.inline.} =
+  ## Laying out for a character grid (see `setGrid`).
+  ctx.grid.width > 0 and ctx.grid.height > 0
+
+func lineHeightOf(ctx: Context; cfg: TextConfig; measured: float32): float32 =
+  ## The pitch of `cfg`'s lines: its `lineHeight` when set, else the measured
+  ## line height. On a grid every line is one row, whatever was asked for.
+  if cfg.lineHeight > 0 and not gridOn(ctx): float32(cfg.lineHeight)
+  else: measured
+
 proc measureTextCached*(ctx: Context; text: string; cfg: TextConfig): Measurement =
   result = Measurement(words: @[])
   ## Cached measurement of `text` under `cfg`: unwrapped size, the widest
@@ -135,8 +145,7 @@ proc wrappedLines*(ctx: Context; text: string; cfg: TextConfig;
   ## `TextLine.dims.height` is uniform: the line pitch.
   result = @[]
   let m = measureTextCached(ctx, text, cfg)
-  let lineHeight =
-    if cfg.lineHeight > 0: float32(cfg.lineHeight) else: m.unwrapped.height
+  let lineHeight = lineHeightOf(ctx, cfg, m.unwrapped.height)
 
   if not m.containsNewlines and m.unwrapped.width <= maxWidth:
     # Fast path: the whole string is one line, sized to the container box.
@@ -197,7 +206,5 @@ proc wrapTextElement*(ctx: Context; el: var LayoutElement) =
   ## element between the horizontal and vertical sizing passes; so do we.
   el.lines = wrappedLines(ctx, el.text, el.textCfg, el.dims.width)
   let m = measureTextCached(ctx, el.text, el.textCfg)
-  let lineHeight =
-    if el.textCfg.lineHeight > 0: float32(el.textCfg.lineHeight)
-    else: m.unwrapped.height
+  let lineHeight = lineHeightOf(ctx, el.textCfg, m.unwrapped.height)
   el.dims.height = lineHeight * float32(el.lines.len)

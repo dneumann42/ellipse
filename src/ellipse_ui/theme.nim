@@ -22,6 +22,15 @@
 ## underneath it; `setTheme(t)` replaces the current theme without a
 ## snapshot, and `setTheme(defaultTheme())` resets everything.
 ##
+## **In the terminal** (`--tui`, `ELLIPSE_TUI=1`) the palette, type scale
+## and radii apply as they are -- colours as 24-bit, 256 or 16 colours,
+## large type as bold, radii as rounded box corners -- while sizes come from
+## the theme's `cells` look: `Metrics` and scrollbar geometry tuned for 8x16
+## cells (one-row controls, one-column insets), which `setTheme` and
+## `pushTheme(t)` swap in for `metrics` and the scrollbar's geometry. A
+## theme tunes its terminal look by editing `cells`; values are virtual
+## pixels, snapped to whole cells by clay's grid.
+##
 ## `defaultTheme()` reproduces the widget set's original hard-coded look
 ## token for token. The colour tokens keep the old exported constant
 ## names (`bgColor`, `panelBg`, `accent`, `textColor`, ...) as zero-
@@ -29,6 +38,7 @@
 ## `col(...).bg(panelBg)` now read the theme instead of a const.
 
 import clay
+import ellipse/platform/termmode
 
 type
   Palette* = object
@@ -130,12 +140,22 @@ type
     thumb*: Color
     thumbHot*: Color     ## hovered or dragged thumb
 
+  CellLook* = object
+    ## The terminal's sizes (see the module doc): `metrics` replaces the
+    ## theme's, the scrollbar keeps its colours and takes this geometry.
+    metrics*: Metrics
+    scrollbarWidth*, scrollbarMargin*, scrollbarMinThumb*: float32
+    buttonShadow*: Color   ## the drop shadow a button casts (`ui.cellShadow`)
+    focusShadow*: Color    ## ... and while it holds keyboard focus;
+                           ## transparent: the accent, mostly opaque
+
   Theme* = object
     palette*: Palette
     text*: TextSizes
     radii*: Radii
     metrics*: Metrics
     scrollbar*: ScrollbarStyle
+    cells*: CellLook     ## sizes for the terminal
 
 ## --- the default theme ---------------------------------------------------------
 ##
@@ -201,6 +221,32 @@ func defaultScrollbarStyle*(): ScrollbarStyle =
     thumb: rgb(118, 124, 148, 170),
     thumbHot: rgb(168, 176, 205, 235))
 
+func defaultCellMetrics*(): Metrics =
+  ## `defaultMetrics` for 8x16 cells: controls one row tall, insets a column
+  ## (so box sides have a cell to be drawn in), vertical gaps a row or none.
+  Metrics(
+    controlHeight: 16.0, toolbarHeight: 16.0,
+    checkSize: 24.0, tickSize: 8.0, checkSizeSm: 24.0, tickSizeSm: 8.0,
+    switchWidth: 48.0, switchHeight: 16.0, switchKnob: 16.0,
+    stepperSize: 24.0,
+    listMaxHeight: 160.0, multiListMaxHeight: 160.0,
+    textRowHeight: 16.0, popoverOffset: 0.0,
+    padButton: 8, padMenuItem: 8, padOption: 8, padList: 0,
+    padFieldX: 8, padFieldY: 0, padCheckRow: 0, padCard: 16, padStat: 16,
+    padPanel: 16, padToolbar: 0, padSwitch: 8, padTabX: 16, padTabTop: 0,
+    padTabBottom: 0, padMinor: 0, padItem: 8,
+    gapCard: 16, gapCardRow: 16, gapProse: 16, gapTight: 8, gapList: 0,
+    borderRaised: 2, borderHairline: 1, borderTab: 2, pressOffset: 0,
+    headingPadH1: 16, headingPadH2: 16, headingPadH3: 16,
+    headingPadMinor: 16, headingPadBottom: 0,
+  )
+
+func defaultCellLook*(): CellLook =
+  CellLook(metrics: defaultCellMetrics(), scrollbarWidth: 8.0,
+           scrollbarMargin: 0.0, scrollbarMinThumb: 16.0,
+           buttonShadow: rgb(0, 0, 0, 255),
+           focusShadow: rgb(0, 0, 0, 0))
+
 func defaultTheme*(): Theme =
   Theme(
     palette: defaultPalette(),
@@ -208,7 +254,21 @@ func defaultTheme*(): Theme =
     radii: defaultRadii(),
     metrics: defaultMetrics(),
     scrollbar: defaultScrollbarStyle(),
+    cells: defaultCellLook(),
   )
+
+func forTerminal*(t: Theme): Theme =
+  ## `t` with its terminal sizes in place (see the module doc).
+  result = t
+  result.metrics = t.cells.metrics
+  result.scrollbar.width = t.cells.scrollbarWidth
+  result.scrollbar.margin = t.cells.scrollbarMargin
+  result.scrollbar.minThumb = t.cells.scrollbarMinThumb
+  result.scrollbar.radius = 0.0
+
+proc forSurface(t: sink Theme): Theme =
+  ## `t` as the surface the app runs on draws it.
+  if terminalMode(): forTerminal(t) else: t
 
 ## --- the live theme --------------------------------------------------------------
 ##
@@ -216,19 +276,19 @@ func defaultTheme*(): Theme =
 ## time, so anything that mutates it -- direct field writes, the stack
 ## below, or `withTheme` -- takes effect from the *next* widget on.
 
-var activeTheme*: Theme = defaultTheme()
+var activeTheme*: Theme = forSurface(defaultTheme())
 
 var themeStack: seq[Theme] = @[]
 
 proc setTheme*(theme: sink Theme) =
   ## Replace the live theme outright (no snapshot; `setTheme(defaultTheme())`
   ## resets to the built-in look).
-  activeTheme = theme
+  activeTheme = forSurface(theme)
 
 proc pushTheme*(theme: sink Theme) =
   ## Snapshot the live theme and swap in `theme` for the widgets that follow.
   themeStack.add activeTheme
-  activeTheme = theme
+  activeTheme = forSurface(theme)
 
 proc pushTheme*() =
   ## Snapshot the live theme so the caller can mutate it freely;

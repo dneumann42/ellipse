@@ -410,7 +410,7 @@ proc gridWidth(id, textEl: ElementId, opts: EditorOpts): float32 =
   if prev.found: prev.box.width else: 0.0
 
 proc pitchOf(ctx: Context, text: string, cfg: TextConfig): float32 =
-  if cfg.lineHeight > 0:
+  if cfg.lineHeight > 0 and not ctx.gridOn:   # a grid's lines are rows
     return float32(cfg.lineHeight)
   let m = measureTextCached(ctx, text, cfg)
   if m.unwrapped.height > 0: m.unwrapped.height else: float32(cfg.fontSize)

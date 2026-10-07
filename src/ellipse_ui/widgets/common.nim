@@ -624,7 +624,8 @@ proc caretGeom*(text: string, pos: int, cfg: TextConfig,
   result = CaretGeom()
   let m = measureTextCached(ctx, text, cfg)
   let lineHeight =
-    if cfg.lineHeight > 0: float32(cfg.lineHeight) else: m.unwrapped.height
+    if cfg.lineHeight > 0 and not ctx.gridOn: float32(cfg.lineHeight)
+    else: m.unwrapped.height     # on a terminal grid every line is a row
   let barH = if lineHeight > 0.0: lineHeight else: float32(cfg.fontSize)
   let yBase = (lineHeight - m.unwrapped.height) / 2.0
   result.lineHeight = lineHeight
@@ -694,7 +695,20 @@ proc caretOverlay*(textElId: uint32, text: string, cfg: TextConfig,
   ## box's own last-frame width is the old text's, one glyph short of a
   ## just-typed line, and wrapping at it would drop the caret a line.
   ## 0 uses the text box's last width -- right for unwrapped text.
-  if focusedId() == 0'u32 or not caretVisible():
+  ##
+  ## In the terminal the caret is the terminal's own cursor, put at the
+  ## same spot (`setTerminalCaret`); the terminal blinks it.
+  if focusedId() == 0'u32:
+    return
+  if terminalMode():
+    let prev = elementData(ElementId(id: textElId))
+    if prev.found:
+      let g = caretGeom(text, caret, cfg,
+        if wrapWidth > 0.0: wrapWidth else: prev.box.width)
+      if g.found:
+        setTerminalCaret(prev.box.x + g.x, prev.box.y + g.y)
+    return
+  if not caretVisible():
     return
   let prev = elementData(ElementId(id: textElId))
   if not prev.found:
@@ -794,9 +808,9 @@ proc linePitch*(cfg: TextConfig): float32 =
   ## The height one text line takes under `cfg` -- the unit `rows` /
   ## `maxLines` count in. Falls back to the theme's `textRowHeight` before
   ## a measurer is installed.
-  if cfg.lineHeight > 0:
-    return float32(cfg.lineHeight)
   let ctx = currentContext()
+  if cfg.lineHeight > 0 and not ctx.gridOn:   # a grid's lines are rows
+    return float32(cfg.lineHeight)
   if not ctx.measureTextInstalled():
     return activeTheme.metrics.textRowHeight
   let h = measureTextCached(ctx, "Ag", cfg).unwrapped.height
@@ -861,8 +875,12 @@ proc tickBox*(checked: bool, box: float32 = activeTheme.metrics.checkSize,
   ## square of `tick` pixels. The filled square stands in for a `✓` glyph --
   ## the renderer only promises rectangles and the UI font.
   let t = activeTheme
+  # The tick's inset as side padding: the same centring in a window, and on
+  # a terminal grid the cell the box's side lines are drawn in -- `[■]`.
+  let inset = max(int((box - tick) / 2), 0)
   container(col(width = fixedPx(box), height = fixedPx(box),
-      alignX = centerX, alignY = centerY)
+      alignX = centerX, alignY = centerY,
+      padding = Padding(left: inset, right: inset))
     .bg(t.palette.fieldBg)
     .corner(t.radii.check)
     .border(t.metrics.borderHairline,

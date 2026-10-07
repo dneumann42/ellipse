@@ -80,6 +80,10 @@ proc updateScrollContainers*(dragScrolling: bool, scrollDelta: Vec2,
 proc setMeasureText*(fn: MeasureFn) = setMeasureText(currentContext(), fn)
 proc setLayoutDimensions*(dims: Size) = setLayoutDimensions(currentContext(), dims)
 proc layoutDimensions*(): Size = layoutDimensions(currentContext())
+proc setGrid*(cell: Size) = setGrid(currentContext(), cell)
+proc gridCell*(): Size =
+  ## The current context's grid cell (zero when not laying out for a grid).
+  currentContext().grid
 proc takeErrors*(): seq[ErrorData] = takeErrors(currentContext())
 proc openElementId*(): uint32 = openElementId(currentContext())
 proc enclosingZIndex*(): int16 = enclosingZIndex(currentContext())

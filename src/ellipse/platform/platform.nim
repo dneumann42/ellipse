@@ -3,12 +3,17 @@ when defined(windows):
 else:
   {.passL: "-lSDL3 -no-pie".}
 
-import std/[monotimes, strutils, envvars]
+import std/[monotimes, strutils, envvars, base64]
 
 import ../logger
 import ./pacing
 export pacing
 import ./layershell
+import ./keyevents
+export keyevents
+import ./termmode
+export termmode
+import ../terminal/[tty, terminput]
 import ./fdwatch
 export fdwatch
 export layershell
@@ -326,31 +331,6 @@ type
     down*: bool
 
 type
-  KeyEventKind* = enum
-    ## What a `KeyEvent` carries. Printable input arrives as `kevText`:
-    ## the composed string, layout, Shift, CapsLock and AltGr applied. The
-    ## rest are the named keys the UI edits and navigates with. Ctrl/Alt
-    ## held on any printable key makes a chord instead: `kevLetter` with
-    ## `ch` the key's *unshifted* char -- the lowered letter, the digit,
-    ## '-', '=', '/', '[', ... (Shift travels in `shift`). `kevNone` marks
-    ## ignored keys and never enters the queue.
-    kevNone, kevText, kevLetter, kevBackspace, kevDelete, kevLeft, kevRight,
-    kevUp, kevDown, kevHome, kevEnd, kevEnter, kevEscape,
-    kevPageUp, kevPageDown,
-    kevF1, kevF2, kevF3, kevF4, kevF5, kevF6,
-    kevF7, kevF8, kevF9, kevF10, kevF11, kevF12,
-    kevTab,   ## Tab / Shift+Tab: focus traversal (see `ellipse_ui/focus`)
-    kevInsert
-
-  KeyEvent* = object
-    kind*: KeyEventKind
-    shift*: bool
-    ctrl*: bool
-    alt*: bool
-    ch*: char          ## kevLetter only: the chord's unshifted char
-    text*: string      ## kevText only: the composed string of one keypress
-
-type
   PlatformApplication* = object
     window: Window
     renderer: Renderer
@@ -471,9 +451,186 @@ proc tryLayerWindow(app: var PlatformApplication; cfg: WindowConfig): bool {.rai
   app.docked = true
   return true
 
+## --- the terminal backend ---------------------------------------------------------
+##
+## With `terminalMode()` (`--tui`, `ELLIPSE_TUI=1`) no window opens: SDL
+## runs only its event queue, and the terminal is the window. Its input
+## descriptor and a signal pipe are watched with `fdwatch`, so key presses,
+## mouse reports and resizes wake the very same paced loop a window's
+## events do, between frames. The layout is the terminal's cells in
+## virtual pixels (`cellWidth` x `cellHeight` each); the pointer sits at
+## the centre of the cell the mouse is over.
+##
+## Ctrl+Q closes the app, as a window's close button would.
+##
+## When stdout is not a terminal (a pipe, a test, `ELLIPSE_SCREENSHOT`) the
+## backend runs headless at `ELLIPSE_TUI_SIZE` (`120x40` by default) and
+## writes nothing.
+
+var
+  termDecoder: Decoder
+  termSigFd = -1'i32
+  termHeadless = false
+  termMods: tuple[ctrl, shift, alt: bool]
+  termClipboard = ""
+  termLastClick = 0'i64
+  termLastClickCell = (-1, -1)
+
+const DoubleClickNs = 400_000_000'i64
+
+proc headlessSize(): tuple[cols, rows: int] =
+  result = (120, 40)
+  let spec = getEnv("ELLIPSE_TUI_SIZE")
+  let x = spec.find('x')
+  if x > 0:
+    try:
+      result = (max(parseInt(spec.substr(0, x - 1)), 1),
+                max(parseInt(spec.substr(x + 1)), 1))
+    except:
+      discard
+
+proc terminalHeadless*(): bool =
+  ## The terminal backend is drawing for nobody (see above).
+  termHeadless
+
+proc terminalSize*(): tuple[cols, rows: int] =
+  ## The terminal's size in cells.
+  if termHeadless: headlessSize() else: ttySize()
+
+var termCaret: tuple[shown: bool, x, y: float32]
+
+proc setTerminalCaret*(x, y: float32) =
+  ## Put the terminal's own cursor at layout point (x, y) for this frame --
+  ## what a focused text field does instead of painting a caret bar. The
+  ## renderer shows it after the frame and hides it on frames nobody asks.
+  termCaret = (true, x, y)
+
+proc takeTerminalCaret*(): tuple[shown: bool, x, y: float32] =
+  ## This frame's cursor request (and forget it for the next).
+  result = termCaret
+  termCaret = (false, 0'f32, 0'f32)
+
+proc terminalWrite*(s: string) =
+  ## Send `s` to the terminal (escape sequences included); dropped headless.
+  if not termHeadless:
+    ttyWrite(s)
+
+proc termResize(app: var PlatformApplication) =
+  let (cols, rows) = terminalSize()
+  let w = float32(cols) * cellWidth
+  let h = float32(rows) * cellHeight
+  if w != app.width or h != app.height:
+    app.width = w
+    app.height = h
+    requestFullRedraw()
+    wake()
+
+proc termPointer(app: var PlatformApplication; col, row: int) =
+  app.pointer.x = (float32(col) + 0.5'f32) * cellWidth
+  app.pointer.y = (float32(row) + 0.5'f32) * cellHeight
+
+proc termInput(app: var PlatformApplication; evs: seq[TermEvent]) =
+  for ev in evs:
+    case ev.kind
+    of teKey:
+      let k = ev.key
+      if k.kind == kevLetter and k.ctrl and not k.alt and k.ch == 'q':
+        app.running = false
+        wake()
+        continue
+      termMods = (ctrl: k.ctrl, shift: k.shift, alt: k.alt)
+      app.keyPending.add k
+      wake()
+    of teMouse:
+      termMods = (ctrl: ev.ctrl, shift: ev.shift, alt: ev.alt)
+      termPointer(app, ev.col, ev.row)
+      if ev.motion:
+        app.pointer.down = ev.pressed and ev.button == mbLeft
+        if not frameWanted(monoNow()) and
+            motionWakes(app.pointer.x, app.pointer.y, app.pointer.down):
+          wake()
+      else:
+        if ev.button == mbLeft:
+          app.pointer.down = ev.pressed
+          if ev.pressed:
+            let now = monoNow()
+            if now - termLastClick < DoubleClickNs and
+                termLastClickCell == (ev.col, ev.row):
+              app.doublePending = true
+              termLastClick = 0
+            else:
+              termLastClick = now
+            termLastClickCell = (ev.col, ev.row)
+        elif not ev.pressed:
+          app.pointer.down = false
+        wake()
+    of teWheel:
+      termMods = (ctrl: ev.ctrl, shift: ev.shift, alt: ev.alt)
+      termPointer(app, ev.wcol, ev.wrow)
+      app.wheelPending.x += ev.dx
+      app.wheelPending.y += ev.dy
+      wake()
+    of tePaste:
+      # Lines as typed: text, Enter, text.
+      var line = ""
+      for ch in ev.text:
+        if ch == '\r':
+          continue
+        if ch == '\n':
+          if line.len > 0:
+            app.keyPending.add KeyEvent(kind: kevText, text: line)
+          app.keyPending.add KeyEvent(kind: kevEnter)
+          line = ""
+        else:
+          line.add ch
+      if line.len > 0:
+        app.keyPending.add KeyEvent(kind: kevText, text: line)
+      wake()
+    of teFocus:
+      wake()
+
+proc readTerminalInput() =
+  let (data, eof) = ttyRead(0'i32)
+  if data.len > 0:
+    termInput(activeApp, termDecoder.feed(data))
+  if eof:
+    activeApp.running = false
+    wake()
+
+proc readTerminalSignals() =
+  let (data, _) = ttyRead(termSigFd)
+  for b in data:
+    if b == 'w':
+      termResize(activeApp)
+    elif b == 'q':
+      activeApp.running = false
+      wake()
+
+proc setTerminalTitle(title: string) =
+  terminalWrite("\e]2;" & title & "\a")
+
+proc initTerminal(app: var PlatformApplication; cfg: WindowConfig) {.raises.} =
+  sdlHandle(SDL_Init(Events), "SDL_Init()")
+  app.visible = true
+  app.vsync = false
+  termHeadless = not ttyIsTty()
+  if not termHeadless:
+    termSigFd = ttyOpen()
+    if termSigFd < 0:
+      error "could not put the terminal in raw mode"
+      raise Failure
+    discard watchFd(0'i32, proc () = readTerminalInput())
+    discard watchFd(termSigFd, proc () = readTerminalSignals())
+    setTerminalTitle(cfg.title)
+  termResize(app)
+
 proc initialize*(cfg: WindowConfig) {.raises.} =
-  ## Start SDL and open the app's window as `cfg` describes.
+  ## Start SDL and open the app's window as `cfg` describes -- or take over
+  ## the terminal in `terminalMode()`.
   activeApp = PlatformApplication()
+  if terminalMode():
+    initTerminal(activeApp, cfg)
+    return
 
   var an = "ellipse"
   var av = "0.1.0"
@@ -921,19 +1078,27 @@ proc keyMods*(): tuple[ctrl, shift, alt: bool] =
   ## The live Ctrl/Shift/Alt modifier state -- not queued like key events
   ## but polled, so chords held *while the wheel turns* are visible (zoom
   ## widgets) even though the press itself emitted no event this frame.
+  if terminalMode():
+    return termMods
   let m = SDL_GetModState().int32
   (ctrl: (m and ModCtrl) != 0, shift: (m and ModShift) != 0,
    alt: (m and ModAlt) != 0)
 
 proc setWindowTitle*(title: string) =
   ## Rename the window. A no-op before `initialize()`.
+  if terminalMode():
+    setTerminalTitle(title)
+    return
   if activeApp.window.raw != nil:
     var t = title
     discard SDL_SetWindowTitle(activeApp.window.raw, t.toCString)
 
 proc getClipboard*(): string =
   ## The system clipboard as text; empty when nothing is (or SDL is not
-  ## up yet, which is the state headless tests run in).
+  ## up yet, which is the state headless tests run in). In the terminal:
+  ## what this app last copied (terminals do not let apps read theirs).
+  if terminalMode():
+    return termClipboard
   if activeApp.window.raw == nil:
     return ""
   let cstr = SDL_GetClipboardText()
@@ -943,7 +1108,12 @@ proc getClipboard*(): string =
   SDL_free(cstr)
 
 proc setClipboard*(text: string) =
-  ## Put `text` on the system clipboard. No-op before `initialize()`.
+  ## Put `text` on the system clipboard. No-op before `initialize()`. In
+  ## the terminal: through OSC 52, which most terminals honour.
+  if terminalMode():
+    termClipboard = text
+    terminalWrite("\e]52;c;" & encode(text) & "\a")
+    return
   if activeApp.window.raw == nil:
     return
   var t = text
@@ -1044,6 +1214,8 @@ proc drawFrame(app: var PlatformApplication; render: FrameFn): bool {.raises.} =
   ## `pacing.requestPresent`) and the window can show it. Returns whether
   ## a present happened.
   render()
+  if terminalMode():
+    return presentRequested()   # the renderer wrote the changed cells
   if presentRequested() and app.visible:
     sdlHandle(SDL_RenderPresent(app.renderer.raw), "SDL_RenderPresent()")
     return true

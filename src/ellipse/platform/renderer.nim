@@ -16,11 +16,13 @@
 
 {.passL: "-lSDL3_ttf".}
 
-import std/[math, tables, strutils]
+import std/[math, tables, strutils, envvars, syncio]
 
 import clay
 import ./platform
 import ./damage
+import ../terminal/[cellbuf, cellwidth]
+export cellbuf
 
 ## --- SDL3 / SDL3_ttf bindings ---------------------------------------------------
 
@@ -443,6 +445,10 @@ proc initializeRenderer*() {.raises.} =
   discard SDL_SetRenderDrawBlendMode(sdlRenderer(), BlendModeBlend)
 
 proc measureText*(text: string; cfg: TextConfig): Size =
+  if terminalMode():
+    # One cell per column the text takes, one row high, whatever its size.
+    return Size(width: float32(displayWidth(text)) * cellWidth,
+                height: cellHeight)
   ## clay `MeasureFn`: real metrics from the font at `cfg.fontSize`.
   ## Fallback: the uniform-cell estimate, on measurement failure.
   let font = fontFor(cfg.fontSize.int)
@@ -456,7 +462,8 @@ proc measureText*(text: string; cfg: TextConfig): Size =
               height: float32(cfg.fontSize))
 
 proc bootContext(width, height: float32) {.raises.} =
-  initializeRenderer()
+  if not terminalMode():
+    initializeRenderer()
   var w = width
   var h = height
   if w <= 0.0 or h <= 0.0:
@@ -465,6 +472,8 @@ proc bootContext(width, height: float32) {.raises.} =
     h = winH
   setCurrentContext(initContext(size(w, h)))
   setMeasureText(measureText)
+  if terminalMode():
+    setGrid(size(cellWidth, cellHeight))
 
 proc bootup*(width, height: float32 = 0.0) {.raises.} =
   ## The whole GUI startup dance in one call: platform window + renderer,
@@ -580,6 +589,7 @@ var
   retainedOk = true          ## false once target textures proved unsupported
   lastSigs: seq[CmdSig] = @[]
   lastValid = false          ## `retained` holds `lastSigs`' picture
+  termValid = false          ## the terminal shows `termFront`
 
 proc dropRetained() =
   let tex = retained
@@ -609,6 +619,7 @@ proc ensureRetained(w, h: int32): bool =
 proc invalidateFrame*() =
   ## Forget the retained picture: the next `drawCommands` repaints it all.
   lastValid = false
+  termValid = false
 
 proc frameSignatures(cmds: seq[RenderCommand]): seq[CmdSig] =
   var b = SigBuilder()
@@ -706,6 +717,81 @@ proc paintContent(): tuple[painted, ready: bool] {.raises.} =
     discard SDL_RenderTexture(ren, tex, nil, nil)
   return (true, true)
 
+## --- the terminal picture ---------------------------------------------------------
+##
+## In `terminalMode()` the commands paint a cell buffer (`ellipse/terminal/
+## cells`) instead of pixels. The buffer the terminal shows is kept, and a
+## frame writes only the cells that differ from it -- the terminal's damage
+## tracking -- inside a synchronized-output bracket so a half-written frame
+## is never seen. Colours go out as 24-bit, or the nearest of 256 / 16 when
+## the terminal says it has no more (`COLORTERM`, `TERM`;
+## `ELLIPSE_TUI_COLORS=true|256|16` overrides).
+
+var
+  termFront: CellBuffer      ## what the terminal shows
+  termColors = cmTrue
+  termColorsKnown = false
+  textColorDefault = rgb(230, 232, 238)
+
+proc terminalColorMode*(): ColorMode =
+  if not termColorsKnown:
+    termColorsKnown = true
+    let force = getEnv("ELLIPSE_TUI_COLORS")
+    let colorterm = getEnv("COLORTERM")
+    let term = getEnv("TERM")
+    termColors =
+      if force == "16": cm16
+      elif force == "256": cm256
+      elif force.len > 0: cmTrue
+      elif colorterm == "truecolor" or colorterm == "24bit": cmTrue
+      elif term.contains("256color") or term.contains("kitty") or
+          term.contains("ghostty") or term.contains("wezterm"): cm256
+      elif term == "linux" or term.len == 0: cm16
+      else: cm256
+  termColors
+
+proc terminalPicture*(): CellBuffer =
+  ## The last layout pass painted into a fresh cell buffer the size of the
+  ## layout.
+  let dims = layoutDimensions()
+  let cols = max(int(dims.width / cellWidth + 0.5), 1)
+  let rows = max(int(dims.height / cellHeight + 0.5), 1)
+  result = initCellBuffer(cols, rows, cellWidth, cellHeight,
+                          toRgb(clearColor), toRgb(textColorDefault))
+  result.paint(renderCommands())
+
+var termCursor = ""   ## the cursor state last sent (see `cursorSeq`)
+
+proc cursorSeq(): string =
+  ## Where the terminal's cursor goes after this frame: at the caret a
+  ## focused field asked for (a blinking bar), else hidden.
+  let (shown, x, y) = takeTerminalCaret()
+  if not shown:
+    return "\e[?25l"
+  let col = int(floor(x / cellWidth + 0.5)) + 1
+  let row = int(floor(y / cellHeight + 0.5)) + 1
+  "\e[" & $row & ";" & $col & "H\e[5 q\e[?25h"
+
+proc drawTerminal() =
+  let back = terminalPicture()
+  let full = takeFullRedraw() or not termValid
+  var frame = toAnsi(back, termFront, terminalColorMode(), full)
+  let cursor = cursorSeq()
+  if frame.len > 0 or full or cursor != termCursor:
+    if full:
+      frame = "\e[0m\e[2J" & frame
+    # Hide the cursor while cells are written; put it back last.
+    terminalWrite("\e[?2026h\e[?25l" & frame & cursor & "\e[?2026l")
+    termCursor = cursor
+    noteDamage(int64(frame.len))
+    contentPaintedFlag = true
+    requestSettleFrame()
+    requestPresent()
+  else:
+    contentPaintedFlag = false
+  termFront = back
+  termValid = true
+
 proc drawCommands*() {.raises.} =
   ## Paint the current context's commands from the last `endLayout`. Call
   ## once per frame from the app's render hook; it repaints only what
@@ -713,6 +799,9 @@ proc drawCommands*() {.raises.} =
   ## did (see `pacing.requestPresent`). A frame whose output changed also
   ## asks for one more frame: immediate-mode widgets read last frame's
   ## geometry, so a change settles over two frames.
+  if terminalMode():
+    drawTerminal()
+    return
   let (painted, ready) = paintContent()
   contentPaintedFlag = painted
   if painted:
@@ -745,10 +834,12 @@ proc drawCommands*() {.raises.} =
 
 proc overlayRect*(r: Rect; col: Color) =
   ## A filled rectangle (alpha-blended) for an overlay hook.
+  if terminalMode(): return
   fillRect(sdlRenderer(), r, col)
 
 proc overlayFrame*(r: Rect; width: float32; col: Color) =
   ## A rectangle outline `width` thick, inside `r`.
+  if terminalMode(): return
   let ren = sdlRenderer()
   fillStrip(ren, r.x, r.y, r.width, width, col)
   fillStrip(ren, r.x, r.y + r.height - width, r.width, width, col)
@@ -758,6 +849,7 @@ proc overlayFrame*(r: Rect; width: float32; col: Color) =
 
 proc overlayText*(text: string; x, y: float32; size: int; col: Color) =
   ## One line of text with its top-left at (x, y).
+  if terminalMode(): return
   if text.len > 0:
     drawTextCmd(text, x, y, col, size)
 
@@ -766,16 +858,23 @@ proc overlayTextWidth*(text: string; size: int): float32 =
 
 proc overlayClip*(r: Rect) =
   ## Clip overlay painting to `r` until `overlayUnclip`.
+  if terminalMode(): return
   var cr = toSdlRect(r)
   discard SDL_SetRenderClipRect(sdlRenderer(), addr cr)
 
 proc overlayUnclip*() =
+  if terminalMode(): return
   discard SDL_SetRenderClipRect(sdlRenderer(), nil)
 
 proc frameChecksum*(): uint64 {.raises.} =
   ## FNV-1a over the backbuffer's pixels: what the next present would show.
   ## The seam the damage tests compare a partial repaint against a full one
-  ## with; 0 when the readback failed.
+  ## with; 0 when the readback failed. In the terminal: over the cells.
+  if terminalMode():
+    result = 0xCBF29CE484222325'u64
+    for ch in toAnsiFrame(terminalPicture(), cmTrue):
+      result = (result xor uint64(ord(ch))) * 0x100000001B3'u64
+    return
   let surf = SDL_RenderReadPixels(sdlRenderer(), nil)
   if surf == nil:
     return 0
@@ -791,9 +890,24 @@ proc frameChecksum*(): uint64 {.raises.} =
     inc y
   SDL_DestroySurface(surf)
 
+proc saveTerminalShot(path: string): bool {.raises.} =
+  ## The terminal picture as text: plain, or with its colours as ANSI
+  ## escapes when `path` ends in `.ans` (`cat` it to look).
+  let pic = terminalPicture()
+  let body = if path.endsWith(".ans"): toAnsiFrame(pic, terminalColorMode())
+             else: toPlain(pic)
+  try:
+    writeFile(path, body)
+    result = true
+  except:
+    result = false
+
 proc saveBackbuffer*(path: string): bool {.raises.} =
   ## Write what the next present would show -- app picture and any overlay
-  ## -- as a BMP. Call from the render hook after `drawCommands`.
+  ## -- as a BMP. Call from the render hook after `drawCommands`. In the
+  ## terminal: as text (see `saveScreenshot`).
+  if terminalMode():
+    return saveTerminalShot(path)
   let surf = SDL_RenderReadPixels(sdlRenderer(), nil)
   if surf == nil:
     return false
@@ -808,7 +922,10 @@ proc saveScreenshot*(path: string; width, height: int32 = 0;
   ## write `path` as a BMP. `width`/`height` of 0 grab the whole render
   ## target. Returns false when the readback or the write failed -- the
   ## offscreen-driver idiom every shot harness in this repo used to
-  ## hand-bind against SDL for.
+  ## hand-bind against SDL for. In the terminal the shot is text (see
+  ## `saveTerminalShot`); `bg` is ignored -- the app paints its own.
+  if terminalMode():
+    return saveTerminalShot(path)
   let ren = sdlRenderer()
   setColor(ren, bg)
   discard SDL_RenderClear(ren)

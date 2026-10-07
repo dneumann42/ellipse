@@ -355,7 +355,9 @@ proc open*(d: Dialog; args = Fields(); mode = dmInline;
   lastHandle = inst.handle
   installDialogKeys()
   requestFrame()
-  if mode == dmWindow:
+  if mode == dmWindow and terminalMode():
+    inst.mode = dmInline   # a terminal has no second window to give it
+  if inst.mode == dmWindow:
     let req = request(inst, d.name)
     var cmd = dialogLauncher
     if cmd.len == 0:

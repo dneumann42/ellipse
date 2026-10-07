@@ -61,14 +61,23 @@ fun need-project:
         fail "not inside an owl project (no project.owl here or above)"
 
 ; A GUI app that opens a dialog in its own window runs again as
-; `owl run --ellipse-dialog=...`; ellipse_ui reads that flag itself.
+; `owl run --ellipse-dialog=...`, and `owl run --tui` runs it in the
+; terminal; ellipse_ui reads both flags itself.
+fun ellipse-flag arg:
+    cond:
+        (= arg nothing) = false
+        (and (= arg.type "flag-value") (= arg.flag "ellipse-dialog")) = true
+        (and (= arg.type "long-flag") (= arg.flag "tui")) = true
+        true = false
+
 fun run-command next:
     arg = (next)
+    while (ellipse-flag arg):
+        set arg (next)
     file = nothing
     when (<> arg nothing):
         cond:
             (= arg.type "cmd") = (set file arg.name)
-            (and (= arg.type "flag-value") (= arg.flag "ellipse-dialog")) = nothing
             true = (fail (concat "expected a file, not the option " arg.flag))
     if (= file nothing):
         do:

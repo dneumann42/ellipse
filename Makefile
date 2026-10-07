@@ -1,4 +1,4 @@
-.PHONY: clean setup cli run run_gallery run_tome build_owl run_owl run_duck run_bar test run_owl_gallery gallery_parity bench
+.PHONY: clean setup cli run run_gallery run_gallery_tui run_tome build_owl run_owl run_duck run_bar test run_owl_gallery gallery_parity bench
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -21,6 +21,9 @@ run: run_gallery
 
 run_gallery: bin/gallery
 	./bin/gallery
+
+run_gallery_tui: bin/gallery
+	./bin/gallery --tui
 
 run_tome: bin/tome
 	./bin/tome
@@ -65,6 +68,9 @@ test: setup bin/owl
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/tui_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/clay_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/clay_dsl_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/grid_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/terminal_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/tui_widgets_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/widget_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/widgets_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/theme_test.nim
@@ -82,6 +88,8 @@ test: setup bin/owl
 	SDL_VIDEODRIVER=offscreen ./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/gui_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/attach_test.nim
 	python3 -I ./tests/repl_screens_test.py
+	$(MAKE) bin/gallery
+	python3 -I ./tests/tui_backend_test.py
 
 bin/bar: setup
 	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./apps/bar.nim

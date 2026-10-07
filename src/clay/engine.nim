@@ -58,6 +58,122 @@ proc updateAspectRatio(el: var LayoutElement) =
   elif el.dims.width != 0 and el.dims.height == 0:
     el.dims.height = el.dims.width * (1 / ratio)
 
+## --- character grid --------------------------------------------------------------
+##
+## With `setGrid(ctx, cell)` the engine lays out for a terminal: coordinates
+## stay in virtual pixels -- so declarations written for a window keep their
+## meaning -- but every box lands on whole cells. Declarations are snapped
+## as they are configured (padding, gaps, fixed and min/max sizes, scroll
+## offsets), and the final pass rounds each box's edges to the grid, which
+## keeps neighbours tiling without gaps however grow and percent split the
+## space. Borders take no space here, so a focus ring never moves anything:
+## a line of glyphs is drawn only on a side whose padding leaves it a cell
+## (`gridBorder`).
+
+func snapEdge(v, cell: float32): float32 {.inline.} =
+  ## Nearest grid line.
+  floor(v / cell + 0.5) * cell
+
+func snapSpan(v, cell: float32): float32 {.inline.} =
+  ## A length rounded to whole cells, halves rounding down: terminal space is
+  ## scarce, so a 4px inset on an 8px cell collapses rather than doubles.
+  max(ceil(v / cell - 0.5) * cell, 0)
+
+func snapSize(v, cell: float32): float32 {.inline.} =
+  ## A box size in whole cells; anything visible keeps at least one.
+  if v <= 0 or v >= maxFloat: v
+  else: max(snapSpan(v, cell), cell)
+
+func snapInt(v: int; cell: float32): int {.inline.} =
+  int(snapSpan(float32(v), cell))
+
+proc snapAxis(a: var SizingAxis; cell: float32) =
+  if a.kind == percent:
+    return
+  a.min = snapSize(a.min, cell)
+  a.max = snapSize(a.max, cell)
+
+proc snapDecl(ctx: Context; decl: var ElementDeclaration) =
+  ## Fit a declaration to the grid (see above).
+  let cw = ctx.grid.width
+  let ch = ctx.grid.height
+  var lay = decl.layout
+  lay.padding.left = snapInt(lay.padding.left, cw)
+  lay.padding.right = snapInt(lay.padding.right, cw)
+  lay.padding.top = snapInt(lay.padding.top, ch)
+  lay.padding.bottom = snapInt(lay.padding.bottom, ch)
+  lay.gap = snapInt(lay.gap, if lay.direction == leftToRight: cw else: ch)
+  snapAxis(lay.sizing.width, cw)
+  snapAxis(lay.sizing.height, ch)
+  decl.layout = lay
+  decl.floating.expand = Size(width: snapSpan(decl.floating.expand.width, cw),
+                              height: snapSpan(decl.floating.expand.height, ch))
+  decl.clip.childOffset = vec2(snapEdge(decl.clip.childOffset.x, cw),
+                               snapEdge(decl.clip.childOffset.y, ch))
+
+func gridBorder(ctx: Context; bw: BorderWidth; free: Padding): BorderWidth =
+  ## The sides of a box's border that have a free cell to be drawn in --
+  ## `free` is the space between the box's edges and its content. With no
+  ## side line left, top and bottom lines are kept: the terminal draws those
+  ## as over/underlines on the edge rows, over the content.
+  result = bw
+  if not gridOn(ctx) or (bw.left == 0 and bw.right == 0):
+    return
+  if float32(free.left) < ctx.grid.width: result.left = 0
+  if float32(free.right) < ctx.grid.width: result.right = 0
+  if result.left == 0 and result.right == 0:
+    return
+  if float32(free.top) < ctx.grid.height: result.top = 0
+  if float32(free.bottom) < ctx.grid.height: result.bottom = 0
+
+proc freeAround(ctx: Context; el: LayoutElement; box: Rect): Padding =
+  ## The room between `box` and the children laid out in it (all of it when
+  ## there are none). A clip container counts its padding instead: what
+  ## scrolls past its edges must not make its lines come and go.
+  if isClipEl(el):
+    return el.decl.layout.padding
+  var x0 = box.x + box.width
+  var y0 = box.y + box.height
+  var x1 = box.x
+  var y1 = box.y
+  var any = false
+  for ci in el.children:
+    let item = ctx.elementMap.getOrDefault(ctx.elements[ci].id,
+                                           MapItem(elementIndex: -1))
+    if item.elementIndex < 0:
+      continue
+    let b = item.box
+    x0 = min(x0, b.x)
+    y0 = min(y0, b.y)
+    x1 = max(x1, b.x + b.width)
+    y1 = max(y1, b.y + b.height)
+    any = true
+  if not any:
+    let big = int(max(box.width, box.height))
+    return Padding(left: big, right: big, top: big, bottom: big)
+  Padding(left: int(x0 - box.x), right: int(box.x + box.width - x1),
+          top: int(y0 - box.y), bottom: int(box.y + box.height - y1))
+
+func snapRect(ctx: Context; r: Rect): Rect =
+  ## `r` with its edges on grid lines; a sliver keeps one cell. Identity
+  ## off the grid.
+  if not gridOn(ctx):
+    return r
+  let cw = ctx.grid.width
+  let ch = ctx.grid.height
+  let x0 = snapEdge(r.x, cw)
+  var x1 = snapEdge(r.x + r.width, cw)
+  if x1 <= x0 and r.width > 0: x1 = x0 + cw
+  let y0 = snapEdge(r.y, ch)
+  var y1 = snapEdge(r.y + r.height, ch)
+  if y1 <= y0 and r.height > 0: y1 = y0 + ch
+  Rect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+
+proc setGrid*(ctx: Context; cell: Size) =
+  ## Lay out for a character grid of `cell`-sized cells (virtual pixels per
+  ## terminal cell); `Size()` turns it off. Takes effect next `beginLayout`.
+  ctx.grid = cell
+
 ## --- id -> element map ----------------------------------------------------------
 
 proc addMapItem(ctx: Context; eid: ElementId; elementIndex: int32) =
@@ -115,6 +231,8 @@ proc configureOpenElement*(ctx: Context; decl: ElementDeclaration) =
   let index = ctx.openStack[^1]
   var el = ctx.elements[index]
   el.decl = decl
+  if gridOn(ctx):
+    snapDecl(ctx, el.decl)
 
   if (el.decl.layout.sizing.width.kind == percent and
       el.decl.layout.sizing.width.percent > 1) or
@@ -229,7 +347,7 @@ proc textElement*(ctx: Context; text: string; cfg: TextConfig = TextConfig()) =
     textCfg: cfg, text: text, lines: @[], children: @[],
     dims: Size(
       width: m.unwrapped.width,
-      height: if cfg.lineHeight > 0: float32(cfg.lineHeight) else: m.unwrapped.height),
+      height: lineHeightOf(ctx, cfg, m.unwrapped.height)),
     minDims: Size(width: m.minWidth, height: 0),
   )
   el.minDims.height = el.dims.height
@@ -770,7 +888,10 @@ proc positionAndEmit(ctx: Context) =
                 kind: renderBorder, box: bb,
                 id: hashNumber(el.id, uint32(el.children.len)),
                 userData: el.decl.userData,
-                borderColor: bc.color, borderWidth: bc.width,
+                borderColor: bc.color,
+                borderWidth: (if gridOn(ctx):
+                  gridBorder(ctx, bc.width, freeAround(ctx, el, bb))
+                  else: bc.width),
                 borderCorner: el.decl.corner)
               if bc.width.betweenChildren > 0 and bc.color.a > 0:
                 let halfGap = float32(layout.gap) / 2
@@ -784,10 +905,11 @@ proc positionAndEmit(ctx: Context) =
                     if ci > 0:
                       ctx.commands.add RenderCommand(
                         kind: renderRectangle,
-                        box: Rect(x: bb.x + borderOffset.x + scrollOffset.x - halfWidth,
-                                  y: bb.y + scrollOffset.y,
-                                  width: float32(bc.width.betweenChildren),
-                                  height: el.dims.height),
+                        box: snapRect(ctx, Rect(
+                          x: bb.x + borderOffset.x + scrollOffset.x - halfWidth,
+                          y: bb.y + scrollOffset.y,
+                          width: float32(bc.width.betweenChildren),
+                          height: el.dims.height)),
                         id: hashNumber(el.id, uint32(el.children.len + 1 + ci)),
                         fill: bc.color)
                     borderOffset.x += child.dims.width + float32(layout.gap)
@@ -797,10 +919,11 @@ proc positionAndEmit(ctx: Context) =
                     if ci > 0:
                       ctx.commands.add RenderCommand(
                         kind: renderRectangle,
-                        box: Rect(x: bb.x + scrollOffset.x,
-                                  y: bb.y + borderOffset.y + scrollOffset.y - halfWidth,
-                                  width: el.dims.width,
-                                  height: float32(bc.width.betweenChildren)),
+                        box: snapRect(ctx, Rect(
+                          x: bb.x + scrollOffset.x,
+                          y: bb.y + borderOffset.y + scrollOffset.y - halfWidth,
+                          width: el.dims.width,
+                          height: float32(bc.width.betweenChildren))),
                         id: hashNumber(el.id, uint32(el.children.len + 1 + ci)),
                         fill: bc.color)
                     borderOffset.y += child.dims.height + float32(layout.gap)
@@ -825,6 +948,8 @@ proc positionAndEmit(ctx: Context) =
         var currentBox = Rect(
           x: node.position.x, y: node.position.y,
           width: el.dims.width, height: el.dims.height)
+        # On a grid, `expand` is whole cells already (see `snapDecl`).
+        currentBox = snapRect(ctx, currentBox)
         var scrollOffset = Vec2()
         var scrollIdx = -1
         if not el.isText:
@@ -855,8 +980,7 @@ proc positionAndEmit(ctx: Context) =
         if not off:
           if el.isText:
             let cfg = el.textCfg
-            let finalLH =
-              if cfg.lineHeight > 0: float32(cfg.lineHeight) else: el.preferred.height
+            let finalLH = lineHeightOf(ctx, cfg, el.preferred.height)
             var yPos = (finalLH - el.preferred.height) / 2   # vertical centering
             for lineIdx in 0 ..< el.lines.len:
               let line = el.lines[lineIdx]
@@ -872,8 +996,10 @@ proc positionAndEmit(ctx: Context) =
                 of justifyRight: discard
                 ctx.commands.add RenderCommand(
                   kind: renderText,
-                  box: Rect(x: currentBox.x + offset, y: currentBox.y + yPos,
-                            width: line.dims.width, height: line.dims.height),
+                  box: snapRect(ctx, Rect(x: currentBox.x + offset,
+                                          y: currentBox.y + yPos,
+                                          width: line.dims.width,
+                                          height: line.dims.height)),
                   id: hashNumber(uint32(lineIdx), el.id),
                   zIndex: root.zIndex,
                   userData: cfg.userData,
@@ -906,7 +1032,9 @@ proc positionAndEmit(ctx: Context) =
                 kind: renderClipStart, box: currentBox, id: el.id,
                 zIndex: root.zIndex, userData: d.userData,
                 clipHorizontal: d.clip.horizontal, clipVertical: d.clip.vertical)
-            if d.background.a > 0:
+            # A custom element's background travels in its command (as in
+            # Clay): it draws itself, no rectangle under it.
+            if d.background.a > 0 and d.custom.data == nil:
               ctx.commands.add RenderCommand(
                 kind: renderRectangle, box: currentBox, id: el.id,
                 zIndex: root.zIndex, userData: d.userData,

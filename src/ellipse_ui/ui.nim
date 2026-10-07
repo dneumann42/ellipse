@@ -610,6 +610,45 @@ defineEvent NumberChanged(id: ElementId, value: float)
 ## A `menuItem` was chosen; menu items are identified by their label.
 defineEvent MenuPicked(label: string)
 
+## --- terminal button shadows ----------------------------------------------------
+##
+## Turbo Vision's: half blocks in the shadow colour over whatever lies
+## beneath, inside the button's own box --
+##
+##    OK ▄       face, then `▄` beside its first row (`█` below that)
+##    ▀▀▀▀       a row of `▀`, one column in
+##
+## One painter per edge (`registerCellPainter`); the colour is the
+## element's `.bg`, which a custom element hands its painter.
+
+proc paintShadowRight(buf: var CellBuffer; cmd: RenderCommand;
+                      area: CellRect) =
+  let top = buf.toCells(cmd.box).r0
+  for r in area.r0 ..< area.r1:
+    for x in area.c0 ..< area.c1:
+      buf.shadeGlyph(x, r, if r == top: "▄" else: "█", cmd.customBackground)
+
+proc paintShadowBottom(buf: var CellBuffer; cmd: RenderCommand;
+                       area: CellRect) =
+  for r in area.r0 ..< area.r1:
+    for x in area.c0 ..< area.c1:
+      buf.shadeGlyph(x, r, "▀", cmd.customBackground)
+
+let
+  shadowRight = registerCellPainter(paintShadowRight)
+  shadowBottom = registerCellPainter(paintShadowBottom)
+
+proc shadowEdge(width, height: SizingAxis; pad: Padding; col: Color;
+                bottom: bool) =
+  ## One edge of a button's shadow: the cells of the box less `pad`.
+  openElement()
+  configureOpenElement(row(width = width, height = height, padding = pad))
+  openElement()
+  configureOpenElement(row(width = grow(), height = grow()).bg(col)
+    .custom(if bottom: shadowBottom else: shadowRight))
+  closeElement()
+  closeElement()
+
 widget focusable button(label: string, width = fit(), height = fit(),
                         fontSize = 0'u16) -> bool:
   ## A themed push button: the three-way raised surface (`shade`), the
@@ -626,13 +665,45 @@ widget focusable button(label: string, width = fit(), height = fit(),
   result = (over and currentContext().pointerData().state == pressedThisFrame) or
     keyActivated(id)
   openElement(id)
-  configureOpenElement(col(width = width, height = height, alignX = centerX,
-      alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
+  if terminalMode():
+    # No frame on a terminal grid: the box is the face plus its drop
+    # shadow, both inside it -- a half-block column beside the face and a
+    # half-block row under it (see above). Held, the face slides one column
+    # right on its own rows -- the shadow is only half a cell deep -- and the
+    # shadow goes.
+    let g = gridCell()
+    let cw = int(g.width)
+    let ch = int(g.height)
+    var shadow = t.cells.buttonShadow
+    if focused(id):
+      shadow = t.cells.focusShadow
+      if shadow.a <= 0:
+        shadow = t.palette.accent
+        shadow.a = 200
+    configureOpenElement(col(width = width, height = height,
+      padding = if press: Padding(left: cw, bottom: ch) else: Padding()))
+    if not press:
+      openElement()
+      configureOpenElement(row(width = grow(), height = grow()))
+    openElement()
+    configureOpenElement(col(width = grow(), height = grow(), alignX = centerX,
+        alignY = centerY, padding = padAll(t.metrics.padButton))
+      .bg(shade(over, press)).corner(t.radii.button))
+    textElement(label, TextConfig(fontSize: fs, color: t.palette.textColor))
+    closeElement()
+    if not press:
+      shadowEdge(fixedPx(g.width), grow(), Padding(), shadow, bottom = false)
+      closeElement()
+      shadowEdge(grow(), fixedPx(g.height), Padding(left: cw), shadow,
+                 bottom = true)
+  else:
+    configureOpenElement(col(width = width, height = height, alignX = centerX,
+        alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
       .bg(shade(over, press))
       .corner(t.radii.button)
       .border(t.metrics.borderRaised, t.palette.panelBorder)
       .focusRing(id))
-  textElement(label, TextConfig(fontSize: fs, color: t.palette.textColor))
+    textElement(label, TextConfig(fontSize: fs, color: t.palette.textColor))
   closeElement()
   if result:
     emit Pressed(id: id)

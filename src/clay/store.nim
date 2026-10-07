@@ -133,6 +133,8 @@ type
     queryScrollOffset*: nil (proc(id: uint32): Vec2 {.closure.})
     externalScrollHandling*: bool
     cullingEnabled*: bool = true
+    grid*: Size                   ## cell size when laying out for a character
+                                  ## grid (see `setGrid`); zero = off
 
     errors*: seq[ErrorData]
 
