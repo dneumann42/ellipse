@@ -2,3 +2,7 @@ bin/
 build/
 nimcache/
 nimcache-win/
+nimcache-tui/
+nimble.develop
+nimble.paths
+nimbledeps

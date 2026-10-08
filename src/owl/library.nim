@@ -62,5 +62,6 @@ proc owlLibrary*(): Library {.raises.} =
   lib.add newModule("repl").addSource(embedFile("scripts/repl.owl"))
   lib.add newModule("attach").addSource(embedFile("libraries/attach.owl"))
   lib.add guiModule(embedFile("libraries/gui.owl"))
+  lib.add newModule("repl-app").addSource(embedFile("scripts/repl-app.owl"))
   result = lib
 

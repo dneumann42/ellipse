@@ -36,6 +36,16 @@ proc captureOutputBuiltin(env: ref Environment, args: seq[Object], bodyStart: in
     captures.setLen(captures.len - 1)
   result = str(text)
 
+proc takeCapturedBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # take-captured: what the innermost capture-output has collected so far,
+  # handed over and cleared ("" outside a capture), so a caller can keep
+  # printed output in order with what it records itself.
+  if captures.len == 0:
+    return str("")
+  let last = captures.len - 1
+  result = str(captures[last])
+  captures[last] = ""
+
 proc printBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   var parts: seq[string] = @[]
   for a in args:
@@ -61,6 +71,7 @@ proc installIo*(env: ref Environment) =
   define(env, symbol("print"), newBuiltin("print", printBuiltin, true))
   define(env, symbol("echo"), newBuiltin("echo", printBuiltin, true))
   define(env, symbol("capture-output"), newBuiltin("capture-output", captureOutputBuiltin, true))
+  define(env, symbol("take-captured"), newBuiltin("take-captured", takeCapturedBuiltin, true))
   define(env, symbol("readline"), newBuiltin("readline", readlineBuiltin, true))
 
 proc ioModule*(): Module =

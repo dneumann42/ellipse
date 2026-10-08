@@ -7,8 +7,16 @@
 ## In the terminal clay still lays out in virtual pixels, on a grid of
 ## `cellWidth` x `cellHeight` cells (see clay's `setGrid`): a 120x40
 ## terminal is a 960x640 layout, close to the windows apps are written for.
+##
+## A program built with `-d:ellipseNoSdl` has no window backend at all:
+## `withSdl` is false, nothing links SDL3 (or SDL3_ttf, or wayland), and
+## every app runs in the terminal.
 
 import std/[envvars, cmdline]
+
+const
+  withSdl* = not defined(ellipseNoSdl)
+    ## The window backend (SDL3) is built in.
 
 const
   cellWidth* = 8'f32    ## virtual pixels per terminal column
@@ -28,12 +36,15 @@ proc terminalRequested(): bool =
 
 proc terminalMode*(): bool =
   ## The app draws in the terminal instead of a window.
+  when not withSdl:
+    return true
   if not decided:
     terminal = terminalRequested()
     decided = true
   terminal
 
 proc setTerminalMode*(on: bool) =
-  ## Pick the backend in code, overriding `--tui` / `ELLIPSE_TUI`.
+  ## Pick the backend in code, overriding `--tui` / `ELLIPSE_TUI`. Without
+  ## SDL built in the terminal is the only backend, whatever `on` says.
   terminal = on
   decided = true

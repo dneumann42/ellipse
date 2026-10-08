@@ -1,4 +1,4 @@
-.PHONY: clean setup cli run run_gallery run_gallery_tui run_tome build_owl run_owl run_duck run_bar test run_owl_gallery gallery_parity bench
+.PHONY: clean setup cli run run_gallery run_gallery_tui run_tome build_owl build_owl_sdl FORCE run_owl run_duck run_bar test run_owl_gallery gallery_parity bench
 
 build/nimony/bin/nimony:
 	./scripts/setup.sh
@@ -34,10 +34,41 @@ APPS_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 	@:
 endif
 
-bin/owl: setup $(wildcard src/owl/*.nim src/owl/*/*.nim src/owl/*/*.owl src/owl/*/*.c)
-	./build/nimony/bin/nimony --outdir:bin/ -p:src c ./src/owl/owl.nim
+# owl is terminal only by default: built with -d:ellipseNoSdl it links no SDL3
+# (nor SDL3_ttf or wayland), and every app and the repl run in the terminal.
+# build_owl_sdl builds it with the window backend: gui apps open windows and
+# `owl repl` opens the repl in one (`owl repl --tui` keeps it in the terminal).
+# The two builds keep separate nimcaches; build/owl-variant records which one
+# bin/owl is, so switching rebuilds it.
+OWL_SDL ?= 0
+ifeq ($(OWL_SDL),1)
+OWL_FLAGS :=
+OWL_NIMCACHE := nimcache
+else
+OWL_FLAGS := -d:ellipseNoSdl
+OWL_NIMCACHE := nimcache-tui
+endif
+
+OWL_SOURCES := $(wildcard src/owl/*.nim src/owl/*/*.nim src/owl/*/*.owl src/owl/*/*.c \
+	src/ellipse/*.nim src/ellipse/*/*.nim src/ellipse/*/*.c src/ellipse_ui/*.nim \
+	src/ellipse_ui/*/*.nim src/clay/*.nim)
+
+build/owl-variant: FORCE
+	@mkdir -p build
+	@echo "sdl=$(OWL_SDL)" | cmp -s - $@ || echo "sdl=$(OWL_SDL)" > $@
+
+# rm first: nimony skips the link when bin/owl looks newer than its objects,
+# which after a variant switch is the other variant's binary.
+bin/owl: build/owl-variant $(OWL_SOURCES) | setup
+	rm -f bin/owl
+	./build/nimony/bin/nimony --outdir:bin/ $(OWL_FLAGS) --nimcache:$(OWL_NIMCACHE) -p:src c ./src/owl/owl.nim
 
 build_owl: bin/owl
+
+build_owl_sdl:
+	$(MAKE) bin/owl OWL_SDL=1
+
+FORCE:
 
 run_owl: bin/owl
 	./bin/owl $(ARGS) $(APPS_ARGS)
@@ -86,6 +117,7 @@ test: setup bin/owl
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/dialog_header_test.nim
 	SDL_VIDEODRIVER=offscreen ./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/fdwatch_test.nim
 	SDL_VIDEODRIVER=offscreen ./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/gui_test.nim
+	SDL_VIDEODRIVER=offscreen ./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/repl_gui_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/attach_test.nim
 	python3 -I ./tests/repl_screens_test.py
 	$(MAKE) bin/gallery
@@ -101,5 +133,6 @@ setup: build/nimony/bin/nimony
 	@echo "Nimony is ready"
 
 clean:
-	rm -rf build/*
 	rm -rf bin/*
+	rm -rf nimcache nimcache-tui nimcache-win
+	rm -rf apps/nest/nimcache

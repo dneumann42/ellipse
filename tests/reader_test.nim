@@ -131,6 +131,27 @@ expect toSeq(toSeq(fs[0])[1]).len == 2, "the group is a list"
 expect forms("a ((b c))") == forms("a (b c)"), "double-paren groups flatten"
 expect forms("(b (c))")[0] == list(@[symbol("b"), list(@[symbol("c")])]), "a group of one symbol stays a call"
 
+# a call wrapped in parentheses may spread over lines, at any indentation,
+# whichever way the arguments sit under the opening paren
+var spanning = forms("(hello foo\n       bar\n       baz)")
+expect spanning.len == 1, "an aligned group over lines is one form"
+expect spanning[0] == forms("hello foo bar baz")[0], "aligned lines fold into one call"
+spanning = forms("(hello\n  foo\n  bar\n  baz)")
+expect spanning[0] == forms("hello foo bar baz")[0], "a group opened at the head also spans"
+expect forms("(hello\n\t\tbar)") == forms("hello bar"), "tabs inside a group are plain space"
+expect forms("(hello\n\n  ; just a comment\n  foo)") == forms("hello foo"),
+  "blank and comment lines inside a group are skipped"
+expect forms("(hello\n  foo) bar") == forms("(hello foo) bar"), "a group can end mid line and carry on"
+expect forms("x = (hello\n  foo)") == forms("x = hello foo"), "a group binding spans lines"
+expect forms("a (b c\n  d)") == forms("a (b c d)"), "a spanning group is one argument"
+expect forms("(a\n  (b\n    c))") == forms("(a (b c))"), "groups span inside groups"
+expect forms("(a\n  b):\n  c") == forms("(a b) c"), "a spanning group opens a block and keeps its shape"
+expect forms("f:\n  (g a\n    b)\n  c") == forms("f (g a b) c"),
+  "a spanning group keeps its place in a block, whatever its own indent"
+expect forms("f:\n  (g a\nb)\n  c") == forms("f (g a b) c"),
+  "inside a group even a dedent out of the block is just space"
+expect forms("(hello\n  a.b)") == forms("(hello a.b)"), "dots still fold across a spanning group"
+
 fs = forms("a.b")
 expect fs[0] == forms("index a b")[0], "dot is syntax for the index command"
 expect toSeq(fs[0]).len == 3, "a.b is one index call"
@@ -249,6 +270,7 @@ errIs("x = a = b", "repeated")
 errIs("a b = c", "name or a grouped call")
 errIs("= a = b", "name or a grouped call")
 errIs("(a b", "expected ')'")
+errIs("(a\n  b", "expected ')'")
 errIs("a b)", "unexpected ')'")
 errIs("echo \"unclosed", "unterminated string")
 errIs("\"", "unterminated string")

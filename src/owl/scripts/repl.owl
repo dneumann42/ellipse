@@ -3,16 +3,13 @@ use base
 use math
 use strings
 use cmdline
-use ansi
 use term
-use editor
 use program
 use fs
 use modules
 use source
 use live
 use projects
-use tui
 use net
 use wire
 
@@ -26,16 +23,23 @@ use wire
 ; run by the repl and never written to a document. `x = 1` is still code even
 ; when x is a command name.
 ;
-; On a terminal, F1 or M-x opens a menu of the commands, and a command
-; missing its argument offers a list to pick it from (modules, documents,
-; items), then shows the command you could have typed. `settings` is a form.
+; This module is the session: documents, commands, projects, attaching. It
+; has two faces:
 ;
-; On a terminal input comes from the editor module: a multi-line buffer with
-; emacs keys, where RET adds a line and C-RET (or M-RET, C-j) runs it. When
-; input is piped, lines are read plainly; a line ending in ':' opens a block
-; that runs to the next empty line.
+; - the repl app (repl-app.owl), an ellipse_ui app in the terminal, or in a
+;   window when owl is built with SDL: a transcript, a code editor for the
+;   prompt, F1 a menu of the commands, F2 the printed results, and screens
+;   that pick a command's missing argument, edit settings, browse items.
+;   The session never draws: where it needs an answer it opens a screen (a
+;   record, see `open-screen`) with a continuation, and the app draws the
+;   screen and calls the continuation with what was picked.
+; - piped input (`owl repl < file`): lines are read plainly, a line ending in
+;   ':' opens a block that runs to the next empty line, output is printed,
+;   and nothing is asked.
 
-interactive = (is-terminal)
+; Whether screens can be shown: true in the repl app, false piped and in a
+; program's served session.
+interactive = false
 
 ; The prelude a new document starts with, so arithmetic and echo work from
 ; the first input. It is ordinary text in the document and can be dropped.
@@ -61,12 +65,11 @@ active = nothing
 remote = nothing
 
 ; Whether this repl session serves a running program (attach.owl) rather
-; than a terminal.
+; than a person.
 served = false
 
-; Text the editor held when the menu key was pressed; the next prompt starts
-; with it.
-pending = ""
+; Set when the session is over (exit, or the end of piped input).
+session-over = false
 
 ; The values printed so far, newest last: records of the input and the value.
 results = ([])
@@ -80,36 +83,165 @@ confirm-exit = true
 fun at xs i:
     index xs (+ i 0)
 
-; Styles text only on a terminal, so piped output stays plain.
-fun styled f text:
+; --- what the session shows ------------------------------------------------------
+;
+; In the app every line the session shows is an entry of the transcript, a
+; record of kind and text. kind is "input" (with the prompt it was typed at),
+; "out" (what code printed), "value" (a result, as owl code), "note",
+; "error" or "command" (a command the menu ran, as it could be typed).
+; Piped, the same lines are printed.
+
+transcript = ([])
+transcript-limit = 400
+
+; The width results are laid out to, in characters; the app keeps it at the
+; width of its view.
+columns = 77
+
+; What the app does for the session: copy (fun text) puts text on the
+; clipboard; windows says whether apps open windows here. Nothing piped.
+front = nothing
+
+; Text for the prompt: what an item or result edit put there, taken by the
+; app (repl-take-pending).
+pending = nothing
+
+fun add-entry kind text (prompt = nothing):
+    append transcript ({} (kind = kind) (text = text) (prompt = prompt))
+    when (> (length transcript) transcript-limit):
+        pop-front transcript
+
+; What code printed since the last entry becomes an entry of its own, so
+; printed output stays in order with the session's own lines.
+fun flush-output:
+    out = (take-captured)
+    when (<> out ""):
+        when (ends-with out newline):
+            set out (slice out 0 (- (length out) 1))
+        add-entry "out" out
+
+fun log-entry kind text:
     if interactive:
-        f text
-        text
+        do:
+            (flush-output)
+            add-entry kind text
+        echo text
 
-fun prompt:
+fun note text:
+    log-entry "note" text
+
+fun show-error message:
+    if interactive:
+        log-entry "error" message
+        echo "error:" message
+
+; Results print as owl code (see to-code), so a value can be pasted back in
+; or written into a module. Piped, one that needs several lines starts
+; below the arrow, at the left edge.
+fun show value:
+    when (<> value nothing):
+        width = if interactive:
+            max (- columns 3) 40
+            77
+        text = to-code value width
+        remember-result value
+        cond:
+            interactive = (log-entry "value" text)
+            (= (find text newline) nothing) = (echo "=>" text)
+            true = (do (echo "=>") (echo text))
+
+fun remember-result value:
+    append results ({} (input = last-input) (value = value))
+    when (> (length results) results-limit):
+        pop-front results
+
+last-input = ""
+
+; --- screens ---------------------------------------------------------------------
+;
+; A screen is what the session asks of the person, as a record the app
+; draws. Every screen has a kind, a title and done: the continuation the app
+; calls with the answer, nothing when the screen was cancelled (Escape).
+;
+;   choose   entries (records of label, value, hint): done gets a value
+;   ask      label, initial: done gets the text typed
+;   confirm  lines, buttons: done gets the button's text
+;   form     fields (records of kind "text" or "check", name, label,
+;            value), buttons: done gets a record of the fields' values by
+;            name, and button
+;   view     sections (records of title, text, value), actions (records of
+;            key and what), at-end (start at the last section), hint: done
+;            gets a record of action and value
+;
+; One screen is open at a time; a continuation may open the next.
+
+screen = nothing
+; Counts the screens opened, so the app knows a new one from the one it shows.
+screen-serial = 0
+
+fun open-screen s:
+    set screen-serial (+ screen-serial 1)
+    set screen (with s (serial = screen-serial))
+
+fun entry label (value = nothing) (hint = ""):
+    v = if (= value nothing):
+        label
+        value
+    {} (label = label) (value = v) (hint = hint)
+
+fun choose title entries done:
+    open-screen ({} (kind = "choose") (title = title) (entries = entries) (done = done))
+
+fun ask title label initial done:
+    open-screen ({} (kind = "ask") (title = title) (label = label) (initial = initial) (done = done))
+
+fun confirm title lines buttons done:
+    open-screen ({} (kind = "confirm") (title = title) (lines = lines) (buttons = buttons) (done = done))
+
+fun text-field name label (value = "") (hint = ""):
+    {} (kind = "text") (name = name) (label = label) (value = value) (hint = hint)
+
+fun check-field name label (value = false):
+    {} (kind = "check") (name = name) (label = label) (value = value)
+
+fun form title fields buttons done:
+    open-screen ({} (kind = "form") (title = title) (fields = fields) (buttons = buttons) (done = done))
+
+fun section title text (value = nothing):
+    {} (title = title) (text = text) (value = value)
+
+fun action key what:
+    {} (key = key) (what = what)
+
+fun code-view title sections actions hint done (at-end = false):
+    open-screen ({} (kind = "view") (title = title) (sections = sections) (actions = actions) (hint = hint) (at-end = at-end) (done = done))
+
+; The app answers a screen: the screen closes, then its continuation runs
+; with the answer, failures shown like any input's.
+fun answer-screen value:
+    s = screen
+    set screen nothing
+    when (<> s nothing):
+        fun run-it:
+            (s.done value)
+        step run-it
+
+; One step of the session, from the app: f runs with what it prints and
+; what fails kept in the transcript.
+fun step f:
+    fun run-it:
+        try (f):
+            show-error failure
+        (flush-output)
+    capture-output run-it
+    nothing
+
+; --- reading input (piped) ------------------------------------------------------
+
+fun prompt-text:
     if (= remote nothing):
-        do:
-            text = concat active "> "
-            if interactive:
-                concat (project-tag) (bold (fg "blue" text))
-                text
-        do:
-            text = concat remote.prompt "> "
-            tag = concat "[" remote.name " " (to-string remote.conn.pid) "] "
-            if interactive:
-                concat (styled-tag tag) (bold (fg "magenta" text))
-                concat tag text
-
-fun styled-tag tag:
-    fg "magenta" tag
-
-fun project-tag:
-    if (= project nothing):
-        ""
-        dim (concat project.name " ")
-
-fun continuation:
-    styled dim "...  "
+        concat active "> "
+        concat "[" remote.name " " (to-string remote.conn.pid) "] " remote.prompt "> "
 
 fun is-blank s:
     = (length (trim s)) 0
@@ -124,7 +256,7 @@ fun trim s:
     slice s a b
 
 fun is-space c:
-    or (= c " ") (= c (char 9))
+    or (= c " ") (or (= c (char 9)) (= c newline))
 
 ; The words of a line, split at spaces; a word in double quotes may hold
 ; spaces and loses its quotes.
@@ -158,78 +290,25 @@ fun ends-word c quoted:
         = c (char 34)
         is-space c
 
-fun is-done input:
-    = input nothing
-
 fun read-block first:
     text = first
-    line = readline (continuation)
+    line = readline "...  "
     while (and (<> line nothing) (not (is-blank line))):
         do:
             set text (concat text newline line)
-            set line (readline (continuation))
+            set line (readline "...  ")
     text
 
 fun read-plain:
-    first = readline (prompt)
+    first = readline (prompt-text)
     if (or (= first nothing) (not (ends-with first ":"))):
         first
         read-block first
 
-; The next input: text, nothing at end of input, or a record when a menu key
-; left the editor (see escape-keys in editor.owl).
-fun read-input:
-    if interactive:
-        do:
-            r = read-code (prompt) (continuation) pending
-            set pending ""
-            when (= (type-of r) "record"):
-                set pending r.text
-            r
-        (read-plain)
-
-; Results print as owl code (see to-code), so a value can be pasted back in
-; or written into a module. One that needs several lines starts below the
-; arrow, at the left edge.
-fun show value:
-    when (<> value nothing):
-        width = if interactive:
-            max (- (terminal-size).cols 3) 40
-            77
-        text = to-code value width
-        remember-result value
-        if (= (find text newline) nothing):
-            echo (styled dim "=>") text
-            do:
-                echo (styled dim "=>")
-                echo text
-
-fun remember-result value:
-    append results ({} (input = last-input) (value = value))
-    when (> (length results) results-limit):
-        pop-front results
-
-last-input = ""
-
-fun show-error message:
-    label = if interactive:
-        bold (fg "red" "error:")
-        "error:"
-    echo label message
-
-fun note text:
-    echo (styled dim text)
-
 ; documents ---------------------------------------------------------------
 
 fun is-open name:
-    found = false
-    i = 0
-    while (< i (length docs)):
-        when (= (at docs i) name):
-            set found true
-        set i (+ i 1)
-    found
+    contains docs name
 
 fun activate name:
     when (not (is-open name)):
@@ -353,8 +432,9 @@ fun uses-module name dep:
 ;
 ; One table describes the commands: `help`, the menu and the input reader all
 ; use it. arg is what the command takes ("" for nothing); required means it
-; cannot run without it; pick says how to get it on a terminal: "module",
-; "doc", "item", or "ask" (a text field, offered from the menu only).
+; cannot run without it; pick says how to get it on a screen: "module",
+; "doc", "item", "project", or "ask" (a text field or form, offered from the
+; menu only).
 
 fun spec name arg help (required = false) (pick = nothing):
     {} (name = name) (arg = arg) (help = help) (required = required) (pick = pick)
@@ -382,6 +462,7 @@ specs = []:
     spec "detach" "" "leave the attached program running and work here again"
     spec "stop" "" "close the attached program"
     spec "settings" "" "change repl settings"
+    spec "clear" "" "clear the transcript"
     spec "help" "" "show the commands"
     spec "exit" "" "leave (also quit, or C-d)"
     spec "quit" "" "leave"
@@ -402,24 +483,24 @@ fun pad s n:
     out
 
 fun help:
-    echo "Code you type runs in the active document and is written into it."
-    echo "Commands (not written to the document):"
+    lines = concat "Code you type runs in the active document and is written into it." newline "Commands (not written to the document):"
     i = 0
     while (< i (length specs)):
         x = at specs i
-        echo (concat "  " (pad (concat x.name " " x.arg) 26) x.help)
+        set lines (concat lines newline "  " (pad (concat x.name " " x.arg) 26) x.help)
         set i (+ i 1)
+    echo lines
     when interactive:
-        echo (styled dim "F1 or M-x opens a menu of these, F2 the printed results; a command missing its argument lets you pick it.")
+        note "Ctrl+Enter runs (or Alt+Enter, Ctrl+J), Enter adds a line. F1 or M-x opens a menu of the commands, F2 the printed results; a command missing its argument lets you pick it."
 
 ; --- where the documents are ---------------------------------------------------
 ;
 ; The screens and pickers below (items, results, settings, the argument
-; pickers) always run here, on this terminal. What they show and change
-; belongs to the session that holds the documents: this one, or, while
-; attached, the program's own (see attach). They reach it through query,
-; which evaluates owl code in that session: here directly, there over the
-; socket, where it comes back as data with whatever it printed.
+; pickers) always show here, in this repl. What they show and change belongs
+; to the session that holds the documents: this one, or, while attached, the
+; program's own (see attach). They reach it through query, which evaluates
+; owl code in that session: here directly, there over the socket, where it
+; comes back as data with whatever it printed.
 
 fun query code:
     if (= remote nothing):
@@ -460,12 +541,9 @@ fun item-sections name:
         append out (section (concat "#" (to-string item.ordinal)) item.text item)
     out
 
-fun view-rows:
-    max 5 (- (terminal-size).rows 8)
-
-; items-command ws: a module's source. On a terminal it is a view to scroll
-; and select items in, to edit, copy, drop or rerun them; piped, the source
-; is printed with each item's number in the margin.
+; items-command ws: a module's source. In the app it is a view to scroll and
+; select items in, to edit, copy, drop or rerun them; piped, the source is
+; printed with each item's number in the margin.
 fun items-command ws:
     name = query (call-code "module-or-active" ws 0)
     if interactive:
@@ -475,6 +553,7 @@ fun items-command ws:
 fun print-items name:
     xs = source-items (module-source name)
     lines = split-lines (module-source name)
+    out = ""
     i = 0
     while (< i (length lines)):
         mark = ""
@@ -484,17 +563,20 @@ fun print-items name:
                 set mark (concat "#" (to-string (index xs (+ k 0) "ordinal")))
             set k (+ k 1)
         when (not (and (= (+ i 1) (length lines)) (= (at lines i) ""))):
-            echo (concat (styled dim (pad mark 5)) (at lines i))
+            when (> i 0):
+                set out (concat out newline)
+            set out (concat out (pad mark 5) (at lines i))
         set i (+ i 1)
+    echo out
 
-item-actions = [] (action "<RET>" "edit") (action "e" "edit") (action "c" "copy") (action "d" "drop") (action "r" "rerun")
+item-actions = [] (action "enter" "edit") (action "e" "edit") (action "c" "copy") (action "d" "drop") (action "r" "rerun")
 
 fun view-items name:
     sections = item-sections name
-    view = code-view sections (view-rows) item-actions
-    picked = run-screen (concat name " · " (to-string (length sections)) " items") ([] view) "↑↓ item · PgUp PgDn scroll · enter/e edit · c copy · d drop · r rerun · esc close"
-    when (<> picked nothing):
-        item-action name picked.action picked.value
+    fun picked p:
+        when (<> p nothing):
+            item-action name p.action p.value
+    code-view (concat name " · " (to-string (length sections)) " items") sections item-actions "↑↓ item · PgUp PgDn scroll · enter/e edit · c copy · d drop · r rerun · esc close" picked
 
 fun item-action name what item:
     cond:
@@ -504,8 +586,6 @@ fun item-action name what item:
         (= what "rerun") = (query (call-code "rerun-and-show" name (item-key item)))
         true = nothing
 
-; edit-in name text puts text in the next prompt, with name's document
-; active, so submitting it replaces what it was copied from.
 fun drop-and-note name key:
     item = drop-item name key
     note (concat "dropped " item.header)
@@ -513,6 +593,8 @@ fun drop-and-note name key:
 fun rerun-and-show name key:
     show (rerun-item name key)
 
+; edit-in name text puts text in the prompt, with name's document active, so
+; submitting it replaces what it was copied from.
 fun edit-in name text:
     when (<> name (current-doc)):
         query (call-code "open-doc" name)
@@ -520,14 +602,15 @@ fun edit-in name text:
     note (concat "editing in " name ": change it and run it to replace it")
 
 fun copied text:
-    copy-text text
+    when (and (<> front nothing) (<> front.copy nothing)):
+        (front.copy text)
     n = length (split-lines text)
     lines = if (= n 1):
         "line"
         "lines"
     note (concat "copied " (to-string n) " " lines " to the clipboard")
 
-result-actions = [] (action "<RET>" "edit") (action "e" "edit") (action "c" "copy")
+result-actions = [] (action "enter" "edit") (action "e" "edit") (action "c" "copy")
 
 ; The code a result is edited as: `name = value` when it came from typing a
 ; name the active document binds, so running it records that binding.
@@ -537,15 +620,6 @@ fun result-code r:
     if (and (<> name "") (and (= (length (words name)) 1) (has-own (module-scope active) name))):
         to-code (pair (at (parse name) 0) r.value) width
         to-code r.value width
-
-fun result-sections:
-    out = ([])
-    i = 0
-    while (< i (length results)):
-        r = at results i
-        append out (section (concat "#" (to-string (+ i 1))) (concat "; " (first-line r.input) newline (to-code r.value (max (- (terminal-size).cols 8) 40))) r)
-        set i (+ i 1)
-    out
 
 fun first-line text:
     at-nl = find text newline
@@ -566,8 +640,8 @@ fun result-views width:
 
 fun results-command:
     when (not interactive):
-        error "results needs a terminal"
-    views = query (call-code "result-views" (max (- (terminal-size).cols 8) 40))
+        error "results needs the repl app"
+    views = query (call-code "result-views" (max (- columns 8) 40))
     when (is-empty views):
         error "no results yet"
     sections = ([])
@@ -576,12 +650,12 @@ fun results-command:
         v = at views i
         append sections (section v.title v.text v)
         set i (+ i 1)
-    view = code-view sections (view-rows) result-actions true
-    picked = run-screen (concat "results · " (to-string (length views))) ([] view) "↑↓ result · PgUp PgDn scroll · enter/e edit · c copy · esc close"
-    when (<> picked nothing):
-        cond:
-            (= picked.action "copy") = (copied picked.value.copy)
-            true = (edit-result picked.value)
+    fun picked p:
+        when (<> p nothing):
+            if (= p.action "copy"):
+                copied p.value.copy
+                edit-result p.value
+    code-view (concat "results · " (to-string (length views))) sections result-actions "↑↓ result · PgUp PgDn scroll · enter/e edit · c copy · esc close" picked true
 
 fun edit-result v:
     set pending v.edit
@@ -689,66 +763,68 @@ fun item-entries:
         append out (entry (trim-colon item.header) key (concat "#" (to-string item.ordinal) "  line " (to-string item.line) "  " item.kind))
     out
 
-fun ask-for name:
+fun ask-for name done:
     cond:
-        (= name "new") = (ask "New document" "name" (query (call-code "fresh-name" "scratch")))
-        (= name "save") = (ask "Save the document" "file" (query "(current-save-path)"))
-        (= name "new-project") = (ask-new-project)
-        true = nothing
+        (= name "new") = (ask "New document" "name" (query (call-code "fresh-name" "scratch")) done)
+        (= name "save") = (ask "Save the document" "file" (query "(current-save-path)") done)
+        (= name "new-project") = (ask-new-project done)
+        true = (done nothing)
 
 ; The new-project form: the directory, and whether it is a windowed app.
-; Gives the command's words after its name, or nothing when cancelled.
-fun ask-new-project:
-    field = text-input "directory" "" "field"
-    gui = checkbox "A GUI app (a window on ellipse_ui)" false
-    choice = run-screen "New project" ([] field gui (button-row ([] "OK" "Cancel"))) "enter accept · tab move · space toggle · esc cancel"
-    cond:
-        (not (or (= closed-by "field") (= choice "OK"))) = nothing
-        (= (field.value) "") = nothing
-        (gui.value) = ([] (field.value) "gui")
-        true = ([] (field.value))
+; done gets the command's words after its name, or nothing when cancelled.
+fun ask-new-project done:
+    fun answered r:
+        cond:
+            (= r nothing) = (done nothing)
+            (= r.button "Cancel") = (done nothing)
+            (= r.directory "") = (done nothing)
+            r.gui = (done ([] r.directory "gui"))
+            true = (done ([] r.directory))
+    form "New project" ([] (text-field "directory" "Directory" "" "where the project goes, e.g. ../tasks") (check-field "gui" "A GUI app (a window on ellipse_ui)" false)) ([] "OK" "Cancel") answered
 
 fun current-save-path:
     path = module-path active
     pick-text (= path nothing) (default-path active) path
 
-; pick-arg x from-menu: the argument of command x, picked on screen, or
-; nothing when cancelled or when there is nothing to pick from.
-fun pick-arg x from-menu:
+; pick-arg x done: the argument of command x, picked on a screen; done gets
+; it, or nothing when cancelled or when there is nothing to pick from.
+fun pick-arg x done:
     cond:
-        (= x.pick "module") = (choose (concat x.name ": which module?") (query "(module-entries)"))
-        (= x.pick "doc") = (choose (concat x.name ": which document?") (query "(doc-entries)"))
-        (= x.pick "item") = (choose (concat x.name ": which item of " (current-doc) "?") (query "(item-entries)"))
-        (= x.pick "project") = (pick-project)
-        (= x.pick "ask") = (ask-for x.name)
-        true = nothing
+        (= x.pick "module") = (choose (concat x.name ": which module?") (query "(module-entries)") done)
+        (= x.pick "doc") = (choose (concat x.name ": which document?") (query "(doc-entries)") done)
+        (= x.pick "item") = (choose (concat x.name ": which item of " (current-doc) "?") (query "(item-entries)") done)
+        (= x.pick "project") = (pick-project done)
+        (= x.pick "ask") = (ask-for x.name done)
+        true = (done nothing)
 
-; complete ws from-menu: the words of a command with its argument added when
-; it is missing and can be picked; nothing when picking was cancelled.
-fun complete ws from-menu:
+; complete ws from-menu done: done gets the words of a command with its
+; argument added when it is missing and can be picked, or nothing when
+; picking was cancelled.
+fun complete ws from-menu done:
     x = spec-of (at ws 0)
     missing = = (length ws) 1
     wants = and interactive (and missing (or x.required (or (= x.pick "project") (and from-menu (<> x.pick nothing)))))
+    fun picked arg:
+        if (= arg nothing):
+            if x.required:
+                done nothing
+                done ws
+            do:
+                more = if (= (type-of arg) "list"):
+                    arg
+                    [] arg
+                log-entry "command" (concat x.name " " (join-with more " "))
+                done (concat ws more)
     if (and wants (<> x.pick nothing)):
-        do:
-            arg = pick-arg x from-menu
-            if (= arg nothing):
-                if x.required:
-                    nothing
-                    ws
-                do:
-                    words = if (= (type-of arg) "list"):
-                        arg
-                        [] arg
-                    note (concat "› " x.name " " (join-with words " "))
-                    concat ws words
-        ws
+        pick-arg x picked
+        done ws
 
 fun need args n what:
     when (< (length args) n):
         error (concat "missing " what)
 
-; run-command ws runs a repl command; false means leave the repl.
+; run-command ws runs a repl command. One that ends the session sets
+; session-over.
 fun run-command ws (from-menu = false):
     cmd = at ws 0
     cond:
@@ -758,20 +834,20 @@ fun run-command ws (from-menu = false):
         true = (run-remote-command ws from-menu)
 
 ; Commands that act on this repl even while it is attached.
-local-commands = [] "attach" "detach" "stop" "apps" "run" "exit" "quit" "menu"
+local-commands = [] "attach" "detach" "stop" "apps" "run" "exit" "quit" "menu" "clear"
 
-; Commands whose screens run on this terminal while attached, on the
-; program's documents (through query).
+; Commands whose screens show here while attached, on the program's
+; documents (through query).
 screen-commands = [] "items" "results" "settings"
 
 ; Any other command, attached: its argument is picked here if it is
 ; missing, then the program runs it.
 fun run-remote-command ws from-menu:
-    full = complete ws from-menu
-    if (= full nothing):
-        note "cancelled"
-        remote-input (join-with full " ")
-    true
+    fun completed full:
+        if (= full nothing):
+            note "cancelled"
+            remote-input (join-with full " ")
+    complete ws from-menu completed
 
 fun join-with xs sep:
     out = ""
@@ -784,21 +860,20 @@ fun join-with xs sep:
     out
 
 fun run-local-command ws from-menu:
-    full = complete ws from-menu
-    going = true
-    if (= full nothing):
-        note "cancelled"
-        set going (dispatch-command full)
-    going
+    fun completed full:
+        if (= full nothing):
+            note "cancelled"
+            dispatch-command full
+    complete ws from-menu completed
 
 fun dispatch-command ws:
     cmd = pop-front ws
-    going = true
     cond:
-        (or (= cmd "exit") (= cmd "quit")) = (set going (leave))
+        (or (= cmd "exit") (= cmd "quit")) = (leave)
         (= cmd "help") = (help)
-        (= cmd "menu") = (set going (open-menu))
+        (= cmd "menu") = (open-menu)
         (= cmd "settings") = (settings)
+        (= cmd "clear") = (set transcript ([]))
         (= cmd "docs") = (list-docs)
         (= cmd "new") = (new-command ws)
         (= cmd "open") = (do (need ws 1 "a module or file") (open-doc (at ws 0)))
@@ -820,18 +895,22 @@ fun dispatch-command ws:
         (= cmd "detach") = (detach)
         (= cmd "stop") = (stop-remote)
         true = nothing
-    going
+    nothing
 
 fun kind-arg ws:
     if (> (length ws) 1):
         at ws 1
         "cli"
 
-; exit while attached detaches first; the program keeps running.
+; exit while attached detaches first; the program keeps running. With
+; unsaved documents the app asks first.
 fun leave:
     when (<> remote nothing):
         (detach)
-    not (ready-to-leave)
+    fun settled ok:
+        when ok:
+            set session-over true
+    ready-to-leave settled
 
 fun list-docs:
     i = 0
@@ -855,10 +934,10 @@ fun switch-doc name:
     activate name
 
 ; The command menu: every command with what it takes and does. Choosing one
-; runs it, picking its argument if it needs one. Gives false to leave.
+; runs it, picking its argument if it needs one.
 fun open-menu:
     when (not interactive):
-        error "the menu needs a terminal; type help for the commands"
+        error "the menu needs the repl app; type help for the commands"
     out = ([])
     i = 0
     while (< i (length specs)):
@@ -866,22 +945,22 @@ fun open-menu:
         when (<> x.name "menu"):
             append out (entry (concat x.name " " x.arg) x.name x.help)
         set i (+ i 1)
-    name = choose (concat "Commands · " (current-doc)) out 12
-    if (= name nothing):
-        true
-        run-command ([] name) true
+    fun picked name:
+        when (<> name nothing):
+            run-command ([] name) true
+    choose (concat "Commands · " (current-doc)) out picked
 
 fun settings:
     if interactive:
         do:
             now = query "(current-settings)"
-            a = checkbox "Record statements in the document" now.record-statements
-            b = checkbox "Show what each input defined" now.show-changes
-            c = checkbox "Ask before leaving with unsaved documents" now.confirm-exit
-            choice = run-screen "Settings" ([] a b c (button-row ([] "Done" "Cancel")))
-            when (= choice "Done"):
-                query (call-code "change-settings" ({} (record-statements = (a.value)) (show-changes = (b.value)) (confirm-exit = (c.value))))
-                note "settings changed"
+            fun answered r:
+                if (and (<> r nothing) (= r.button "Done")):
+                    do:
+                        query (call-code "change-settings" ({} (record-statements = r.record) (show-changes = r.changes) (confirm-exit = r.confirm)))
+                        note "settings changed"
+                    note "settings unchanged"
+            form "Settings" ([] (check-field "record" "Record statements in the document" now.record-statements) (check-field "changes" "Show what each input defined" now.show-changes) (check-field "confirm" "Ask before leaving with unsaved documents" now.confirm-exit)) ([] "Done" "Cancel") answered
         do:
             echo "record-statements" record-statements
             echo "show-changes" show-changes
@@ -912,18 +991,18 @@ fun join-words xs:
             set out (concat out ", ")
     out
 
-; Whether the repl may close: on a terminal, unsaved documents are offered
-; for saving first.
-fun ready-to-leave:
+; Whether the repl may close: in the app, unsaved documents are offered for
+; saving first. done gets true to leave.
+fun ready-to-leave done:
     dirty = (dirty-docs)
+    fun chosen choice:
+        cond:
+            (= choice "Save all") = (do (save-all dirty) (done true))
+            (= choice "Leave") = (done true)
+            true = (done false)
     if (and interactive (and confirm-exit (is-any dirty))):
-        do:
-            choice = confirm "Leave the repl?" ([] (concat "Not saved: " (join-words dirty)) "Save all writes each to its file.") ([] "Save all" "Leave" "Stay")
-            cond:
-                (= choice "Save all") = (do (save-all dirty) true)
-                (= choice "Leave") = true
-                true = false
-        true
+        confirm "Leave the repl?" ([] (concat "Not saved: " (join-words dirty)) "Save all writes each to its file.") ([] "Save all" "Leave" "Stay") chosen
+        done true
 
 fun save-all names:
     keep = active
@@ -958,10 +1037,8 @@ fun report-changes items:
         note (concat "defined " (join-words made) " in " active)
 
 fun try-command input:
-    going = true
-    try (set going (run-command (words (trim input)))):
+    try (run-command (words (trim input))):
         show-error failure
-    going
 
 fun try-code input:
     set last-input input
@@ -969,32 +1046,6 @@ fun try-code input:
         try (run-code input):
             show-error failure
         remote-input input
-
-fun try-escape input:
-    going = true
-    try (set going (escape-to input.key)):
-        show-error failure
-    going
-
-; A key that left the editor: F2 shows the results, the others the menu.
-fun escape-to key:
-    if (= key "<f2>"):
-        do:
-            (results-command)
-            true
-        (open-menu)
-
-fun when-interactive-newline:
-    when interactive:
-        echo ""
-
-; Leaving at end of input (C-d) asks like exit does; staying gives a new
-; prompt.
-fun try-leave:
-    going = false
-    try (set going (leave)):
-        show-error failure
-    going
 
 ; --- projects ------------------------------------------------------------------
 
@@ -1018,7 +1069,7 @@ fun project-command ws:
 
 ; Projects to pick from: the current one, the ones visited, the ones under
 ; the current directory and beside the current project.
-fun pick-project:
+fun pick-project done:
     roots = ([])
     when (<> project nothing):
         append roots project.root
@@ -1036,10 +1087,11 @@ fun pick-project:
                 short-path root
             append out (entry (base-name root) root hint)
     append out (entry "another directory…" "<other>" "type a path")
-    choice = choose "Switch to which project?" out
-    if (= choice "<other>"):
-        ask "Switch project" "directory" ""
-        choice
+    fun picked choice:
+        if (= choice "<other>"):
+            ask "Switch project" "directory" "" done
+            done choice
+    choose "Switch to which project?" out picked
 
 ; A path as short as it reads from the current directory: ./x below it,
 ; ../x beside it, or the whole path.
@@ -1060,20 +1112,18 @@ fun docs-in project:
             set i (+ i 1)
     out
 
-; Whether unsaved documents may be left behind: on a terminal they are
-; offered for saving; piped, the switch is refused.
-fun settle-dirty dirty name:
+; Whether unsaved documents may be left behind: in the app they are offered
+; for saving; piped, the switch is refused. done runs once they are settled.
+fun settle-dirty dirty name done:
+    fun chosen choice:
+        cond:
+            (= choice "Save all") = (do (save-all dirty) (done))
+            (= choice "Discard") = (done)
+            true = (note "stayed")
     cond:
-        (is-empty dirty) = true
+        (is-empty dirty) = (done)
         (not interactive) = (error (concat "not saved: " (join-words dirty) "; save or drop them before switching to " name))
-        true = (settle-dirty-on-screen dirty name)
-
-fun settle-dirty-on-screen dirty name:
-    choice = confirm (concat "Switch to " name "?") ([] (concat "Not saved: " (join-words dirty))) ([] "Save all" "Discard" "Stay")
-    cond:
-        (= choice "Save all") = (do (save-all dirty) true)
-        (= choice "Discard") = true
-        true = false
+        true = (confirm (concat "Switch to " name "?") ([] (concat "Not saved: " (join-words dirty))) ([] "Save all" "Discard" "Stay") chosen)
 
 fun close-docs names:
     kept = ([])
@@ -1097,7 +1147,7 @@ fun switch-project dir:
         note (concat "already in project " next.name)
         do:
             leaving = docs-in project
-            when (settle-dirty (filter-dirty leaving) next.name):
+            fun settled:
                 when (<> project nothing):
                     close-project project
                     close-docs leaving
@@ -1105,6 +1155,7 @@ fun switch-project dir:
                 set project (use-project next)
                 remember-project next.root
                 note (concat "project " next.name " (" next.root "), modules: " (to-string (project-modules next)))
+            settle-dirty (filter-dirty leaving) next.name settled
 
 fun filter-dirty names:
     out = ([])
@@ -1154,18 +1205,19 @@ fun list-apps:
                     echo (concat (pad (to-string pid) 8) (pad (at lines 0) 16) (at lines 1))
 
 fun attach-command ws:
-    pid = if (is-any ws):
-        index (parse (at ws 0)) 0
-        (pick-app)
-    when (<> pid nothing):
-        attach-to pid
+    fun picked pid:
+        when (<> pid nothing):
+            attach-to pid
+    if (is-any ws):
+        picked (index (parse (at ws 0)) 0)
+        pick-app picked
 
-fun pick-app:
+fun pick-app done:
     pids = (live-pids)
     cond:
         (is-empty pids) = (error "no running owl programs to attach to; run starts the project's app")
-        (= (length pids) 1) = (at pids 0)
-        interactive = (choose "Attach to which program?" (app-entries pids))
+        (= (length pids) 1) = (done (at pids 0))
+        interactive = (choose "Attach to which program?" (app-entries pids) done)
         true = (error (concat "several programs are running, name one: attach <pid> (see apps)"))
 
 fun app-entries pids:
@@ -1275,6 +1327,8 @@ fun run-project:
     write-file log ""
     pid = spawn-process ([] (exe-path) "run") project.root log
     note (concat "started " project.name " (pid " (to-string pid) "), output in " log)
+    when (and (<> front nothing) (not front.windows)):
+        note "this owl has no windows (make build_owl_sdl adds them), so the app runs unseen; to watch it, start it with owl run in another terminal and attach to that one"
     tries = 0
     conn = connect pid
     while (= conn nothing):
@@ -1292,8 +1346,8 @@ fun last-lines text n:
 
 ; --- serving a running program (attach.owl) ------------------------------------
 
-; The session a program's repl socket runs in: not a terminal, the
-; project's main module as the active document.
+; The session a program's repl socket runs in: no screens, the project's
+; main module as the active document.
 fun serve-start:
     when (not served):
         set served true
@@ -1308,10 +1362,11 @@ fun serve-start:
 ; whether the session goes on.
 fun serve-input input:
     (serve-start)
-    going = true
     fun run-it:
-        set going (handle-input input)
+        handle-input input
     output = capture-output run-it
+    going = not session-over
+    set session-over false
     {} (prompt = active) (output = output) (going = going)
 
 ; serve-query code: evaluates code in this session (the repl module) for an
@@ -1340,36 +1395,119 @@ fun serve-hello:
         concat "owl" newline (current-dir)
         concat project.name newline project.root
 
-; handle-input text: one line (or block) of input, a command or code.
-; Gives false when the session should end.
+; handle-input text: one input (a line or block), a command or code.
 fun handle-input input:
     cond:
-        (is-blank input) = true
+        (is-blank input) = nothing
         (is-command (words (trim input))) = (try-command input)
-        true = (do (try-code input) true)
+        true = (try-code input)
 
-fun repl:
+fun start-session:
     set project (open-project (current-dir))
     when (<> project nothing):
         remember-project project.root
-    set escape-keys ([] "<f1>" "<M-x>" "<f2>")
-    if interactive:
-        echo (dim "owl repl. Enter adds a line, Ctrl+Enter runs (or Alt+Enter, Ctrl+J). F1 or M-x: menu. Ctrl+D leaves.")
-        echo "owl repl. Type help for commands, exit or ctrl-d to leave."
     if (= project nothing):
         note "no project here; new-project <dir> creates one, project <dir> switches to one"
         note (concat "project " project.name " (" project.root ")")
     (new-doc)
-    running = true
-    while running:
-        input = (read-input)
+
+; The piped repl: lines from stdin, printed answers.
+fun repl:
+    echo "owl repl. Type help for commands, exit or ctrl-d to leave."
+    (start-session)
+    while (not session-over):
+        input = (read-plain)
+        if (= input nothing):
+            set session-over true
+            handle-input input
+
+; --- the app's handle on the session ---------------------------------------------
+;
+; repl-app.owl drives the session through these (as functions, so it sees
+; the live state).
+
+fun repl-start the-front:
+    set interactive true
+    set front the-front
+    (start-session)
+
+; An input typed at the prompt: it is shown in the transcript at the prompt
+; it was typed at, then runs.
+fun repl-submit input:
+    when (not (is-blank input)):
+        add-entry "input" input (prompt-label)
+    fun run-it:
+        handle-input input
+    step run-it
+
+; A key the app does not handle itself: "menu" (F1, M-x) or "results" (F2).
+fun repl-key key:
+    fun run-it:
         cond:
-            (= input nothing) = (do (when-interactive-newline) (set running (try-leave)))
-            (= (type-of input) "record") = (set running (try-escape input))
-            true = (set running (handle-input input))
+            (= key "menu") = (open-menu)
+            (= key "results") = (results-command)
+            true = nothing
+    step run-it
+
+; C-d at an empty prompt: leave, asking about unsaved documents first.
+fun repl-leave:
+    fun run-it:
+        (leave)
+    step run-it
+
+; Where input goes, as the prompt shows it: the active document, or the
+; attached program and its document.
+fun prompt-label:
+    if (= remote nothing):
+        active
+        concat remote.name " " (to-string remote.conn.pid) " · " remote.prompt
+
+; Printed output that came from no input (a widget, a callback).
+fun repl-output text:
+    add-entry "out" (pick-text (ends-with text newline) (slice text 0 (- (length text) 1)) text)
+
+; A failure in the app itself, shown like an input's.
+fun repl-error message:
+    add-entry "error" message
+
+fun repl-take-pending:
+    p = pending
+    set pending nothing
+    p
+
+fun repl-status:
+    name = if (= project nothing):
+        nothing
+        project.name
+    {} (project = name) (doc = (prompt-label)) (attached = (<> remote nothing)) (dirty = (length (dirty-docs)))
+
+fun repl-transcript:
+    transcript
+
+fun repl-screen:
+    screen
+
+fun repl-over:
+    session-over
+
+fun repl-set-columns n:
+    set columns n
 
 export:
     repl = repl
     serve-input = serve-input
     serve-query = serve-query
     serve-hello = serve-hello
+    repl-start = repl-start
+    repl-submit = repl-submit
+    repl-key = repl-key
+    repl-leave = repl-leave
+    repl-answer = answer-screen
+    repl-take-pending = repl-take-pending
+    repl-output = repl-output
+    repl-error = repl-error
+    repl-status = repl-status
+    repl-transcript = repl-transcript
+    repl-screen = repl-screen
+    repl-over = repl-over
+    repl-set-columns = repl-set-columns

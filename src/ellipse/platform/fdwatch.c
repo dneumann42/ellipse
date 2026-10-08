@@ -1,19 +1,30 @@
 /* Readable-fd wakeups for the frame loop (see fdwatch.nim).
  *
- * One helper thread sleeps in poll() on the watched descriptors plus a
- * control pipe. When a descriptor turns readable the thread disarms it
- * (so poll does not report it again before the main thread has read it)
- * and pushes one SDL user event, which wakes SDL_WaitEventTimeout. The
- * main thread takes the ready descriptors, runs their callbacks and
- * re-arms them. The thread never touches anything but this file's state
- * and SDL_PushEvent, which SDL documents as thread-safe. */
+ * Two ways to wait, picked by the platform:
+ *
+ * - thread (a window): one helper thread sleeps in poll() on the watched
+ *   descriptors plus a control pipe. When a descriptor turns readable the
+ *   thread disarms it (so poll does not report it again before the main
+ *   thread has read it) and calls the waker the platform installed, which
+ *   wakes the window's event queue (SDL_PushEvent, see sdl_wake.c). The
+ *   thread never touches anything but this file's state and the waker.
+ * - direct (the terminal): no thread. The main thread sleeps in poll()
+ *   itself (ellipse_fdwatch_wait), so the terminal backend needs no event
+ *   queue -- and no SDL.
+ *
+ * Either way the main thread takes the ready descriptors, runs their
+ * callbacks and re-arms them. Nothing here depends on SDL. */
 
-#include <SDL3/SDL.h>
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <poll.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stdint.h>
+#include <time.h>
 
 #define MAX_FDS 256
 
@@ -28,7 +39,7 @@ static Entry entries[MAX_FDS];
 static int count = 0;
 static int ctl[2] = {-1, -1};
 static int started = 0;
-static Uint32 event_type = 0;
+static void (*waker)(void) = 0;
 
 static void poke(void) {
   if (ctl[1] >= 0) {
@@ -82,24 +93,18 @@ static void *watch_thread(void *arg) {
       }
     }
     pthread_mutex_unlock(&lock);
-    if (any) {
-      SDL_Event ev;
-      SDL_zero(ev);
-      ev.type = event_type;
-      SDL_PushEvent(&ev);
-    }
+    if (any && waker)
+      waker();
   }
   return NULL;
 }
 
-static int start(void) {
+/* Thread mode: start the helper thread; `wake` is called (on that thread)
+ * whenever a watched descriptor turned readable. */
+int ellipse_fdwatch_use_thread(void (*wake)(void)) {
+  waker = wake;
   if (started)
     return 1;
-  if (event_type == 0) {
-    event_type = SDL_RegisterEvents(1);
-    if (event_type == 0)
-      return 0;
-  }
   if (pipe(ctl) != 0)
     return 0;
   fcntl(ctl[0], F_SETFL, fcntl(ctl[0], F_GETFL) | O_NONBLOCK);
@@ -115,8 +120,6 @@ static int start(void) {
 }
 
 int ellipse_fdwatch_add(int fd) {
-  if (!start())
-    return 0;
   pthread_mutex_lock(&lock);
   int ok = count < MAX_FDS;
   if (ok) {
@@ -170,4 +173,51 @@ void ellipse_fdwatch_rearm(int fd) {
   poke();
 }
 
-unsigned int ellipse_fdwatch_event_type(void) { return event_type; }
+/* Direct mode: sleep in poll() on the armed descriptors for up to `ns`
+ * nanoseconds (-1: until one is readable, 0: just look), marking the
+ * readable ones fired. Returns how many fired. */
+int ellipse_fdwatch_wait(int64_t ns) {
+  struct pollfd fds[MAX_FDS];
+  int n = 0;
+  pthread_mutex_lock(&lock);
+  for (int i = 0; i < count; i++) {
+    if (entries[i].armed) {
+      fds[n].fd = entries[i].fd;
+      fds[n].events = POLLIN;
+      fds[n].revents = 0;
+      n++;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  int r;
+#ifdef __linux__
+  struct timespec ts;
+  struct timespec *tp = 0;
+  if (ns >= 0) {
+    ts.tv_sec = (time_t)(ns / 1000000000);
+    ts.tv_nsec = (long)(ns % 1000000000);
+    tp = &ts;
+  }
+  r = ppoll(fds, (nfds_t)n, tp, 0);
+#else
+  int ms = ns < 0 ? -1 : (int)((ns + 999999) / 1000000);
+  r = poll(fds, (nfds_t)n, ms);
+#endif
+  if (r <= 0)
+    return 0;
+  int fired = 0;
+  pthread_mutex_lock(&lock);
+  for (int k = 0; k < n; k++) {
+    if (!fds[k].revents)
+      continue;
+    for (int i = 0; i < count; i++) {
+      if (entries[i].fd == fds[k].fd && entries[i].armed) {
+        entries[i].armed = 0;
+        entries[i].fired = 1;
+        fired++;
+      }
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  return fired;
+}

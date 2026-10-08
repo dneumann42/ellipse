@@ -71,7 +71,9 @@ proc requestSize*(cfg: LayerConfig): tuple[width, height: int32] =
   of edgeTop, edgeBottom: (along, cfg.thickness)
   of edgeLeft, edgeRight: (cfg.thickness, along)
 
-when defined(linux):
+import ./termmode
+
+when defined(linux) and withSdl:
   {.compile: "wayland/layer_shell.c".}
   {.compile: "wayland/wlr-layer-shell-unstable-v1-protocol.c".}
   {.compile: "wayland/xdg-shell-protocol.c".}

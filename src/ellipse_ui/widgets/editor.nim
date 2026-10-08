@@ -60,6 +60,10 @@ type
     indent*: string = "    "  ## what Tab inserts (and Shift+Tab takes off a
                               ## line's front); "" leaves Tab alone
     autoIndent*: bool = false ## Enter copies the line's leading whitespace
+    indentAfter*: string = "" ## with `autoIndent`: a line ending in this
+                              ## (":" for owl, "{" for C) indents one
+                              ## `indent` deeper
+    fontId*: uint16 = 0    ## `MonoFont` for code
 
   EditorStats* = object
     ## What one editor frame produced.
@@ -724,6 +728,7 @@ widget editor(id: ElementId, text: string,
     if opts.fontSize > 0'u16: opts.fontSize
     else: t.text.control
   let cfg = TextConfig(fontSize: size, color: t.palette.textColor,
+                       fontId: opts.fontId,
                        wrap: if opts.wrap: wordWrap else: noWrap)
   let textEl = ElementId(id: textChildId(id.id))
   let ppos = currentContext().pointerData().position
@@ -787,7 +792,15 @@ widget editor(id: ElementId, text: string,
           var nl = "\n"
           if opts.autoIndent:
             let c = min(caretPos(), anchorPos())
-            nl.add leadingWs(s, lineBol(s, c), c)
+            let bol = lineBol(s, c)
+            nl.add leadingWs(s, bol, c)
+            if opts.indentAfter.len > 0:
+              var e = c
+              while e > bol and s[e - 1] == ' ':
+                dec e
+              if e - bol >= opts.indentAfter.len and
+                  s.substr(e - opts.indentAfter.len, e - 1) == opts.indentAfter:
+                nl.add opts.indent
           rest.add KeyEvent(kind: kevText, text: nl)
           continue
         case ev.kind
@@ -840,7 +853,7 @@ widget editor(id: ElementId, text: string,
       .clip(horizontal = not opts.wrap, vertical = true,
             childOffset = currentScrollOffset())):
     textElement(s, TextConfig(fontSize: size, color: t.palette.textColor,
-                              wrap: cfg.wrap))
+                              fontId: opts.fontId, wrap: cfg.wrap))
     if mOwner == id.id:
       # Selection stays visible (it washes the text, dialogs sit above it
       # -- Notepad keeps a found selection lit behind its modal). The

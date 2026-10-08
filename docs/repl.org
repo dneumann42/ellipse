@@ -36,7 +36,7 @@ written in owl.
 | gui         | ellipse_ui apps: widget, events, run-app              | gui.owl + gui.nim      | done    |
 | runner      | =run= starts the app; it serves repls between frames  | repl.owl, fdwatch      | done    |
 | attach      | socket protocol to a running owl program              | wire/attach.owl + net  | done    |
-| tui         | item browser, document view                           | owl (editor, ansi)     | planned |
+| app         | the repl as an ellipse_ui app: terminal or window     | repl-app.owl, gui      | done    |
 
 * Source items (done)
 
@@ -96,9 +96,10 @@ current directory upwards.
 ** Projects from the repl
 
 - =new-project <dir>= creates =project.owl= and =src/main.owl= in dir and
-  switches to it. On a terminal, a bare =new-project= asks for the directory.
+  switches to it. In the repl app, a bare =new-project= asks for the
+  directory and whether it is a GUI app.
 - =project= shows the current project. =project <dir>= switches to the
-  project whose =project.owl= is in dir. On a terminal, a bare =project=
+  project whose =project.owl= is in dir. In the repl app, a bare =project=
   picks from the current project, the ones visited this session, the ones
   under the current directory, the current one's siblings, or a typed path.
 - A switch closes the old project's documents. Unsaved ones are offered for
@@ -109,7 +110,7 @@ current directory upwards.
   like after =cd=: =new-project ../other= makes a sibling.
 - Documents with no file (=scratch=) stay open across switches. A scope that
   already used a module of the old project keeps its view of it.
-- On a terminal the prompt starts with the project's name.
+- In the repl app the header names the project.
 
 * Live modules
 
@@ -178,6 +179,9 @@ is a command name.
 | =attach [pid]=           | send input to a running program instead           |
 | =detach=                 | leave it running and work here again              |
 | =stop=                   | close the attached program                        |
+| =settings=               | the repl's settings (a form)                      |
+| =clear=                  | clear the transcript                              |
+| =menu=, =help=, =exit=   | the command menu, the commands, leave             |
 
 A statement is recorded by what it changed, not as history (=run-statement=
 in =live.owl=). The module's own bindings are compared before and after:
@@ -188,9 +192,9 @@ in =live.owl=). The module's own bindings are compared before and after:
   statement is recorded once; an identical one is never added again.
 
 =items= shows a module's source in a scrollable view; ↑↓ select items and
-PgUp/PgDn scroll. Enter or e edits an item: its text goes into the next
-prompt, and running it replaces the item. c copies it (OSC 52), d drops it,
-r reruns it. =results= (or F2) shows the printed results the same way,
+PgUp/PgDn scroll. Enter or e edits an item: its text goes into the prompt,
+and running it replaces the item. c copies it (the clipboard; OSC 52 in a
+terminal), d drops it, r reruns it; the view's buttons do the same. =results= (or F2) shows the printed results the same way,
 each under its input as a =;= comment. Editing a result of a bare name the
 document binds pre-fills =name = value=, so running it records that binding.
 Piped, =items= prints the source with item numbers in the margin.
@@ -198,27 +202,63 @@ Piped, =items= prints the source with item numbers in the margin.
 Opening another module and typing a definition patches the running module,
 and since imports are live, every user of it sees the change.
 
-* TUI
+* The repl app
 
-=libraries/tui.owl= is a small widget kit, all in owl. Widgets are records of
-closures (=draw=, =handle=, =value=) over their own state: =label=,
-=checkbox=, =button=, =button-row=, =text-input= and =menu= (filterable;
-label matches rank first, then hints; it scrolls). =run-screen= draws them in
-a box below the cursor, redraws in place, and erases itself on close. Ready
-made: =choose=, =ask=, =confirm=. Key decoding is shared with the editor
-through =libraries/keys.owl=, and the terminal is reached only through
-swappable bindings, so =tests/tui_test.nim= drives it with scripted keys.
+On a terminal =owl repl= is an ellipse_ui app written in owl
+(=scripts/repl-app.owl=): it takes over the terminal, or opens a window
+when owl is built with SDL (=make build_owl_sdl=) and there is a display.
+=owl repl --tui= keeps it in the terminal. Piped input is read line by
+line as before (a line ending in =:= opens a block that runs to the next
+empty line), with nothing asked.
 
-In the repl:
-- F1 or M-x leaves the editor (its buffer is kept for the next prompt) and
-  opens a filterable menu of every command.
-- A command missing its argument opens a picker on a terminal: modules for
-  =open=, =items=, =reload=; documents for =switch=; the active document's
-  items for =show=, =drop=, =rerun=. =new= and =save= ask from the menu. The
-  equivalent typed command is printed, so the menu teaches the text form.
-- =settings= is a form: record statements, show what each input defined,
-  ask before leaving with unsaved documents.
-- =exit= or C-d with unsaved documents offers Save all / Leave / Stay.
+The session (=scripts/repl.owl=) never draws. Where it needs an answer -- a
+picked module, a typed name, a form, a confirmation -- it opens a /screen/,
+a record of kind and title with a continuation (=done=), and the app draws
+it and calls the continuation with the answer, or with nothing on Escape.
+Everything the session shows is an entry of its transcript (input, printed
+output, value, note, error); piped, the same lines are printed. The app
+calls the session through =repl-*= functions, so it sees the live state.
+
+| Area       | What                                                          |
+|------------+---------------------------------------------------------------|
+| header     | the project, unsaved documents, the keys                      |
+| transcript | inputs at their prompts, output, results as owl code; the     |
+|            | wheel scrolls it, and it follows new lines                    |
+| prompt     | where input goes (the active document, or the attached app),  |
+|            | then a code editor (ellipse_ui's =editor=, monospaced)        |
+| screens    | take the transcript's place until answered or cancelled       |
+
+Keys at the prompt:
+- Enter adds a line, indented like the one above and one level deeper
+  after a =:=; Ctrl+Enter runs the input (or Alt+Enter, Ctrl+J). The
+  editor's own keys work: selection, undo, Emacs motions, the clipboard.
+- Ctrl+Up / Ctrl+Down (or Alt+P / Alt+N, or Up on the first line and Down
+  on the last) walk the history.
+- F1 or Alt+X opens a filterable menu of every command; F2 the results.
+- Ctrl+D on an empty prompt leaves; so do =exit=, Ctrl+Q and the window's
+  close button, each asking first when documents are unsaved (Save all /
+  Leave / Stay).
+
+Screens:
+- A command missing its argument opens a picker: modules for =open=,
+  =items=, =reload=; documents for =switch=; the active document's items
+  for =show=, =drop=, =rerun=; projects for =project=. Typing filters (label
+  matches rank first, then hints), ↑↓ move, Enter or a click picks. The
+  equivalent typed command is shown, so the menu teaches the text form.
+- =new= and =save= ask from the menu; =new-project= and =settings= are
+  forms (Tab moves, Space toggles, Enter accepts).
+- Keys typed in the same frame as Enter or Ctrl+Enter belong to what was
+  being typed: a screen takes Escape and Enter before its fields see the
+  frame's keys, and acts on them after.
+
+=tests/repl_screens_test.py= drives the terminal app on a pseudo-terminal,
+locally and attached; =tests/repl_gui_test.nim= drives the window app
+headless with scripted keys and saves a screenshot of each screen to
+=nimcache/repl_gui_*.bmp=.
+
+The line editor and the terminal widget kit the repl used before
+(=libraries/editor.owl=, =libraries/tui.owl=) are still in the library,
+with =tests/tui_test.nim=; the repl no longer uses them.
 
 * GUI projects
 
@@ -273,20 +313,22 @@ frame's view failed.
 The app also watches its source directory (inotify) and reloads a module
 whose file is saved, keeping state, so any editor works too.
 
-While attached, the repl's screens still run on its own terminal: =items=
+While attached, the repl's screens still run in the repl: =items=
 (the cursorable item view, with edit, copy, drop and rerun), =results=
 (F2), =settings=, the F1 menu and every argument picker. They read and
 change the app's documents through a =query= request, which evaluates owl
 code in the app's session and returns the value as data along with what it
 printed; locally the same code runs in this repl's session.
-=tests/repl_screens_test.py= drives them on a pseudo-terminal, both ways.
+=tests/repl_screens_test.py= drives them, both ways.
 
 =run= in the repl saves the project's documents, starts =owl run= in the
 project root as its own process (output to
 =$XDG_RUNTIME_DIR/owl/<name>.log=) and attaches. Editing happens in the
 repl process, so the app's frame loop never slows the prompt down, and the
 app keeps running after the repl leaves. =detach= reads back documents the
-app saved.
+app saved. A terminal-only owl (the default build) has no windows, so the
+app =run= starts runs unseen (attachable, reloading); to watch it, start it
+with =owl run= in another terminal and =attach= to that one.
 
 ** Known gaps
 - A reload that fails part way leaves the scope partly updated and the text

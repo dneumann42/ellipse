@@ -1,4 +1,4 @@
-import std/[syncio, strutils, tables, os]
+import std/[syncio, strutils, tables, os, envvars]
 import owl/[objects, evaluator, modules]
 import ellipse_ui/app
 
@@ -324,13 +324,24 @@ proc columnBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
   # column ("id") (options...): children top to bottom.
   element(env, args, bodyStart, true)
 
+proc fontIdOf(o: Object): uint16 {.raises.} =
+  # (font = "mono") picks the monospaced font; anything else the UI font.
+  if isNothing(o): 0'u16
+  elif textOf(o, "font") == "mono": MonoFont
+  elif textOf(o, "font") == "ui" or textOf(o, "font") == "": 0'u16
+  else:
+    err("font is ui or mono, got " & stringify(o))
+    0'u16
+
 proc textBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   # text value (size = n) (color = c)
   let a = parseArgs(env, args, bodyStart)
   let t = activeTheme
   let c = if a.has("color"): colorOf(arg(a, "color", -1)) else: t.palette.textColor
+  let wrap = if a.has("wrap") and not toBool(arg(a, "wrap", -1)): noWrap else: wordWrap
   textElement(textOf(arg(a, "value", 0), "text"),
-    TextConfig(fontSize: textSizeOf(arg(a, "size", 1), t.text.control), color: c))
+    TextConfig(fontSize: textSizeOf(arg(a, "size", 1), t.text.control), color: c,
+      fontId: fontIdOf(arg(a, "font", -1)), wrap: wrap))
   nothing()
 
 proc sizingRecord(kind: string, a: Args): Object {.raises.} =
@@ -1476,6 +1487,9 @@ proc drawError() =
 
 var currentView = nothing()
 var guiRunning = false
+var quietRun = false
+  ## gui-run (quiet = true): nothing goes to stdout or stderr -- the app owns
+  ## the terminal (the repl), and shows its errors itself.
 
 proc viewProc(): AppFn =
   # Each frame runs the owl view. A failure keeps the frame balanced, shows
@@ -1492,7 +1506,7 @@ proc viewProc(): AppFn =
       frameError = lastErrorMessage
     errorReport = saved
     if frameError.len > 0:
-      if frameError != reportedError:
+      if frameError != reportedError and not quietRun:
         writeLine(stderr, "owl error in the view: " & frameError)
         reportedError = frameError
       drawError()
@@ -1555,13 +1569,15 @@ proc guiRunBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
   if hasField(cfg, "height"):
     win.height = int32(toNumber(field(cfg, "height")))
   let debug = not hasField(cfg, "debug") or toBool(field(cfg, "debug"))
+  quietRun = hasField(cfg, "quiet") and toBool(field(cfg, "quiet"))
   useFonts()
   # A dialog in its own window is this program run again: owl run, from
   # the same directory.
   dialogLauncher = @[getAppFilename(), "run"]
   guiRunning = true
   try:
-    run(App(window: win, view: viewProc(), debugMode: debug, after: runAfterFrame),
+    run(App(window: win, view: viewProc(), debugMode: debug, log: not quietRun,
+            after: runAfterFrame),
       guiScript)
   finally:
     guiRunning = false
@@ -1610,6 +1626,139 @@ proc unwatchFdBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): 
 
 proc windowTitleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   setWindowTitle(oneText(env, args, "window-title"))
+  nothing()
+
+# --- for code: the editor, keys taken before widgets, scrolling ------------
+
+proc codeEditorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # code-editor id text (max-lines) (read-only) (font) (wrap) (indent-after):
+  # ellipse_ui's editor (undo, selection, mouse, Emacs keys), indenting like
+  # the line above; the text to store back.
+  let a = parseArgs(env, args, bodyStart)
+  var opts = EditorOpts(maxLines: int(numOr(a, "max-lines", -1, 0.0, "code-editor")),
+    readOnly: toBool(arg(a, "read-only", -1)),
+    fontId: fontIdOf(arg(a, "font", -1)),
+    autoIndent: true,
+    indentAfter: strOr(a, "indent-after", -1, "", "code-editor"))
+  if a.has("wrap"):
+    opts.wrap = toBool(arg(a, "wrap", -1))
+  let r = editor(idOf(need(a, "id", 0, "code-editor")),
+    textOf(arg(a, "text", 1), "code-editor"), opts)
+  rethrow()
+  str(r.text)
+
+proc editorCaretBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # editor-caret id text: where the caret is, as a byte offset.
+  let a = parseArgs(env, args, bodyStart)
+  number(float64(editorCaret(idOf(arg(a, "id", 0)), textOf(arg(a, "text", 1), "editor-caret"))))
+
+proc takeKeyBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # take-key "ctrl+enter": true when the chord was pressed this frame; the
+  # key is taken, so no widget drawn after sees it.
+  if args.len != 1:
+    err("take-key needs a chord such as ctrl+enter")
+  let c = parseChord(textOf(eval(args[0], env), "take-key"))
+  if c.kind == kevNone:
+    err("take-key: not a chord: " & stringify(eval(args[0], env)))
+  var kept: seq[KeyEvent] = @[]
+  var hit = false
+  let evs = keyEvents()
+  for ev in evs:
+    if not hit and matches(ev, c):
+      hit = true
+    else:
+      kept.add ev
+  if hit:
+    setKeyEvents(kept)
+  boolean(hit)
+
+proc typedTextBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # typed-text: the text typed this frame (no chords), taken from the frame.
+  var kept: seq[KeyEvent] = @[]
+  var typed = ""
+  let evs = keyEvents()
+  for ev in evs:
+    if ev.kind == kevText:
+      typed.add ev.text
+    else:
+      kept.add ev
+  if typed.len > 0:
+    setKeyEvents(kept)
+  str(typed)
+
+proc setClipboardBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # set-clipboard text: the system clipboard (OSC 52 in a terminal).
+  setClipboard(oneText(env, args, "set-clipboard"))
+  nothing()
+
+proc textColumnsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # text-columns: how many characters of monospaced code fit across the
+  # window (the terminal's columns).
+  if terminalMode():
+    return number(float64(terminalSize().cols))
+  let w = windowPixelSize().width
+  let cw = measureText("0000000000", TextConfig(fontSize: activeTheme.text.control,
+    fontId: MonoFont)).width / 10.0
+  number(float64(if cw > 0: int(w / cw) else: 80))
+
+proc scrollIntoViewBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # scroll-into-view container element: scroll the container so the
+  # element (as laid out last frame) is in sight.
+  let a = parseArgs(env, args, bodyStart)
+  let cid = idOf(arg(a, "container", 0))
+  let c = elementData(cid)
+  let e = elementData(idOf(arg(a, "element", 1)))
+  let sd = scrollContainerData(cid)
+  if c.found and e.found and sd.found:
+    var y = sd.position.y
+    if e.box.y < c.box.y:
+      y += c.box.y - e.box.y
+    elif e.box.y + e.box.height > c.box.y + c.box.height:
+      y -= min(e.box.y + e.box.height - (c.box.y + c.box.height), e.box.y - c.box.y)
+    if y != sd.position.y:
+      setScrollPosition(cid, vec2(sd.position.x, y))
+      requestFrame()
+  nothing()
+
+proc scrollToEndBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # scroll-to-end id: scroll a container to its bottom.
+  let id = idArg(env, args, "scroll-to-end")
+  setScrollPosition(id, vec2(0, -1.0e9))
+  nothing()
+
+proc windowBackendBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # window-backend: an app here would open a window (SDL is built in, no
+  # --tui, and there is a display), not take over the terminal.
+  when withSdl:
+    let display = getEnv("WAYLAND_DISPLAY").len > 0 or getEnv("DISPLAY").len > 0 or
+      getEnv("SDL_VIDEODRIVER").len > 0
+    boolean(display and not terminalMode())
+  else:
+    boolean(false)
+
+proc onCloseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # on-close f: when the person closes the app (the window's close button,
+  # Ctrl+Q in a terminal) f is asked first: true closes it, false keeps it
+  # running. on-close nothing closes at once again.
+  if args.len != 1:
+    err("on-close needs a fun, or nothing")
+  let f = eval(args[0], env)
+  if isNothing(f):
+    setCloseHandler(nil)
+  else:
+    setCloseHandler(proc (): bool {.closure.} =
+      result = true
+      try:
+        result = toBool(invoke(f, @[]))
+      except:
+        result = true
+      requestFrame())
+  nothing()
+
+proc useTerminalBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # use-terminal: the next gui-run takes over the terminal, window backend
+  # or not.
+  setTerminalMode(true)
   nothing()
 
 proc installGui*(env: ref Environment) =
@@ -1707,6 +1856,17 @@ proc installGui*(env: ref Environment) =
   fn "watch-fd", watchFdBuiltin
   fn "unwatch-fd", unwatchFdBuiltin
   fn "window-title", windowTitleBuiltin
+  cmd "code-editor", codeEditorBuiltin
+  fn "editor-caret", editorCaretBuiltin
+  fn "take-key", takeKeyBuiltin
+  fn "typed-text", typedTextBuiltin
+  fn "set-clipboard", setClipboardBuiltin
+  fn "text-columns", textColumnsBuiltin
+  fn "scroll-into-view", scrollIntoViewBuiltin
+  fn "scroll-to-end", scrollToEndBuiltin
+  fn "window-backend", windowBackendBuiltin
+  fn "use-terminal", useTerminalBuiltin
+  fn "on-close", onCloseBuiltin
 
 proc guiModule*(source: string): Module {.raises.} =
   # The Nim builtins and gui.owl in one module: `use gui` gives both.

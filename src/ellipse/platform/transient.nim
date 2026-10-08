@@ -21,27 +21,34 @@ import ./platform
 
 import std/strutils
 
-when defined(linux):
-  {.compile: "wayland/dialog_parent.c".}
-  {.compile: "wayland/xdg-foreign-unstable-v2-protocol.c".}
-  {.compile: "wayland/xdg-dialog-v1-protocol.c".}
-  # (xdg-shell-protocol.c, which xdg-dialog references, comes with
-  # `layershell`; wayland-client is linked there too)
-  proc ellipse_wayland_attach(win: pointer; handle: cstring; modal: int32): int32 {.
-    importc: "ellipse_wayland_attach".}
-when defined(windows):
-  {.compile: "transient_win.c".}
-else:
-  {.compile: "transient.c".}
-# (Windows: user32, for the owner/enable calls, is in mingw's default libs.
-# A passL here would also reach nimony's host-side plugin links.)
+# The glue is SDL's (it reads SDL's window handles), so a build without SDL
+# has none: no window to parent, every call below a no-op.
+when withSdl:
+  when defined(linux):
+    {.compile: "wayland/dialog_parent.c".}
+    {.compile: "wayland/xdg-foreign-unstable-v2-protocol.c".}
+    {.compile: "wayland/xdg-dialog-v1-protocol.c".}
+    # (xdg-shell-protocol.c, which xdg-dialog references, comes with
+    # `layershell`; wayland-client is linked there too)
+    proc ellipse_wayland_attach(win: pointer; handle: cstring; modal: int32): int32 {.
+      importc: "ellipse_wayland_attach".}
+  when defined(windows):
+    {.compile: "transient_win.c".}
+  else:
+    {.compile: "transient.c".}
+  # (Windows: user32, for the owner/enable calls, is in mingw's default libs.
+  # A passL here would also reach nimony's host-side plugin links.)
 
-proc ellipse_parent_token(win: pointer; buf: cstring; cap: int32): int32 {.
-  importc: "ellipse_parent_token".}
-proc ellipse_attach_parent(win: pointer; token: cstring; modal: int32): int32 {.
-  importc: "ellipse_attach_parent".}
-proc ellipse_window_enable(win: pointer; enabled: int32) {.
-  importc: "ellipse_window_enable".}
+  proc ellipse_parent_token(win: pointer; buf: cstring; cap: int32): int32 {.
+    importc: "ellipse_parent_token".}
+  proc ellipse_attach_parent(win: pointer; token: cstring; modal: int32): int32 {.
+    importc: "ellipse_attach_parent".}
+  proc ellipse_window_enable(win: pointer; enabled: int32) {.
+    importc: "ellipse_window_enable".}
+else:
+  proc ellipse_parent_token(win: nil pointer; buf: cstring; cap: int32): int32 = 0
+  proc ellipse_attach_parent(win: nil pointer; token: cstring; modal: int32): int32 = 0
+  proc ellipse_window_enable(win: nil pointer; enabled: int32) = discard
 
 proc parentToken*(): string =
   ## This process's window as a token another process can parent to:
@@ -65,7 +72,7 @@ proc attachToParent*(token: string; modal = true): bool =
   if win == nil or token.len == 0:
     return false
   let m = if modal: 1'i32 else: 0'i32
-  when defined(linux):
+  when defined(linux) and withSdl:
     if token.startsWith("wayland:"):
       if videoDriver() != "wayland":
         return false

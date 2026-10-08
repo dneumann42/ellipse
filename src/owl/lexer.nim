@@ -90,12 +90,30 @@ proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token]
 proc tokenize*(t: var Tokenizer, text: string): seq[Token] {.raises.} =
   tokenizeRange(t, text, 0, text.len)
 
+func parenDelta(toks: seq[Token]): int =
+  result = 0
+  for tk in toks:
+    case tk.kind
+    of Open: inc result
+    of Close: dec result
+    else: discard
+
 proc scanLines*(t: var Tokenizer, text: string): seq[Line] {.raises.} =
-  # Each line of text, skipping blank lines and comment lines, read in place
-  # (no line is copied out of text).
+  # Each logical line of text, skipping blank lines and comment lines, read in
+  # place (no line is copied out of text). A line whose parentheses are still
+  # open at its end continues onto the following lines: their tokens join it
+  # whatever their indentation, until the group closes. So both
+  #
+  #   (hello foo
+  #          bar)     (hello
+  #                     bar)
+  #
+  # read as one call. A group left open to the end of the source stays as a
+  # line of its own, so the reader reports the missing ')'.
   result = newSeqOfCap[Line](text.len div 24 + 1)
   var num = 0
   var start = 0
+  var open = 0
   while start <= text.len:
     var stop = start
     while stop < text.len and text[stop] != '\n':
@@ -109,5 +127,13 @@ proc scanLines*(t: var Tokenizer, text: string): seq[Line] {.raises.} =
       while start + indent < stop and text[start + indent] in {' ', '\t'}:
         inc indent
       t.line = num
-      result.add Line(num: num, indent: indent, toks: tokenizeRange(t, text, start, stop))
+      let toks = tokenizeRange(t, text, start, stop)
+      if open == 0:
+        result.add Line(num: num, indent: indent, toks: toks)
+      else:
+        for tk in toks:
+          result[^1].toks.add tk
+      open += parenDelta(toks)
+      if open < 0:
+        open = 0
     start = stop + 1

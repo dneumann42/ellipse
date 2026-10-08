@@ -9,6 +9,8 @@ use modules
 use source
 use projects
 use repl
+use repl-app
+use term
 
 ; The owl command line: `owl <command> [args]`.
 
@@ -18,7 +20,9 @@ fun usage:
     echo "commands:"
     echo "  new <dir> [gui]               create a project: project.owl and src/main.owl;"
     echo "                                gui makes a windowed app on ellipse_ui"
-    echo "  repl                          start an interactive session"
+    echo "  repl [--tui]                  start an interactive session: in a window when"
+    echo "                                owl is built with SDL, else (or with --tui) in"
+    echo "                                the terminal; piped input is read line by line"
     echo "  run [<file>]                  evaluate an owl file, or the project's main module"
     echo "  modules                       list the project's modules"
     echo "  items <module>                list a module's definitions and statements"
@@ -177,6 +181,13 @@ fun remove-command next:
         remove-item text key
     edit-module path edit
 
+; On a terminal the repl is the repl app (a window when owl has SDL and a
+; display, else the terminal); piped, it reads lines.
+fun repl-command:
+    if (is-terminal):
+        (repl-app)
+        (repl)
+
 fun dispatch arg next:
     cond:
         (= arg nothing) = (usage)
@@ -184,7 +195,7 @@ fun dispatch arg next:
         (<> arg.type "cmd") = (fail (concat "unknown option: " arg.flag))
         (= arg.name "new") = (new-command next)
         (= arg.name "modules") = (modules-command)
-        (= arg.name "repl") = (repl)
+        (= arg.name "repl") = (repl-command)
         (= arg.name "run") = (run-command next)
         (= arg.name "items") = (items-command next)
         (= arg.name "show") = (show-command next)

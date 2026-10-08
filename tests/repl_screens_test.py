@@ -1,20 +1,30 @@
-"""The repl's terminal screens, locally and attached to a running app.
+"""The repl app's screens in the terminal, locally and attached to a running app.
 
 Piped input never shows the item view, the results view, the pickers or the
-forms, so these drive `bin/owl repl` on a pseudo-terminal: the same screens
-must come up, cursorable, on this repl's documents and, while attached, on
-the app's. Needs bin/owl and python3. Run from the repo root (make test).
+forms, so this drives `bin/owl repl --tui` on a pseudo-terminal and reads the
+screen (tests/termscreen.py): the same screens must come up, cursorable, on
+this repl's documents and, while attached, on the app's. The window face of
+the same app is tests/repl_gui_test.nim. Needs bin/owl (either build) and
+python3. Run from the repo root (make test).
 """
-import os, pty, re, select, shutil, signal, subprocess, sys, time
+import os, shutil, subprocess, sys, time
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.join(os.getcwd(), "tests"))
+from termscreen import PtyApp
 
 ROOT = os.getcwd()
 OWL = os.path.join(ROOT, "bin", "owl")
 BASE = os.path.join(ROOT, "nimcache", "owl_screens_test")
 APP = os.path.join(BASE, "app")
+RUN = b"\x1b[13;5u"      # Ctrl+Enter, as the kitty keyboard protocol sends it
 DOWN = b"\x1b[B"
 F1 = b"\x1bOP"
 F2 = b"\x1bOQ"
 ESC = b"\x1b"
+CTRL_A = b"\x01"
+CTRL_D = b"\x04"
+BACKSPACE = b"\x7f"
 
 failures = []
 passed = 0
@@ -29,75 +39,59 @@ def expect(cond, msg):
         print("FAILED:", msg)
 
 
-class Repl:
+class Repl(PtyApp):
     def __init__(self, cwd):
-        self.pid, self.fd = pty.fork()
-        if self.pid == 0:
-            os.chdir(cwd)
-            os.execv(OWL, ["owl", "repl"])
-        self.out = b""
-        self.read(1.5)
+        super().__init__([OWL, "repl", "--tui"], 110, 34, cwd=cwd, settle=1.0)
+        self.wait_for("> ", 5)
 
-    def read(self, t):
-        end = time.time() + t
-        while time.time() < end:
-            r, _, _ = select.select([self.fd], [], [], 0.05)
-            if r:
-                try:
-                    self.out += os.read(self.fd, 65536)
-                except OSError:
-                    return
+    def type(self, keys, wait=0.8):
+        return self.send(keys, wait)
 
-    def send(self, keys, wait=1.0):
-        mark = len(self.out)
-        os.write(self.fd, keys)
-        self.read(wait)
-        raw = self.out[mark:]
-        return re.sub(rb"\x1b\[[0-9;?<>=]*[A-Za-z]|\x1b\][^\x07]*\x07|\r", b"", raw).decode("utf8", "replace")
+    def run(self, code, wait=1.2):
+        return self.send(code + RUN, wait)
 
-    def close(self):
-        try:
-            os.kill(self.pid, signal.SIGKILL)
-            os.waitpid(self.pid, 0)
-        except OSError:
-            pass
+    def shows(self, needle, t=3.0):
+        return self.wait_for(needle, t)
 
 
 def cursor_row(screen):
-    # the selected item: the last view drawn, the line with the bar
+    # the selected row of a list: the one with the bar
     rows = [l for l in screen.split("\n") if "▌" in l]
-    return rows[-1] if rows else ""
+    return rows[0] if rows else ""
 
 
 def screens(r, where, doc):
-    s = r.send(b"items\n", 1.2)
-    expect(("%s · " % doc) in s and " items " in s, where + ": items opens the item view of " + doc + ":\n" + s[-600:])
-    expect("#1  ▌" in s, where + ": the first item is selected")
-    s = r.send(DOWN + DOWN, 0.8)
-    expect("#3  ▌" in cursor_row(s) or "#3  ▌" in s, where + ": the cursor moves down the items:\n" + s[-400:])
-    s = r.send(b"e", 1.0)
-    expect("editing in " + doc in s, where + ": e puts the item into the prompt:\n" + s[-300:])
-    r.send(ESC, 0.5)
-    r.send(b"\x15", 0.3)  # C-u: clear the prompt
-    s = r.send(b"(+ 40 2)\n", 1.0)
-    expect("=> 42" in s, where + ": code runs")
-    s = r.send(F2, 1.2)
-    expect("results · " in s and "(+ 40 2)" in s, where + ": F2 shows the results:\n" + s[-400:])
-    r.send(ESC, 0.6)
-    r.send(F1, 1.0)
-    r.send(b"items", 0.5)
-    s = r.send(b"\r", 1.2)
-    expect("items: which module?" in s, where + ": items from the menu asks which module:\n" + s[-400:])
+    r.run(b"items")
+    ok = r.shows("%s · " % doc) and r.shows(" items")
+    expect(ok, where + ": items opens the item view of " + doc + ":\n" + r.screen.text())
+    expect("#1" in cursor_row(r.screen.text()), where + ": the first item is selected:\n" + r.screen.text())
+    s = r.type(DOWN + DOWN)
+    expect("#3" in cursor_row(s), where + ": the cursor moves down the items:\n" + s)
+    r.type(b"e")
+    expect(r.shows("editing in " + doc), where + ": e puts the item into the prompt:\n" + r.screen.text())
+    r.type(CTRL_A + BACKSPACE, 0.5)   # clear the prompt
+    r.run(b"(+ 40 2)")
+    expect(r.shows("=> 42"), where + ": code runs:\n" + r.screen.text())
+    r.type(F2, 1.2)
+    expect(r.shows("results · ") and "(+ 40 2)" in r.screen.text(),
+           where + ": F2 shows the results:\n" + r.screen.text())
+    r.type(ESC)
+    r.type(F1, 1.0)
+    expect(r.shows("Commands · "), where + ": F1 opens the menu:\n" + r.screen.text())
+    r.type(b"items", 0.6)
+    r.type(b"\r", 1.2)
+    expect(r.shows("items: which module?"), where + ": items from the menu asks which module:\n" + r.screen.text())
     # Escape there means no module: items falls back to the active one
-    s = r.send(ESC, 1.0)
-    expect(("%s \u00b7 " % doc) in s, where + ": a cancelled pick shows the active document:\n" + s[-300:])
-    r.send(ESC, 0.6)
-    s = r.send(b"show\n", 1.2)
-    expect(("show: which item of %s?" % doc) in s, where + ": show picks an item of " + doc + ":\n" + s[-400:])
-    r.send(ESC, 0.6)
-    s = r.send(b"settings\n", 1.2)
-    expect("Settings" in s and "Record statements" in s, where + ": settings is a form")
-    r.send(ESC, 0.6)
+    r.type(ESC, 1.2)
+    expect(r.shows("%s · " % doc), where + ": a cancelled pick shows the active document:\n" + r.screen.text())
+    r.type(ESC)
+    r.run(b"show")
+    expect(r.shows("show: which item of %s?" % doc), where + ": show picks an item of " + doc + ":\n" + r.screen.text())
+    r.type(ESC)
+    r.run(b"settings")
+    expect(r.shows("Settings") and "Record statements" in r.screen.text(), where + ": settings is a form:\n" + r.screen.text())
+    r.type(ESC)
+    expect(r.shows("settings unchanged"), where + ": Escape cancels the form:\n" + r.screen.text())
 
 
 def main():
@@ -105,22 +99,41 @@ def main():
     os.makedirs(BASE)
     subprocess.run([OWL, "new", "app", "gui"], cwd=BASE, check=True, stdout=subprocess.DEVNULL)
     env = dict(os.environ, SDL_VIDEODRIVER="offscreen")
-    app = subprocess.Popen([OWL, "run"], cwd=APP, env=env, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, start_new_session=True)
+    app = subprocess.Popen([OWL, "run"], cwd=APP, env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           start_new_session=True)
+    r = None
     try:
         time.sleep(2)
         r = Repl(APP)
         screens(r, "local", "scratch")
-        s = r.send(b"attach %d\n" % app.pid, 1.5)
-        expect("attached to app" in s, "attach:\n" + s)
+        r.run(b"attach %d" % app.pid, 1.5)
+        expect(r.shows("attached to app"), "attach:\n" + r.screen.text())
         screens(r, "attached", "main")
-        s = r.send(b"items\n", 1.2)
-        r.send(DOWN * 6, 0.8)
-        s = r.send(b"d", 1.2)
-        expect("dropped" in s, "attached: d drops an item of the app's document:\n" + s[-300:])
-        r.send(b"stop\n", 1.5)
-        r.close()
+        r.run(b"items")
+        r.shows("main · ")
+        r.type(DOWN * 6)
+        r.type(b"d", 1.2)
+        expect(r.shows("dropped"), "attached: d drops an item of the app's document:\n" + r.screen.text())
+        r.run(b"stop", 1.5)
+        expect(r.shows("stopped app"), "stop closes the app:\n" + r.screen.text())
+        # leaving with an unsaved document asks first; Leave goes
+        r.run(b"x = 1")
+        r.type(b"\x11", 1.0)   # Ctrl+Q: closing the app asks the same
+        expect(r.shows("Leave the repl?"), "Ctrl+Q asks about unsaved documents:\n" + r.screen.text())
+        r.type(ESC, 0.8)
+        expect(r.wait_exit(0.5) is None and "Leave the repl?" not in r.screen.text(),
+               "Escape there stays:\n" + r.screen.text())
+        r.type(CTRL_D, 1.0)
+        expect(r.shows("Leave the repl?"), "Ctrl+D asks about unsaved documents:\n" + r.screen.text())
+        r.type(b"\x1b[C\r", 0.5)
+        status = r.wait_exit(5)
+        expect(status == 0, "Leave ends the repl (status %r)" % (status,))
+        expect(r.raw.endswith(b"\x1b[?1049l") or b"\x1b[?1049l" in r.raw[-200:],
+               "the terminal is given back (alternate screen left)")
     finally:
+        if r is not None:
+            r.kill()
         app.kill()
         app.wait()
     if failures:

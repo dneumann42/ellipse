@@ -539,6 +539,25 @@ the paced loop are the same. Only the surface under them changes.
 - restore :: the alternate screen, mouse reporting, raw mode and the
   cursor are undone on every exit: a normal one, Ctrl+Q, SIGTERM/SIGHUP,
   or a crash.
+- waiting :: no SDL in the terminal: the loop sleeps in =poll()= on the
+  watched descriptors itself (=fdwatch='s direct mode, =waitFds=), where a
+  window sleeps in SDL's queue and a helper thread wakes it.
+
+** Terminal-only builds
+
+Built with =-d:ellipseNoSdl= a program has no window backend: =withSdl=
+(=ellipse/platform/termmode=) is false, nothing links SDL3, SDL3_ttf or
+wayland-client, =terminalMode()= is always true, and the window-only calls
+(=showWindow=, =setWindowSize=, the native dialog glue, child processes)
+do nothing. owl is built so by default (=make build_owl=; =make
+build_owl_sdl= adds windows); =ldd bin/owl= shows only libc and libm.
+
+** Closing
+
+=setCloseHandler(f)= is asked when the person closes the app -- a window's
+close button, or Ctrl+Q in the terminal: =f= gives true to close now, false
+to keep running (it then calls =quit= when it is done asking). Termination
+signals always close. Owl: =on-close f=.
 
 When stdout is not a terminal the backend runs headless at
 =ELLIPSE_TUI_SIZE= (=120x40= by default), which is how the snapshot path
@@ -580,6 +599,15 @@ projects", "Runner and attach") and =src/owl/libraries/gui.owl=.
               Toggle "wifi" "Wifi" wifi
 
 #+end_src
+
+For code there is a monospaced font: =TextConfig.fontId = MonoFont= (owl:
+=(font = "mono")= on =text=), the first of =renderer.monoFontPaths= that
+opens; a terminal is monospaced anyway. =code-editor= is ellipse_ui's
+=editor= for owl (=EditorOpts.indentAfter= indents one level deeper after
+a line ending in =:=), =take-key chord= takes a key from the frame before
+the widgets see it, and =scroll-into-view= / =scroll-to-end= move a scroll
+container. The owl repl (=docs/repl.org=, "The repl app") is built on
+these.
 
 =apps/owl-gallery= is the widget gallery (=apps/gallery.nim=) written in
 owl, as a project: =make run_owl_gallery=, or =owl repl= there, then
