@@ -190,6 +190,29 @@ fun note text:
 fun show-error message:
     log-entry "error" message
 
+; --- failures ----------------------------------------------------------------------
+;
+; Code typed into a document that fails shows the whole report: the source
+; with an arrow at the place, and the calls that led there. A command that
+; fails shows one line instead, since the person needs what to do, not where
+; the repl's own code stopped. A refusal (refuse) is a situation the message
+; explains; anything else is a fault, whose line says `details` shows the
+; report, kept until the next failure.
+
+refused = nothing
+last-failure = nothing
+
+fun refuse message:
+    set refused message
+    error message
+
+fun command-failed message:
+    set last-failure (error-report)
+    if (= message refused):
+        log-entry "error" message
+        log-entry "error" (concat message " · details shows where")
+    set refused nothing
+
 ; Values show as owl code (see to-code), so they can be pasted back in.
 fun show value:
     when (<> value nothing):
@@ -225,7 +248,7 @@ screen-serial = 0
 
 fun open-screen s:
     when (not in-app):
-        error "this needs the repl app"
+        refuse "this needs the repl app (owl repl), not an attached session"
     set screen-serial (+ screen-serial 1)
     set screen (with s (serial = screen-serial))
 
@@ -303,7 +326,7 @@ fun answer-screen value:
 fun step f:
     fun run-it:
         try (f):
-            show-error (error-report)
+            command-failed failure
         (flush-output)
     capture-output run-it
     nothing
@@ -370,16 +393,24 @@ fun open-doc target:
     when (ends-with target ".owl"):
         file = absolute-path target
         when (not (file-exists file)):
-            error (concat "no file " file)
+            refuse (concat "no file " file " to open")
         add-module-path (parent-dir file)
         set name (slice (base-name file) 0 (- (length (base-name file)) 4))
-    load-module name
+    need-module name
     activate name
+    name
+
+; Loads name unless it is loaded; refuses a module there is no file for.
+fun need-module name:
+    when (not (has-module name)):
+        when (= (module-file name) nothing):
+            refuse (concat "no module " name " here; modules lists them, or open a path to an .owl file")
+        load-module name
     name
 
 fun switch-doc name:
     when (not (contains docs name)):
-        error (concat "no open document " name " (see docs)")
+        refuse (concat "no open document " name "; docs lists the open ones")
     activate name
 
 fun default-path name:
@@ -694,7 +725,7 @@ fun read-param cmd p args from-menu done:
     cond:
         readable = (call-reader cmd p got)
         p.optional = (done args)
-        true = (error (concat cmd.name " needs its " p.name ": " (usage cmd)))
+        true = (refuse (concat cmd.name " needs its " p.name ": " (usage cmd)))
 
 fun call-reader cmd p done:
     reader = eval-in cmd.scope p.reader
@@ -729,10 +760,7 @@ fun open-menu:
 fun module-or-active (name = nothing):
     if (= name nothing):
         active
-        do:
-            when (not (has-module name)):
-                load-module name
-            name
+        need-module name
 
 ; exit while attached detaches first; the program keeps running.
 fun leave:
@@ -789,7 +817,7 @@ fun change-settings x:
 
 fun try-command input:
     try (run-command (words (trim input))):
-        show-error (error-report)
+        command-failed failure
 
 fun try-code input:
     set last-input input
@@ -867,13 +895,22 @@ fun item-action name what item:
         true = nothing
 
 fun show-item key name:
-    echo (index (select-item (source-items (module-source name)) key) "text")
+    echo (index (select-item (need-item name key) key) "text")
 
 fun drop-and-note name key:
+    need-item name key
     note (concat "dropped " (index (drop-item name key) "header"))
 
 fun rerun-and-show name key:
+    need-item name key
     show (rerun-item name key)
+
+; The items of module name, which must have one named key (or #n).
+fun need-item name key:
+    xs = source-items (module-source name)
+    when (not (has-item xs key)):
+        refuse (concat "no item " key " in " name "; items lists them")
+    xs
 
 ; Puts text in the prompt with name's document active, so running it
 ; replaces what it was copied from.
@@ -924,7 +961,7 @@ fun result-views width:
 fun results-command:
     views = query (call-code "result-views" (max (- columns 8) 40))
     when (is-empty views):
-        error "no results yet"
+        refuse "no results yet: values your code gives back are kept here"
     sections = ([])
     for v (items views):
         append sections (section v.title v.text v)
@@ -1043,13 +1080,13 @@ fun read-project cmd done:
 fun read-known-project cmd done:
     known = (known-entries)
     when (is-empty known):
-        error "owl knows no projects yet"
+        refuse "owl knows no projects yet; open-project or new-project adds one"
     choose (concat cmd.name ": which project?") known done
 
 fun read-app cmd done:
     pids = (live-pids)
     cond:
-        (is-empty pids) = (error "no running owl programs; run starts the project's app")
+        (is-empty pids) = (refuse "no running owl programs; run starts the project's app")
         (= (length pids) 1) = (done (at pids 0))
         true = (choose "Attach to which program?" (app-entries pids) done)
 
@@ -1127,7 +1164,7 @@ fun settle-dirty dirty name done:
     buttons = [] "Save all" "Discard" "Stay"
     cond:
         (is-empty dirty) = (done)
-        (not in-app) = (error (concat unsaved "; save or drop them first"))
+        (not in-app) = (refuse (concat unsaved "; save or drop them first"))
         true = (confirm (concat "Switch to " name "?") ([] unsaved) buttons chosen)
 
 ; The old project's documents close and its modules unload; the current
@@ -1201,7 +1238,7 @@ fun attach-to pid:
         (detach)
     conn = connect pid
     when (= conn nothing):
-        error (concat "program " (to-string pid) " does not answer")
+        refuse (concat "program " (to-string pid) " does not answer; apps lists the running ones")
     name = app-name conn
     set remote ({} (conn = conn) (name = name) (prompt = "?"))
     remote-input ""
@@ -1211,7 +1248,7 @@ fun attach-to pid:
 
 fun detach:
     when (= remote nothing):
-        error "not attached"
+        refuse "not attached to a program; attach <pid> first"
     sock-close remote.conn.fd
     note (concat "detached from " remote.name "; it keeps running")
     set remote nothing
@@ -1247,12 +1284,12 @@ fun remote-query code:
     r = exchange remote.conn "query" code
     when (= r.answer nothing):
         (gone)
-        error "the program went away"
+        refuse "the program went away"
     set remote (with remote (conn = r.conn))
     text = r.answer
     nl1 = find text newline
     when (= (slice text 0 nl1) "error"):
-        error (slice text (+ nl1 1))
+        refuse (slice text (+ nl1 1))
     nl2 = find text newline (+ nl1 1)
     nl3 = find text newline (+ nl2 1)
     set remote (with remote (prompt = (slice text (+ nl1 1) nl2)))
@@ -1264,7 +1301,7 @@ fun remote-query code:
 
 fun stop-remote:
     when (= remote nothing):
-        error "not attached to a program (attach first)"
+        refuse "not attached to a program; attach <pid> first"
     exchange remote.conn "stop" ""
     name = remote.name
     sock-close remote.conn.fd
@@ -1276,7 +1313,7 @@ fun stop-remote:
 ; are saved first, since the app runs the files.
 fun run-project:
     when (= project nothing):
-        error "run needs a project: new-project <dir> gui, or project <dir>"
+        refuse "run needs a project: open-project, or new-project <dir> gui"
     save-all (filter-dirty (docs-in project))
     dir = (socket-dir)
     when (not (dir-exists dir)):
@@ -1294,9 +1331,9 @@ fun run-project:
     conn = connect pid
     while (= conn nothing):
         when (not (process-alive pid)):
-            error (concat project.name " exited: " (last-lines (read-file log) 12))
+            refuse (concat project.name " exited: " (last-lines (read-file log) 12))
         when (> tries 100):
-            error (concat project.name " did not start listening; see " log)
+            refuse (concat project.name " did not start listening; see " log)
         sleep-ms 100
         set tries (+ tries 1)
         set conn (connect pid)
@@ -1369,7 +1406,10 @@ interactive rerun (item = read-item):
 
 interactive reload (module? = read-module):
     "re-read a module's file, keeping state"
-    show-summary (reload-module (module-or-active module))
+    name = module-or-active module
+    when (= (module-path name) nothing):
+        refuse (concat name " has no file to reload from; save writes one")
+    show-summary (reload-module name)
 
 interactive modules:
     "list loaded modules and the project's modules"
@@ -1391,8 +1431,10 @@ interactive projects:
 interactive open-project (dir = read-project):
     "switch to a project: a known one, or the one in dir"
     root = known-root dir
-    when (and (is-known root) (not (file-exists (join-path root "project.owl")))):
-        error (concat "no project at " root " any more: move-project or forget-project it")
+    when (not (file-exists (join-path root "project.owl"))):
+        if (is-known root):
+            refuse (concat "no project at " root " any more: move-project or forget-project it")
+            refuse (concat "no project in " root " (no project.owl); new-project <dir> makes one")
     switch-project root
 
 interactive new-project (dir = read-new-project) kind?:
@@ -1402,6 +1444,8 @@ interactive new-project (dir = read-new-project) kind?:
 interactive move-project (name = read-known-project) (dir = read-directory):
     "tell owl a known project now lives in dir"
     local
+    when (not (file-exists (join-path (absolute-path dir) "project.owl"))):
+        refuse (concat "no project.owl in " (absolute-path dir) "; give the directory the project moved to")
     moved = move-project (known-root name) dir
     note (concat "project " moved.name " is now at " moved.root)
 
@@ -1453,6 +1497,12 @@ interactive clear:
     local
     set transcript ([])
 
+interactive details:
+    "show where the last command failed, with the calls that led there"
+    if (= last-failure nothing):
+        note "no command has failed"
+        show-error last-failure
+
 interactive help:
     "show the commands"
     (help)
@@ -1500,7 +1550,7 @@ fun serve-query code:
     failed = nothing
     fun run-it:
         try (set value (eval-in (module-scope "repl") (at (parse code) 0))):
-            set failed (error-report)
+            set failed failure
     output = capture-output run-it
     if (<> failed nothing):
         concat "error" newline failed

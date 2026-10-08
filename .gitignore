@@ -1,9 +1,6 @@
 bin/
 build/
-nimcache/
-nimcache-win/
-nimcache-tui/
-nimcache-tui-mnt/
+nimcache*/
 nimble.develop
 nimble.paths
 nimbledeps

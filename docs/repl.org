@@ -217,6 +217,14 @@ keeps it off the bar). =help=, the F1 menu, the menu bar, reading what is
 missing, logging the command it stood for and where it runs all come from
 that one definition.
 
+When a command fails it shows one line, never an error window. A
+refusal (=refuse= in =repl.owl=) is a situation the line explains, with
+what to do: "run needs a project: open-project, or new-project <dir> gui".
+Anything else is a fault, and its line ends "details shows where":
+=details= prints the whole report, the source with an arrow and the calls
+that led there. Code typed into a document still shows its whole report,
+since where it failed in your own code is the point.
+
 A statement is recorded by what it changed, not as history (=run-statement=
 in =live.owl=). The module's own bindings are compared before and after:
 - Nothing changed (a query such as =tasks=, or =echo=): nothing is recorded.

@@ -55,6 +55,25 @@ def commands():
     expect("use io" in out, "words past the parameters are ignored:\n" + out)
 
 
+def failures_shown():
+    out = repl(["run", "detach", "open nope", "show nothere", "open-project /tmp", "reload"])
+    expect("╭─" not in out, "a command that fails shows no error window:\n" + out)
+    for line in ["run needs a project: open-project, or new-project <dir> gui",
+                 "not attached to a program; attach <pid> first",
+                 "no module nope here",
+                 "no item nothere in scratch; items lists them",
+                 "no project in /tmp (no project.owl)",
+                 "scratch has no file to reload from; save writes one"]:
+        expect(line in out, "the failure says what to do: " + line + "\n" + out)
+    expect("details shows where" not in out, "a refusal is not a fault:\n" + out)
+    out = repl(["forget-project nope", "details"])
+    expect("details shows where" in out and "╭─" in out,
+           "a fault says details shows where, and details shows the report:\n" + out)
+    out = repl(["no-such-name 1"])
+    expect("╭─" in out and "unbound symbol: no-such-name" in out,
+           "code typed into a document still shows the whole report:\n" + out)
+
+
 def projects():
     out = owl("new", "one")
     out += owl("new", "two", "gui")
@@ -85,6 +104,7 @@ def main():
     shutil.rmtree(BASE, ignore_errors=True)
     os.makedirs(BASE)
     commands()
+    failures_shown()
     projects()
     if failures:
         sys.exit("repl commands tests failed: %d of %d" % (len(failures), passed + len(failures)))
