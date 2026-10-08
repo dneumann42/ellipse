@@ -8,7 +8,6 @@ use fs
 use modules
 use source
 use projects
-use repl
 use repl-app
 use term
 
@@ -22,8 +21,9 @@ fun usage:
     echo "                                gui makes a windowed app on ellipse_ui"
     echo "  repl [--tui]                  start an interactive session: in a window when"
     echo "                                owl is built with SDL, else (or with --tui) in"
-    echo "                                the terminal; piped input is read line by line"
+    echo "                                the terminal"
     echo "  run [<file>]                  evaluate an owl file, or the project's main module"
+    echo "  projects                      list the projects owl knows"
     echo "  modules                       list the project's modules"
     echo "  items <module>                list a module's definitions and statements"
     echo "  show <module> <name|#n>       print one item"
@@ -101,10 +101,20 @@ fun new-command next:
     kind = word next "a kind" true
     when (= kind nothing):
         set kind "cli"
-    new-project dir kind
+    remember-project (read-project (new-project dir kind))
     echo (concat "created " dir "/project.owl and its modules in " dir "/src")
     when (= kind "gui"):
         echo (concat "run it: cd " dir " && owl run   (or owl repl, then run)")
+
+; The projects owl knows (the repl and owl new add them), newest first.
+fun projects-command:
+    xs = (known-projects)
+    while (is-any xs):
+        p = pop-front xs
+        gone = if p.present:
+            ""
+            "  (moved or gone)"
+        echo (concat (pad p.name 16) p.root gone)
 
 fun modules-command:
     (need-project)
@@ -181,13 +191,6 @@ fun remove-command next:
         remove-item text key
     edit-module path edit
 
-; On a terminal the repl is the repl app (a window when owl has SDL and a
-; display, else the terminal); piped, it reads lines.
-fun repl-command:
-    if (is-terminal):
-        (repl-app)
-        (repl)
-
 fun dispatch arg next:
     cond:
         (= arg nothing) = (usage)
@@ -195,7 +198,8 @@ fun dispatch arg next:
         (<> arg.type "cmd") = (fail (concat "unknown option: " arg.flag))
         (= arg.name "new") = (new-command next)
         (= arg.name "modules") = (modules-command)
-        (= arg.name "repl") = (repl-command)
+        (= arg.name "projects") = (projects-command)
+        (= arg.name "repl") = (repl-app)
         (= arg.name "run") = (run-command next)
         (= arg.name "items") = (items-command next)
         (= arg.name "show") = (show-command next)

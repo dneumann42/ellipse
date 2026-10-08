@@ -3,15 +3,18 @@
 ## the running program, detach and come back to the state they left; two
 ## clients at once; a file saved on disk reloads into the running app; stop
 ## closes it and removes its socket. Headless (SDL offscreen). Needs bin/owl.
+## The repl sessions run without the app, through tests/repl_driver.owl.
 
 import std/[syncio, strutils, os, osproc, envvars]
 import ./testutils
 
 var owl = ""
+var driver = ""
 var base = ""
 var dir = ""
 try:
   owl = absolutePath("bin/owl")
+  driver = absolutePath("tests/repl_driver.owl")
   base = absolutePath("nimcache/owl_attach_test")
   dir = base & "/app"
 except:
@@ -27,7 +30,7 @@ proc sh(cmd: string; input = ""): string =
     expect false, "command ran: " & cmd
 
 proc repl(input: string): string =
-  sh("cd " & quoteShell(dir) & " && " & quoteShell(owl) & " repl", input)
+  sh("cd " & quoteShell(dir) & " && " & quoteShell(owl) & " run " & quoteShell(driver), input)
 
 proc runtimeDir(): string =
   result = ""
@@ -40,6 +43,10 @@ proc runtimeDir(): string =
   result.add "/owl"
 
 discard sh("rm -rf " & quoteShell(base) & " && mkdir -p " & quoteShell(base))
+try:
+  putEnv("XDG_DATA_HOME", base & "/data")   # the projects owl knows, kept out of ~
+except:
+  discard
 discard sh("cd " & quoteShell(base) & " && " & quoteShell(owl) & " new app gui")
 expect fileExists(dir & "/src/main.owl") and fileExists(dir & "/src/widgets.owl"),
   "owl new app gui made main and widgets"
@@ -68,7 +75,7 @@ expect "main" in second and "modified" in second, "the app's main document holds
 
 # Two clients at once: one holds a connection open while another works.
 let holder = sh("(cd " & quoteShell(dir) & " && (printf 'attach " & pidText & "\\nclicks\\n'; sleep 2; printf 'clicks\\n') | " &
-  quoteShell(owl) & " repl > " & quoteShell(base & "/holder.out") & " 2>&1) > /dev/null 2>&1 & echo started")
+  quoteShell(owl) & " run " & quoteShell(driver) & " > " & quoteShell(base & "/holder.out") & " 2>&1) > /dev/null 2>&1 & echo started")
 discard holder
 discard sh("sleep 0.5")
 let other = repl("attach " & pidText & "\nset clicks 7\ndetach\n")

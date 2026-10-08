@@ -178,7 +178,8 @@ widget focusable numberField(value: float, step = 1.0,
     container(row(width = grow(), height = fit(), alignX = right)):
       let cfg = TextConfig(fontSize: t.text.control, color: t.palette.textColor,
         wrap: noWrap, justify: justifyRight)
-      textElement(if focused(id): numBuffer else: fmtVal(result, whole), cfg)
+      textElement(keepLine(if focused(id): numBuffer else: fmtVal(result, whole)),
+                  cfg)
       if focused(id):
         caretOverlay(textChildId(textChildId(id.id)), numBuffer, cfg)
     stepper(decId, "-")

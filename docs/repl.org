@@ -98,12 +98,19 @@ current directory upwards.
 - =new-project <dir>= creates =project.owl= and =src/main.owl= in dir and
   switches to it. In the repl app, a bare =new-project= asks for the
   directory and whether it is a GUI app.
-- =project= shows the current project. =project <dir>= switches to the
-  project whose =project.owl= is in dir. In the repl app, a bare =project=
-  picks from the current project, the ones visited this session, the ones
-  under the current directory, the current one's siblings, or a typed path.
+- =project= shows the current project. =open-project <dir>= switches to
+  the project whose =project.owl= is in dir, or to a known project by name.
+  In the repl app, a bare =open-project= picks from the known projects, the
+  ones under the current directory, the current one's siblings, or a typed
+  path.
+- owl remembers the projects it has seen across runs, newest first, in
+  =$XDG_DATA_HOME/owl/projects.owl= (=~/.local/share/owl/projects.owl=):
+  =owl new=, =new-project=, opening a project and starting the repl in one
+  add it. =projects= (or =owl projects=) lists them; one whose directory is
+  gone is marked. =move-project <name> <dir>= points owl at its new
+  directory, =forget-project <name>= drops it (its files stay).
 - A switch closes the old project's documents. Unsaved ones are offered for
-  saving (Save all / Discard / Stay); piped, the switch is refused. It then
+  saving (Save all / Discard / Stay); a served session refuses. It then
   unloads the old project's modules (each runs its =on-unload=), so a module
   name like =main= loads afresh from the new project. It swaps the search
   path and makes the new root the current directory, so relative paths read
@@ -174,14 +181,39 @@ is a command name.
 | =rerun <key>=            | evaluate an item again                            |
 | =reload [module]=        | re-read a module from its file, keeping state     |
 | =modules=                | loaded modules and the project's modules          |
+| =project=                | show the current project                          |
+| =projects=               | list the projects owl knows                       |
+| =open-project <dir>=     | switch to a project (a known one by name)         |
+| =new-project <dir> [gui]= | create a project and switch to it                |
+| =move-project <name> <dir>= | a known project moved to dir                   |
+| =forget-project <name>=  | stop listing a known project                      |
 | =run=                    | start the project's app and attach to it          |
 | =apps=                   | list running owl programs                         |
-| =attach [pid]=           | send input to a running program instead           |
+| =attach <pid>=           | send input to a running program instead           |
 | =detach=                 | leave it running and work here again              |
 | =stop=                   | close the attached program                        |
 | =settings=               | the repl's settings (a form)                      |
 | =clear=                  | clear the transcript                              |
 | =menu=, =help=, =exit=   | the command menu, the commands, leave             |
+
+Each command is made with =interactive= in =repl.owl=, the way Emacs makes
+a function a command:
+
+#+begin_src owl
+interactive show (item = read-item) module?:
+    "print one item"
+    show-item item (module-or-active module)
+#+end_src
+
+The head names the parameters, bound from the words typed after the
+command: =x= must be given, =x?= may be left out. =(x = reader)= names the
+fun that reads x on a screen when it is missing: always when it must be
+given, from the menu only when it may be left out. The body opens with the
+help text and may say =local= (runs in this repl even while attached) or
+=screens= (runs here while attached, its screens reaching the program's
+documents through =query=). =help=, the menu, reading what is missing,
+logging the command it stood for and where it runs all come from that one
+definition.
 
 A statement is recorded by what it changed, not as history (=run-statement=
 in =live.owl=). The module's own bindings are compared before and after:
@@ -194,39 +226,46 @@ in =live.owl=). The module's own bindings are compared before and after:
 =items= shows a module's source in a scrollable view; ↑↓ select items and
 PgUp/PgDn scroll. Enter or e edits an item: its text goes into the prompt,
 and running it replaces the item. c copies it (the clipboard; OSC 52 in a
-terminal), d drops it, r reruns it; the view's buttons do the same. =results= (or F2) shows the printed results the same way,
-each under its input as a =;= comment. Editing a result of a bare name the
-document binds pre-fills =name = value=, so running it records that binding.
-Piped, =items= prints the source with item numbers in the margin.
+terminal), d drops it, r reruns it; the view's buttons do the same.
+=results= (or F2) shows the printed results the same way, each under its
+input as a =;= comment. Editing a result of a bare name the document binds
+pre-fills =name = value=, so running it records that binding.
 
 Opening another module and typing a definition patches the running module,
 and since imports are live, every user of it sees the change.
 
 * The repl app
 
-On a terminal =owl repl= is an ellipse_ui app written in owl
-(=scripts/repl-app.owl=): it takes over the terminal, or opens a window
-when owl is built with SDL (=make build_owl_sdl=) and there is a display.
-=owl repl --tui= keeps it in the terminal. Piped input is read line by
-line as before (a line ending in =:= opens a block that runs to the next
-empty line), with nothing asked.
+=owl repl= is an ellipse_ui app written in owl (=scripts/repl-app.owl=):
+it takes over the terminal, or opens a window when owl is built with SDL
+(=make build_owl_sdl=) and there is a display. =owl repl --tui= keeps it
+in the terminal. Without a terminal or a window it refuses to start.
 
 The session (=scripts/repl.owl=) never draws. Where it needs an answer -- a
 picked module, a typed name, a form, a confirmation -- it opens a /screen/,
 a record of kind and title with a continuation (=done=), and the app draws
 it and calls the continuation with the answer, or with nothing on Escape.
 Everything the session shows is an entry of its transcript (input, printed
-output, value, note, error); piped, the same lines are printed. The app
-calls the session through =repl-*= functions, so it sees the live state.
+output, value, note, error); a served session prints them instead. The app
+calls the session through =repl-*= functions, so it sees the live state;
+=tests/repl_driver.owl= drives the same functions without the app.
 
 | Area       | What                                                          |
 |------------+---------------------------------------------------------------|
 | header     | the project, unsaved documents, the keys                      |
 | transcript | inputs at their prompts, output, results as owl code; the     |
 |            | wheel scrolls it, and it follows new lines                    |
+| documents  | beside the transcript: a tab per open document (• unsaved)    |
+|            | over the active one's items; a tab switches to its document.  |
+|            | Alt+O gives it the keys: it is then the =items= view (same    |
+|            | code), and Escape, C-g or a click on the prompt gives them    |
+|            | back.                                                         |
+|            | Attached, it shows the app's documents. Hidden below 80       |
+|            | columns and while a screen is open                            |
 | prompt     | where input goes (the active document, or the attached app),  |
 |            | then a code editor (ellipse_ui's =editor=, monospaced)        |
-| screens    | take the transcript's place until answered or cancelled       |
+| screens    | take the transcript's and documents' place until answered or  |
+|            | cancelled                                                     |
 
 Keys at the prompt:
 - Enter adds a line, indented like the one above and one level deeper
@@ -234,7 +273,15 @@ Keys at the prompt:
   editor's own keys work: selection, undo, Emacs motions, the clipboard.
 - Ctrl+Up / Ctrl+Down (or Alt+P / Alt+N, or Up on the first line and Down
   on the last) walk the history.
-- F1 or Alt+X opens a filterable menu of every command; F2 the results.
+- F1 or Alt+X opens a filterable menu of every command; F2 the results;
+  F3 shows or hides the documents.
+- Ctrl+PgUp / Ctrl+PgDn switch to the previous / next document.
+- Alt+O moves the keys to the document panel and back.
+
+Keys in the =items= view and the focused document panel: Up/Down or
+C-p/C-n move, PgUp/PgDn or M-v/C-v page, Home/End or M-</M-> go to the
+ends; Enter or e edits (the item goes to the prompt), c copies, d drops,
+r reruns; Escape or C-g closes.
 - Ctrl+D on an empty prompt leaves; so do =exit=, Ctrl+Q and the window's
   close button, each asking first when documents are unsaved (Save all /
   Leave / Stay).
@@ -242,7 +289,8 @@ Keys at the prompt:
 Screens:
 - A command missing its argument opens a picker: modules for =open=,
   =items=, =reload=; documents for =switch=; the active document's items
-  for =show=, =drop=, =rerun=; projects for =project=. Typing filters (label
+  for =show=, =drop=, =rerun=; projects for =open-project=, known ones
+  for =move-project= and =forget-project=. Typing filters (label
   matches rank first, then hints), ↑↓ move, Enter or a click picks. The
   equivalent typed command is shown, so the menu teaches the text form.
 - =new= and =save= ask from the menu; =new-project= and =settings= are

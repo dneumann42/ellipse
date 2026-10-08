@@ -3,6 +3,7 @@ build/
 nimcache/
 nimcache-win/
 nimcache-tui/
+nimcache-tui-mnt/
 nimble.develop
 nimble.paths
 nimbledeps

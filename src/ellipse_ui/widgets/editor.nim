@@ -852,7 +852,7 @@ widget editor(id: ElementId, text: string,
       padding = pads)
       .clip(horizontal = not opts.wrap, vertical = true,
             childOffset = currentScrollOffset())):
-    textElement(s, TextConfig(fontSize: size, color: t.palette.textColor,
+    textElement(keepLine(s), TextConfig(fontSize: size, color: t.palette.textColor,
                               fontId: opts.fontId, wrap: cfg.wrap))
     if mOwner == id.id:
       # Selection stays visible (it washes the text, dialogs sit above it

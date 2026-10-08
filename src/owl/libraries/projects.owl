@@ -1,6 +1,7 @@
 use base
 use math
 use strings
+use iterators
 use fs
 use modules
 
@@ -247,6 +248,18 @@ fun fill-template lines name:
         set i (+ i 1)
     out
 
+fun main-template name:
+    fill-template:
+        []:
+            "use io"
+            "use base"
+            "use math"
+            "use strings"
+            ""
+            "; The module `owl run` starts. Modules of src/ join it with `use`."
+            "echo ^NAME^"
+        name
+
 fun gui-main-template name:
     fill-template ([] "use base" "use math" "use strings" "use io" "use gui" "use widgets" "" "; The app state is plain bindings: a reload keeps their values, so it" "; survives editing this file or patching it from an attached repl." "clicks = 0" "dark = true" "" "; Called every frame. Redefine it (save the file, or type a new fun view" "; into an attached repl) and the next frame shows it." "fun view:" "    handle-events:" "        event Bumped e:" "            set clicks (+ clicks e.by)" "        column (width = grow) (height = grow) (padding = 24) (gap = 16) (bg = ^bg^):" "            heading ^NAME^ 1" "            caption ^Edit src/main.owl and save, or run owl repl, then run.^" "            Counter ^clicks^ ^Clicks^ clicks" "            set dark (switch ^dark^ ^Dark^ dark)" "" "run-app (title = ^NAME^):" "    (view)") name
 
@@ -269,6 +282,75 @@ fun modules-under dir (prefix = ""):
 fun project-modules project:
     modules-under project.source
 
+; --- known projects -----------------------------------------------------------------
+;
+; The projects owl knows across runs, newest first, kept as owl data in
+; $XDG_DATA_HOME/owl/projects.owl (~/.local/share/owl/projects.owl): a list
+; of records of name and root. A project whose directory moved stays known
+; under its old root until move-project points it at the new one.
+
+fun projects-file:
+    dir = env-var "XDG_DATA_HOME"
+    when (or (= dir nothing) (= dir "")):
+        set dir (join-path (home-dir) ".local/share")
+    join-path dir "owl/projects.owl"
+
+; Each record also says whether its root still holds a project.
+fun known-projects:
+    out = ([])
+    for p (items (read-known)):
+        append out (with p (present = (file-exists (join-path p.root "project.owl"))))
+    out
+
+fun read-known:
+    file = (projects-file)
+    found = ([])
+    when (file-exists file):
+        try (set found (eval (at (parse (read-file file)) 0))):
+            set found ([])
+    found
+
+fun write-known xs:
+    file = (projects-file)
+    make-dir (parent-dir file)
+    write-file file (concat (to-code xs 100) (char 10))
+
+fun without-root xs root:
+    out = ([])
+    for p (items xs):
+        when (<> p.root root):
+            append out p
+    out
+
+; Puts a project (a record from read-project) first among the known ones.
+fun remember-project project:
+    known = without-root (read-known) project.root
+    write-known (concat ([] ({} (name = project.name) (root = project.root))) known)
+    project
+
+fun forget-project root:
+    known = (read-known)
+    when (= (length (without-root known root)) (length known)):
+        error (concat "owl does not know a project at " root)
+    write-known (without-root known root)
+
+; The known project at root now lives in dir, which must hold its project.owl.
+fun move-project root dir:
+    moved = project-at dir
+    out = ([])
+    found = false
+    for p (items (read-known)):
+        if (= p.root root):
+            do:
+                set found true
+                append out ({} (name = moved.name) (root = moved.root))
+            when (<> p.root moved.root):
+                append out p
+    when (not found):
+        error (concat "owl does not know a project at " root)
+    write-known out
+    moved
+
 export:
     join-path = join-path
     parent-dir = parent-dir
@@ -284,3 +366,7 @@ export:
     close-project = close-project
     use-project = use-project
     projects-under = projects-under
+    known-projects = known-projects
+    remember-project = remember-project
+    forget-project = forget-project
+    move-project = move-project

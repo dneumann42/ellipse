@@ -1,7 +1,7 @@
 ## The repl app in a window (SDL, offscreen): typing and running code, the
 ## item view with its cursor and edit, F2 results, the F1 menu into the
-## settings form, Escape out of a screen, and Ctrl+D with an unsaved
-## document asking first. The terminal face is tests/repl_screens_test.py.
+## settings form, Escape out of a screen, the document panel, and Ctrl+D
+## with an unsaved document asking first. The terminal face is tests/repl_screens_test.py.
 ## Screenshots of each screen land in nimcache/repl_gui_*.bmp.
 
 import std/[syncio, envvars, options, strutils, os]
@@ -117,6 +117,28 @@ proc script() {.raises.} =
   key(KeyEvent(kind: kevEnter))
   expect "* x 2" in transcriptText(), "the picked item is shown"
   expect "show double" in transcriptText(), "with the command it stood for:\n" & transcriptText()
+
+  # the document panel: a tab per document; Ctrl+PgUp/PgDn switch, F3 hides it
+  run("new other")
+  expect "other" in stringify(appVar("status")), "the panel lists the new document"
+  key(KeyEvent(kind: kevPageUp, ctrl: true))
+  expect "switch scratch" in transcriptText(), "Ctrl+PgUp switches:\n" & transcriptText()
+  shot("documents")
+  key(KeyEvent(kind: kevF3))
+  expect not toBool(appVar("show-docs")), "F3 hides the panel"
+  key(KeyEvent(kind: kevF3))
+  # Alt+O gives the panel the keys; it works the items like the items view
+  key(KeyEvent(kind: kevLetter, ch: 'o', alt: true))
+  expect toBool(appVar("in-docs")), "Alt+O focuses the panel"
+  key(KeyEvent(kind: kevLetter, ch: '<', alt: true))
+  key(KeyEvent(kind: kevLetter, ch: 'n', ctrl: true))
+  expect toNumber(appVar("doc-selected")) == 1.0, "M-< then C-n selects the second item"
+  shot("panel")
+  key(KeyEvent(kind: kevText, text: "e"))
+  expect not toBool(appVar("in-docs")) and toStr(appVar("draft")) == "use base",
+    "e edits the item in the prompt: " & stringify(appVar("draft"))
+  key(KeyEvent(kind: kevLetter, ch: 'a', ctrl: true))
+  key(KeyEvent(kind: kevBackspace))
 
   key(KeyEvent(kind: kevLetter, ch: 'd', ctrl: true))
   expect screenTitle() == "Leave the repl?", "Ctrl+D with an unsaved document asks: " & screenTitle()

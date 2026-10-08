@@ -471,6 +471,10 @@ proc applyKeys(text: sink string, evs: seq[KeyEvent],
   ## selection while Shift is held, as with the arrow keys.
   result = EditResult(text: text)
   var s = result.text
+  # the caller may have swapped the text since the caret was placed (a
+  # screen reopening with the same field id and a fresh value): clamp first
+  caret = min(caret, s.len)
+  selAnchor = min(selAnchor, s.len)
   if evs.len > 0:
     blinkStart = getMonoTime().ticks   # a solid caret while keys arrive
   for ev in evs:
@@ -622,7 +626,9 @@ proc caretGeom*(text: string, pos: int, cfg: TextConfig,
   if not ctx.measureTextInstalled():
     return CaretGeom()
   result = CaretGeom()
-  let m = measureTextCached(ctx, text, cfg)
+  # empty text measures zero high; the field lays out a space in its place
+  # (`keepLine`), so take the line metrics from that
+  let m = measureTextCached(ctx, if text.len == 0: " " else: text, cfg)
   let lineHeight =
     if cfg.lineHeight > 0 and not ctx.gridOn: float32(cfg.lineHeight)
     else: m.unwrapped.height     # on a terminal grid every line is a row
@@ -891,12 +897,19 @@ proc tickBox*(checked: bool, box: float32 = activeTheme.metrics.checkSize,
         .bg(t.palette.accent).corner(t.radii.tick))
       closeElement()
 
+proc keepLine*(shown: string): string =
+  ## `shown`, or a lone space when it is empty: empty text lays out zero
+  ## high, so an empty field would collapse (a terminal field to its bare
+  ## borders) and its caret would hang below the box. A space keeps one
+  ## line's height in place.
+  if shown.len == 0: " " else: shown
+
 proc fieldText*(text, placeholder: string, isFocused: bool): (string, Color) =
   ## What a field shows: its text, or the placeholder in the dim colour
-  ## while empty and unfocused.
+  ## while empty and unfocused -- never empty text (see `keepLine`).
   if not isFocused and text.len == 0:
-    return (placeholder, dimColor)
-  return (text, textColor)
+    return (keepLine(placeholder), dimColor)
+  return (keepLine(text), textColor)
 
 proc fieldFocus*(id: ElementId, text: string, tabIndex: int = 0): bool =
   ## The focus side of the edit engine for one field: registers it on the

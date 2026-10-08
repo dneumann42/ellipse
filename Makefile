@@ -121,6 +121,7 @@ test: setup bin/owl
 	SDL_VIDEODRIVER=offscreen ./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/repl_gui_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/attach_test.nim
 	python3 -I ./tests/repl_screens_test.py
+	python3 -I ./tests/repl_commands_test.py
 	$(MAKE) bin/gallery
 	python3 -I ./tests/tui_backend_test.py
 
