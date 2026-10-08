@@ -1,6 +1,6 @@
 import std/[tables, syncio, options]
 import std/private/oscommons
-import owl/[objects, reader, evaluator]
+import owl/[objects, reader, evaluator, errors]
 
 type
   Module* = ref object
@@ -42,11 +42,30 @@ proc addForms*(m: Module, forms: seq[Object]): Module =
   for f in forms:
     result.forms.add f
 
-proc addSource*(m: Module, source: string): Module {.raises.} =
-  let parsed = parseOwl(source)
+# The name a module's source goes by in error reports: its file, or <name>
+# for one built into owl or made in memory.
+proc sourceName*(m: Module): string =
+  if m.path.len > 0: m.path else: "<" & m.name & ">"
+
+# readSource source name: the forms of an owl source, or a read error raised
+# (see readForms).
+#
+# internal marks a source built into owl: the calls in it are left out of the
+# traces of errors in other code.
+proc readSource*(source: string, name: string, internal: bool = false): seq[Object] {.raises.} =
+  let parsed = readForms(source, name, internal)
   if not parsed.isOk:
-    fail("module " & m.name & ": " & parsed.error("parse error"))
-  result = addForms(m, parsed.get(@[]))
+    raiseError(parsed.error(owlError(ReadError, "")))
+  result = parsed.get(@[])
+
+proc addSource*(m: Module, source: string): Module {.raises.} =
+  result = addForms(m, readSource(source, sourceName(m)))
+  result.source.add source
+
+# addLibrarySource m source: addSource for a module built into owl (see
+# readSource's internal).
+proc addLibrarySource*(m: Module, source: string): Module {.raises.} =
+  result = addForms(m, readSource(source, sourceName(m), true))
   result.source.add source
 
 proc addFile*(m: Module, path: string): Module {.raises.} =
@@ -58,8 +77,8 @@ proc addFile*(m: Module, path: string): Module {.raises.} =
     failed = true
   if failed:
     fail("module " & m.name & ": cannot open file: " & path)
+  m.path = path
   result = addSource(m, source)
-  result.path = path
 
 proc addExport*(m: Module, name: string, value: Object): Module =
   result = m
@@ -182,7 +201,7 @@ proc registerExports(m: Module) {.raises.} =
     elif isExportForm(f):
       for e in exportEntries(f):
         if not isPair(e) or not isSymbol(car(e)):
-          fail("module " & m.name & ": export needs (name = value) forms")
+          errAt(e, "module " & m.name & ": export needs (name = value) forms", CompileError)
         if isSymbol(cdr(e)):
           exportName(m.exports, car(e), cdr(e))
 
@@ -191,7 +210,8 @@ proc runExportForm(m: Module, f: Object) {.raises.} =
     let publicName = car(e)
     if isSymbol(cdr(e)):
       if not has(m.env, cdr(e)):
-        fail("module " & m.name & " exports an unbound name: " & toSymbol(cdr(e)))
+        raiseError(CompileError, "module " & m.name & " exports an unbound name: " &
+          toSymbol(cdr(e)), valuePlace(e))
     else:
       # An exported expression is evaluated once, into a binding of its own.
       define(m.env, publicName, eval(cdr(e), m.env))
@@ -233,10 +253,14 @@ proc evaluateModule(lib: Library, m: Module) {.raises.} =
     for dep in lib.modules.values:
       if dep.name == d:
         evaluateModule(lib, dep)
-  runModuleForms(m, lib)
-  m.evaluating = false
-  m.evaluated = true
-  runHook(m, "on-load", @[])
+  try:
+    runModuleForms(m, lib)
+    m.evaluating = false
+    m.evaluated = true
+    runHook(m, "on-load", @[])
+  except:
+    sealError()
+    raise ValueError
 
 # unload lib name runs the module's on-unload hook and takes it out of lib, so
 # a later `use name` loads it afresh from the search paths. Scopes that
@@ -254,13 +278,19 @@ proc loadDeps(lib: Library, m: Module) {.raises.}
 # ensureLoaded lib name makes sure a module of that name is in lib, reading
 # it and, in turn, the modules it uses from the search paths. Nothing is
 # evaluated yet.
-proc ensureLoaded(lib: Library, name: string, user: string) {.raises.} =
+#
+# useForm is the `use` naming it, where the error points when it is unknown.
+proc ensureLoaded(lib: Library, name: string, user: string,
+    useForm: Object = nothing()) {.raises.} =
   if lib.modules.hasKey(name):
     return
   let path = moduleFile(lib, name)
   if path.len == 0:
+    let at = itemPlace(useForm, findItem(useForm, symbol(name)))
     if user.len > 0:
-      fail("module " & user & " uses unknown module " & name)
+      raiseError(CompileError, "module " & user & " uses unknown module " & name, at)
+    if at.isKnown:
+      raiseError(CompileError, "unknown module " & name, at)
     fail("unknown module " & name)
   let m = newModule(name).addFile(path)
   lib.add m
@@ -271,7 +301,7 @@ proc loadDeps(lib: Library, m: Module) {.raises.} =
   for f in m.forms:
     if isUseForm(f):
       for name in useNames(f):
-        ensureLoaded(lib, name, m.name)
+        ensureLoaded(lib, name, m.name, f)
         if name notin m.deps:
           m.deps.add name
 
@@ -292,8 +322,10 @@ proc evaluate*(lib: Library) {.raises.} =
 
 # require lib name is `use name` from the outside: the module, loaded from
 # the search paths if needed, and evaluated.
-proc require*(lib: Library, name: string): Module {.raises.} =
-  ensureLoaded(lib, name, "")
+#
+# useForm is the `use` it is for, if any: an unknown module is reported there.
+proc require*(lib: Library, name: string, useForm: Object = nothing()): Module {.raises.} =
+  ensureLoaded(lib, name, "", useForm)
   let found = findModule(lib, name)
   if found == nil:
     fail("unknown module " & name)
@@ -308,7 +340,7 @@ proc runProgram*(lib: Library, forms: seq[Object]): ref Environment {.raises.} =
   for f in forms:
     if isUseForm(f):
       for name in useNames(f):
-        discard require(lib, name)
+        discard require(lib, name, f)
   result = newEnvironment()
   hoistDefinitions(result, forms)
   useFormsIn(result, forms, lib)
@@ -319,4 +351,8 @@ proc runProgram*(lib: Library, forms: seq[Object]): ref Environment {.raises.} =
     if isUseForm(f):
       continue
     rest.add f
-  discard evalForms(result, rest)
+  try:
+    discard evalForms(result, rest)
+  except:
+    sealError()
+    raise ValueError

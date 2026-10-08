@@ -83,7 +83,7 @@ fun answer value:
 fun safely f:
     try (f):
         do:
-            repl-error failure
+            repl-error (error-report)
             when (<> (repl-screen) nothing):
                 answer nothing
 
@@ -156,7 +156,7 @@ fun entry-view e:
     cond:
         (= k "input") = (input-view e)
         (= k "value") = (marked "=> " "dim" e.text "text")
-        (= k "error") = (marked "error: " "#ff6b6b" e.text "#ffb4b4")
+        (= k "error") = (text e.text (color = "#ffb4b4") (font = "mono"))
         (= k "note") = (text e.text (color = "dim") (font = "mono"))
         (= k "command") = (marked "› " "dim" e.text "dim")
         true = (text e.text (font = "mono"))

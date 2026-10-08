@@ -1,5 +1,5 @@
 import std/[syncio, strutils, tables, os, envvars]
-import owl/[objects, evaluator, modules]
+import owl/[objects, evaluator, modules, errors]
 import ellipse_ui/app
 
 # The ellipse_ui toolkit as owl sees it: layout elements, the stock
@@ -21,18 +21,18 @@ import ellipse_ui/app
 
 # --- errors across Nim callbacks ------------------------------------------------
 
-var pending = ""
+var pending = owlError(RuntimeError, "")
 var hasPending = false
 
 proc stash() =
   if not hasPending:
     hasPending = true
-    pending = lastErrorMessage
+    pending = currentError
 
 proc rethrow() {.raises.} =
   if hasPending:
     hasPending = false
-    err(pending)
+    raiseError(pending)
 
 proc runQuietly(fn: Object) =
   try:
@@ -1302,7 +1302,7 @@ proc callLater(fn: Object, args: seq[Object]) =
     try:
       discard invoke(fn, args)
     except:
-      writeLine(stderr, "owl error in a dialog callback: " & lastErrorMessage)
+      errorReport("owl error in a dialog callback:\n" & errorText(colorErrors))
 
 proc dialogFnOf(fn: Object): DialogFn =
   result = proc () {.closure, raises.} =
@@ -1469,11 +1469,11 @@ proc isDialogProcessBuiltin(env: ref Environment, args: seq[Object], bodyStart: 
 
 # --- the app ----------------------------------------------------------------------------
 
+# Why the last frame's view failed ("" when it did not): the message, and
+# the whole error window shown over the view.
 var frameError = ""
+var frameReport = ""
 var reportedError = ""
-
-proc silent(msg: string) =
-  discard
 
 proc drawError() =
   let t = activeTheme
@@ -1482,7 +1482,9 @@ proc drawError() =
     .bg(rgb(120, 24, 24)).floating(attachRoot, zIndex = 100))
   textElement("owl error (fix it and the view comes back):",
     TextConfig(fontSize: t.text.label, color: rgb(255, 210, 210)))
-  textElement(frameError, TextConfig(fontSize: t.text.control, color: rgb(255, 255, 255)))
+  # the window's lines as they are: a word wrap would move the arrow
+  textElement(frameReport, TextConfig(fontSize: t.text.control, color: rgb(255, 255, 255),
+    fontId: MonoFont, wrap: newlineWrap))
   closeElement()
 
 var currentView = nothing()
@@ -1496,19 +1498,18 @@ proc viewProc(): AppFn =
   # the error over the window and is printed once; the next frame tries
   # again, so a fix (a patch, a saved file) brings the view back.
   result = proc () {.closure, raises.} =
-    let saved = errorReport
-    errorReport = silent
     hasPending = false
     try:
       discard invoke(currentView, @[])
       frameError = ""
+      frameReport = ""
     except:
-      frameError = lastErrorMessage
-    errorReport = saved
+      frameError = currentError.message
+      frameReport = errorText()
     if frameError.len > 0:
-      if frameError != reportedError and not quietRun:
-        writeLine(stderr, "owl error in the view: " & frameError)
-        reportedError = frameError
+      if frameReport != reportedError and not quietRun:
+        errorReport("owl error in the view:\n" & errorText(colorErrors))
+        reportedError = frameReport
       drawError()
     else:
       reportedError = ""
@@ -1873,4 +1874,4 @@ proc guiModule*(source: string): Module {.raises.} =
   result = newModule("gui")
   installGui(result.env)
   exportAllBindings(result)
-  result = addSource(result, source)
+  result = addLibrarySource(result, source)

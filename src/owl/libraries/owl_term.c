@@ -23,6 +23,10 @@ int owl_term_is_tty(void) {
   return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
 }
 
+int owl_term_stderr_is_tty(void) {
+  return isatty(STDERR_FILENO);
+}
+
 /* on != 0 switches stdin to raw mode, 0 restores the original settings. The
  * original is also restored at exit, so a crash in owl code never leaves the
  * shell raw. */

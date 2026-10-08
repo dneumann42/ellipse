@@ -1,19 +1,96 @@
 import std/[options, syncio, strutils]
-import owl/objects
+import owl/[objects, errors]
+
+# --- errors -------------------------------------------------------------------
+#
+# Reading, loading and running fail the same way: err (or errAt, raiseError)
+# records an OwlError in currentError and raises. Bare raises carry no
+# exception object, so currentError is how a handler learns what failed.
+#
+# Nothing is printed when the error is raised. On its way out the evaluator
+# places it: the innermost call form read from a source that the error
+# leaves sets where it happened (the item an errAt pointed at, else the
+# whole call), and each command made in owl it then leaves adds a line to
+# its trace. That costs nothing until something fails. Whoever handles the
+# error last shows it: reportError hands the rendered window to errorReport.
 
 proc defaultErrorReport*(msg: string) =
-  writeLine(stderr, "owl error: " & msg)
+  writeLine(stderr, msg)
 
 var errorReport*: proc(msg: string) = defaultErrorReport
+# ANSI colors in reported errors (owl sets it when stderr is a terminal)
+var colorErrors* = false
 
-# The message of the most recent err(); bare raises carry no exception object,
-# so this is how a handler (the `try` builtin) learns why evaluation failed.
+var currentError* = owlError(RuntimeError, "")
+# currentError's message
 var lastErrorMessage* = ""
 
-proc err*(msg: string) {.raises.} =
-  lastErrorMessage = msg
-  errorReport(msg)
+# The form an errAt pointed at that has no place of its own (an atom): the
+# call form holding it places the error at its item.
+var culprit = nothing()
+var hasCulprit = false
+
+# Each raising proc ends in its own raise: a raising call as the last
+# statement of a {.raises.} proc lost the error (nimony 0.6.2).
+proc setError(e: sink OwlError) =
+  lastErrorMessage = e.message
+  currentError = e
+  hasCulprit = false
+
+proc raiseError*(e: OwlError) {.raises.} =
+  ## Raise e as it is, its place and trace kept (a handler giving up on it).
+  setError(e)
   raise ValueError
+
+proc raiseError*(kind: ErrorKind, msg: string, at: Place) {.raises.} =
+  setError(owlError(kind, msg, at))
+  raise ValueError
+
+proc err*(msg: string) {.raises.} =
+  setError(owlError(RuntimeError, msg))
+  raise ValueError
+
+proc errAt*(at: Object, msg: string, kind: ErrorKind = RuntimeError) {.raises.} =
+  ## err pointing at a form, such as the argument that is wrong: at its place
+  ## when it has one, else at its item in the call form it is part of.
+  currentError = owlError(kind, msg, placeOf(at))
+  lastErrorMessage = msg
+  hasCulprit = not currentError.place.isKnown
+  if hasCulprit:
+    culprit = at
+  raise ValueError
+
+proc errorText*(color: bool = false): string =
+  ## currentError as an error window (see renderError).
+  renderError(currentError, color)
+
+proc reportError*() =
+  ## Show currentError through errorReport: for the handler that ends it.
+  errorReport(errorText(colorErrors))
+
+proc sealError*() =
+  ## The error leaves the code it is about (a module, a program run): the
+  ## calls further out, such as owl's command line, stay out of its trace.
+  currentError.sealed = true
+
+proc placeError(p: Place) =
+  if not currentError.place.isKnown and p.isKnown:
+    currentError.place = p
+    hasCulprit = false
+
+proc leaveCall(form: Object, cmd: Object) =
+  # An error leaves the call form: see "errors" above.
+  if not currentError.place.isKnown:
+    if hasCulprit:
+      let i = findItem(form, culprit)
+      if i >= 0:
+        placeError(itemPlace(form, i))
+    placeError(placeOf(form))
+  elif isCommand(cmd) and not isBuiltin(cmd) and not currentError.sealed and
+      currentError.trace.len < MaxTrace:
+    let p = placeOf(form)
+    if p.isKnown:
+      currentError.trace.add TraceFrame(name: cmdName(cmd), place: p)
 
 proc bodyStartOf(o: Object): int =
   let n = itemCount(o)
@@ -25,7 +102,7 @@ proc bodyStartOf(o: Object): int =
 proc numberIn*(env: ref Environment, form: Object, what: string): float64 {.raises.} =
   let v = eval(form, env)
   if not isNumber(v) and not isBoolean(v):
-    err(what & " needs numbers, got " & stringify(v))
+    errAt(form, what & " needs numbers, got " & stringify(v))
   toNumber(v)
 
 proc numbersIn*(env: ref Environment, args: seq[Object], what: string): seq[float64] {.raises.} =
@@ -33,7 +110,7 @@ proc numbersIn*(env: ref Environment, args: seq[Object], what: string): seq[floa
   for a in args:
     let v = eval(a, env)
     if not isNumber(v) and not isBoolean(v):
-      err(what & " needs numbers, got " & stringify(v))
+      errAt(a, what & " needs numbers, got " & stringify(v))
     result.add toNumber(v)
 
 proc headSymbol(o: Object): string =
@@ -108,7 +185,7 @@ proc makeShape(cmd: Object, withBlock: bool): CallShape =
     if isPair(p):
       result.defaults.add p
 
-proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
+proc bindParams(cmd: Object, call: Object, allArgs: seq[Object], callerEnv: ref Environment,
     child: ref Environment, bodyStart: int) {.raises.} =
   # A fun gets its arguments' values. A command gets them unevaluated: as
   # syntax that remembers the caller's scope, or, for a dynamic-command, as
@@ -118,6 +195,9 @@ proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
   # fun gets them as a closure over the caller's scope, (name) runs them;
   # a command gets the list of forms (syntax, for a hygienic one). Without
   # a block it can still be passed by name, or keeps its default.
+  #
+  # call is the call form (allArgs are its items after the head), for where
+  # the arguments were written: syntax keeps it, a block fun its body's.
   if not hasShapes(cmd):
     setShapes(cmd, makeShape(cmd, true), makeShape(cmd, false))
   let hasBlock = bodyStart >= 0 and bodyStart < allArgs.len
@@ -128,11 +208,13 @@ proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
       argEnd = bodyStart
       if isFun(cmd):
         let forms = allArgs[bodyStart ..< allArgs.len]
-        define(child, shape.blockSym, newCommand("", newSeq[Object](), forms, callerEnv, true))
+        let blockFun = newCommand("", newSeq[Object](), forms, callerEnv, true)
+        setOrigin(blockFun, call, bodyStart + 1)
+        define(child, shape.blockSym, blockFun)
       elif not isDynamic(cmd):
         var wrapped: seq[Object] = @[]
         for i in bodyStart ..< allArgs.len:
-          wrapped.add syntax(allArgs[i], callerEnv)
+          wrapped.add syntaxAt(allArgs[i], callerEnv, itemPlace(call, i + 1))
         define(child, shape.blockSym, list(wrapped))
       else:
         let forms = allArgs[bodyStart ..< allArgs.len]
@@ -153,7 +235,7 @@ proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
       if fun:
         define(child, carOf(a), eval(cdrOf(a), callerEnv))
       elif hygienic:
-        define(child, carOf(a), syntax(cdrOf(a), callerEnv))
+        define(child, carOf(a), syntaxAt(cdrOf(a), callerEnv, valuePlace(a)))
       else:
         define(child, carOf(a), cdrOf(a))
     else:
@@ -165,18 +247,18 @@ proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
         if fun:
           define(child, name, eval(a, callerEnv))
         elif hygienic:
-          define(child, name, syntax(a, callerEnv))
+          define(child, name, syntaxAt(a, callerEnv, itemPlace(call, ai + 1)))
         else:
           define(child, name, a)
       elif not hasRest:
-        err("too many arguments for " & cmdName(cmd))
+        errAt(a, "too many arguments for " & cmdName(cmd))
       else:
         extras.add a
   if hasRest:
     if hygienic:
       var wrapped: seq[Object] = @[]
       for x in extras:
-        wrapped.add syntax(x, callerEnv)
+        wrapped.add syntaxAt(x, callerEnv, itemPlace(call, findItem(call, x)))
       define(child, shape.rest, list(wrapped))
     else:
       define(child, shape.rest, list(extras))
@@ -191,7 +273,7 @@ proc bindParams(cmd: Object, allArgs: seq[Object], callerEnv: ref Environment,
         value = syntax(value, child)
       define(child, name, value)
 
-proc apply(cmd: Object, callerEnv: ref Environment, args: seq[Object],
+proc apply(cmd: Object, call: Object, callerEnv: ref Environment, args: seq[Object],
     bodyStart: int): Object {.raises.} =
   if isBuiltin(cmd):
     let call = builtinCall(cmd)
@@ -207,10 +289,17 @@ proc apply(cmd: Object, callerEnv: ref Environment, args: seq[Object],
   let child = newEnvironment(upEnv)
   if not isFun(cmd) and not isDynamic(cmd):
     setCaller(child, callerEnv)
-  bindParams(cmd, args, callerEnv, child, bodyStart)
+  bindParams(cmd, call, args, callerEnv, child, bodyStart)
   result = nothing()
-  for f in bodyOf(cmd):
-    result = eval(f, child)
+  var i = 0
+  try:
+    for f in bodyOf(cmd):
+      result = eval(f, child)
+      inc i
+  except:
+    # a body form that is a lone name places the error itself
+    placeError(bodyPlace(cmd, i))
+    raise ValueError
 
 proc invoke*(cmd: Object, values: seq[Object]): Object {.raises.} =
   ## Call a command value from Nim with already evaluated arguments: each
@@ -224,7 +313,7 @@ proc invoke*(cmd: Object, values: seq[Object]): Object {.raises.} =
     let name = symbol("arg" & $i)
     define(scratch, name, values[i])
     args.add name
-  apply(cmd, scratch, args, args.len)
+  apply(cmd, nothing(), scratch, args, args.len)
 
 proc evalForms*(env: ref Environment, forms: seq[Object]): Object {.raises.} =
   result = nothing()
@@ -243,21 +332,25 @@ proc eval*(obj: Object, env: ref Environment): Object {.raises.} =
     if itemCount(obj) == 0:
       return nothing()
     var cmd = nothing()
-    if isSymbol(headOf(obj)):
-      var found = false
-      cmd = getVar(env, headOf(obj), found)
-      if not found:
-        err("unbound symbol: " & toSymbol(headOf(obj)))
-    else:
-      cmd = eval(headOf(obj), env)
-    if not isCommand(cmd):
-      err("the head of a call must be a command, got " & stringify(cmd))
-    result = apply(cmd, env, operands(obj), bodyStartOf(obj))
+    try:
+      if isSymbol(headOf(obj)):
+        var found = false
+        cmd = getVar(env, headOf(obj), found)
+        if not found:
+          errAt(headOf(obj), "unbound symbol: " & toSymbol(headOf(obj)))
+      else:
+        cmd = eval(headOf(obj), env)
+      if not isCommand(cmd):
+        errAt(headOf(obj), "the head of a call must be a command, got " & stringify(cmd))
+      result = apply(cmd, obj, env, operands(obj), bodyStartOf(obj))
+    except:
+      leaveCall(obj, cmd)
+      raise ValueError
   of Symbol:
     var found = false
     result = getVar(env, obj, found)
     if not found:
-      err("unbound symbol: " & toSymbol(obj))
+      errAt(obj, "unbound symbol: " & toSymbol(obj))
   of Number, Boolean, Nothing, Record, String:
     result = obj
   of Syntax:
@@ -266,9 +359,21 @@ proc eval*(obj: Object, env: ref Environment): Object {.raises.} =
       err("syntax without a scope: " & stringify(obj))
       result = nothing()
     else:
-      result = eval(formOf(obj), resolveScope(env, scope))
+      try:
+        result = eval(formOf(obj), resolveScope(env, scope))
+      except:
+        # not placed inside the argument (a lone name, or code built at run
+        # time): where the caller wrote it
+        placeError(placeOf(obj))
+        raise ValueError
   of Pair:
-    result = eval(cdrOf(obj), env)
+    try:
+      result = eval(cdrOf(obj), env)
+    except:
+      if hasCulprit and sameValue(cdrOf(obj), culprit):
+        placeError(valuePlace(obj))
+      placeError(placeOf(obj))
+      raise ValueError
     # A name that came in as syntax binds in the scope it was written in.
     if isSyntax(carOf(obj)):
       let scope = syntaxScope(carOf(obj))
@@ -277,7 +382,7 @@ proc eval*(obj: Object, env: ref Environment): Object {.raises.} =
           define(resolveScope(env, scope), formOf(carOf(obj)), result)
           return
     if not isSymbol(carOf(obj)):
-      err("a binding needs a symbol on the left of '='")
+      errAt(obj, "a binding needs a symbol on the left of '='")
     define(env, carOf(obj), result)
   of Command:
     err("cannot evaluate command " & cmdName(obj) & " directly, call it")
@@ -299,7 +404,9 @@ proc makeDefinition*(env: ref Environment, f: Object, isFun: bool,
   var body: seq[Object] = @[]
   for i in bs ..< it.len:
     body.add it[i]
-  define(env, it[1], newCommand(toSymbol(it[1]), params, body, env, isFun, dynamic))
+  let cmd = newCommand(toSymbol(it[1]), params, body, env, isFun, dynamic)
+  setOrigin(cmd, f, bs)
+  define(env, it[1], cmd)
 
 proc isCommandDefinition*(f: Object): bool =
   isDefinition(f, "command") or isDefinition(f, "dynamic-command")

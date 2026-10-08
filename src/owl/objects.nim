@@ -1,4 +1,5 @@
 import std/[tables, hashes, options, strutils]
+import owl/errors
 
 type
   # A scope's names, in the order they were made (like Table). Small scopes,
@@ -69,7 +70,7 @@ type
       items: ref ItemsBox
       bodyStart: int
     of Pair:
-      a, b: ref Object
+      pr: ref PairBox
     of Record:
       rec: ref ItemsBox
     of Command:
@@ -77,7 +78,7 @@ type
     of Syntax:
       # An unevaluated argument of a command together with the scope it was
       # written in, so evaluating it never sees the command's own names.
-      form: ref Object
+      form: ref SyntaxBox
       scope: nil ref Environment
     of Scope:
       # A scope as a value, from new-scope, for eval-in.
@@ -92,6 +93,22 @@ type
     # call hands its arguments over without building them anew.
     ops: seq[Object]
     hasOps: bool
+    # Where a list read from a source was written (src is nil for one built
+    # at run time): the whole list and each item, for error reports.
+    src: nil ref SourceFile
+    loc: Loc
+    locs: seq[Loc]
+
+  PairBox = object
+    a, b: Object
+    src: nil ref SourceFile
+    keyLoc, valLoc: Loc
+
+  SyntaxBox = object
+    form: Object
+    # where the argument was written in its call
+    src: nil ref SourceFile
+    loc: Loc
 
   # A command's parts, shared like a list's items: a command value is read
   # (copied) on every call of it.
@@ -107,6 +124,11 @@ type
     # call (the evaluator fills it): shapes[0] for a call with a `:` block,
     # shapes[1] for one without.
     shapes: seq[ref CallShape]
+    # Where the body was written: body form i is item originAt + i of the
+    # list origin (a definition, or the call whose block a fun took), when
+    # that was read from a source. Kept as a reference, never copied.
+    origin: Object
+    originAt: int
 
   # The parameters a call binds, after the `&block` parameter is taken out
   # (or, without a block, possibly put back as a plain one).
@@ -140,33 +162,55 @@ func boolean*(b: bool): Object =
   Object(kind: Boolean, isTrue: b)
 
 func list*(items: sink seq[Object], bodyStart: int = -1): Object =
-  Object(kind: List, items: (ref ItemsBox)(xs: items, ops: @[], hasOps: false),
-    bodyStart: bodyStart)
+  Object(kind: List, items: (ref ItemsBox)(xs: items, ops: @[], hasOps: false,
+    src: nil, loc: Loc(at: 0, len: 0), locs: @[]), bodyStart: bodyStart)
 
-func box(o: Object): ref Object =
-  result = (ref Object)(kind: Nothing)
-  result[] = o
+# A list read from src: locs[i] is where item i was written, loc the whole.
+func listAt*(items: sink seq[Object], src: nil ref SourceFile, loc: Loc,
+    locs: sink seq[Loc], bodyStart: int = -1): Object =
+  Object(kind: List, items: (ref ItemsBox)(xs: items, ops: @[], hasOps: false,
+    src: src, loc: loc, locs: locs), bodyStart: bodyStart)
 
 func pair*(key, val: Object): Object =
-  Object(kind: Pair, a: box(key), b: box(val))
+  Object(kind: Pair, pr: (ref PairBox)(a: key, b: val, src: nil,
+    keyLoc: Loc(at: 0, len: 0), valLoc: Loc(at: 0, len: 0)))
+
+func pairAt*(key, val: Object, src: nil ref SourceFile, keyLoc, valLoc: Loc): Object =
+  Object(kind: Pair, pr: (ref PairBox)(a: key, b: val, src: src,
+    keyLoc: keyLoc, valLoc: valLoc))
 
 func record*(fields: sink seq[Object]): Object =
-  Object(kind: Record, rec: (ref ItemsBox)(xs: fields, ops: @[], hasOps: false))
+  Object(kind: Record, rec: (ref ItemsBox)(xs: fields, ops: @[], hasOps: false,
+    src: nil, loc: Loc(at: 0, len: 0), locs: @[]))
 
 func newCommand*(name: string, params, body: sink seq[Object], env: nil ref Environment,
     isFun: bool, dynamic: bool = false): Object =
   Object(kind: Command, cmd: (ref CommandBox)(name: name, params: params, body: body,
-    env: env, isFun: isFun, dynamic: dynamic, call: nil, shapes: @[]))
+    env: env, isFun: isFun, dynamic: dynamic, call: nil, shapes: @[],
+    origin: Object(kind: Nothing), originAt: 0))
+
+# setOrigin cmd origin at: cmd's body forms are origin's items from at on
+# (see CommandBox.origin).
+proc setOrigin*(o: Object, origin: Object, at: int) =
+  if o.kind == Command:
+    o.cmd.origin = origin
+    o.cmd.originAt = at
 
 func syntax*(form: Object, scope: ref Environment): Object =
-  Object(kind: Syntax, form: box(form), scope: scope)
+  Object(kind: Syntax, form: (ref SyntaxBox)(form: form, src: nil,
+    loc: Loc(at: 0, len: 0)), scope: scope)
+
+func syntaxAt*(form: Object, scope: ref Environment, at: Place): Object =
+  Object(kind: Syntax, form: (ref SyntaxBox)(form: form, src: at.src, loc: at.loc),
+    scope: scope)
 
 func scopeValue*(env: ref Environment): Object =
   Object(kind: Scope, scopeRef: env)
 
 func newBuiltin*(name: string, call: CommandProc, isFun: bool): Object =
   Object(kind: Command, cmd: (ref CommandBox)(name: name, params: @[], body: @[],
-    env: nil, isFun: isFun, dynamic: false, call: call, shapes: @[]))
+    env: nil, isFun: isFun, dynamic: false, call: call, shapes: @[],
+    origin: Object(kind: Nothing), originAt: 0))
 
 func objectKind*(o: Object): ObjectKind = o.kind
 
@@ -203,9 +247,7 @@ func scopeEnv*(o: Object): nil ref Environment =
 func syntaxForm*(o: Object): Object =
   result = nothing()
   if o.kind == Syntax:
-    let f = o.form
-    if f != nil:
-      result = f[]
+    result = o.form.form
 
 func syntaxScope*(o: Object): nil ref Environment =
   result = nil
@@ -350,33 +392,23 @@ proc operands*(o: Object): lent seq[Object] =
 # carOf, cdrOf and formOf read a pair's halves and a syntax's form without
 # copying them; o must be a pair (a syntax for formOf).
 func carOf*(o: Object): lent Object =
-  o.a[]
+  o.pr.a
 
 func cdrOf*(o: Object): lent Object =
-  o.b[]
+  o.pr.b
 
 func formOf*(o: Object): lent Object =
-  o.form[]
+  o.form.form
 
 func car*(o: Object): Object =
   result = nothing()
-  case o.kind
-  of Pair:
-    let key = o.a
-    if key != nil:
-      result = key[]
-  else:
-    discard
+  if o.kind == Pair:
+    result = o.pr.a
 
 func cdr*(o: Object): Object =
   result = nothing()
-  case o.kind
-  of Pair:
-    let value = o.b
-    if value != nil:
-      result = value[]
-  else:
-    discard
+  if o.kind == Pair:
+    result = o.pr.b
 
 func recordFields*(o: Object): seq[Object] =
   result = @[]
@@ -391,8 +423,8 @@ func fieldNames*(o: Object): seq[string] =
 
 func fieldNamed(f: Object, name: string): bool =
   # toSymbol(car(f)) == name, without copying the field
-  if f.kind == Pair and f.a[].kind == Symbol:
-    result = f.a[].symbol == name
+  if f.kind == Pair and f.pr.a.kind == Symbol:
+    result = f.pr.a.symbol == name
   else:
     result = name.len == 0
 
@@ -422,7 +454,7 @@ func `==`*(a, b: Object): bool =
     result = x.name == y.name and x.isFun == y.isFun and x.dynamic == y.dynamic and
       x.env == y.env and (x.call == y.call or (x.call != nil and y.call != nil))
   of Syntax:
-    result = a.scope == b.scope and syntaxForm(a) == syntaxForm(b)
+    result = a.scope == b.scope and a.form.form == b.form.form
   of Scope:
     result = a.scopeRef == b.scopeRef
   of Number:
@@ -441,19 +473,7 @@ func `==`*(a, b: Object): bool =
         return false
     result = true
   of Pair:
-    let aHead = a.a
-    let bHead = b.a
-    let aTail = a.b
-    let bTail = b.b
-    if (aHead == nil) != (bHead == nil) or (aTail == nil) != (bTail == nil):
-      return false
-    if aHead != nil and bHead != nil:
-      if not (aHead[] == bHead[]):
-        return false
-    if aTail != nil and bTail != nil:
-      if not (aTail[] == bTail[]):
-        return false
-    result = true
+    result = a.pr.a == b.pr.a and a.pr.b == b.pr.b
   of Record:
     if a.rec.xs.len != b.rec.xs.len:
       return false
@@ -478,12 +498,8 @@ func hash*(o: Object): Hash =
   of List:
     result = result !& hash(o.items.xs)
   of Pair:
-    let head = o.a
-    let tail = o.b
-    if head != nil:
-      result = result !& hash(head[])
-    if tail != nil:
-      result = result !& hash(tail[])
+    result = result !& hash(o.pr.a)
+    result = result !& hash(o.pr.b)
   of Record:
     result = result !& hash(o.rec.xs)
   of Command:
@@ -494,6 +510,72 @@ func hash*(o: Object): Hash =
   of Scope:
     discard
   result = !$result
+
+# --- where values were written ------------------------------------------------
+
+# placeOf o: where a list, pair or syntax read from a source was written.
+# Atoms carry no place; the list holding one knows it (itemPlace).
+func placeOf*(o: Object): Place =
+  result = noPlace()
+  case o.kind
+  of List:
+    if o.items.src != nil:
+      result = place(o.items.src, o.items.loc)
+  of Pair:
+    if o.pr.src != nil:
+      result = place(o.pr.src, span(o.pr.keyLoc, o.pr.valLoc))
+  of Syntax:
+    if o.form.src != nil:
+      result = place(o.form.src, o.form.loc)
+    else:
+      result = placeOf(o.form.form)
+  else:
+    discard
+
+# itemPlace o i: where item i of a list read from a source was written.
+func itemPlace*(o: Object, i: int): Place =
+  result = noPlace()
+  if o.kind == List and o.items.src != nil and i >= 0 and i < o.items.locs.len:
+    result = place(o.items.src, o.items.locs[i])
+
+func itemLocs*(o: Object): seq[Loc] =
+  result = @[]
+  if o.kind == List:
+    result = o.items.locs
+
+# The place body form i of a command was written, if known.
+func bodyPlace*(o: Object, i: int): Place =
+  result = noPlace()
+  if o.kind == Command:
+    result = itemPlace(o.cmd.origin, o.cmd.originAt + i)
+
+# The place of a pair's value.
+func valuePlace*(o: Object): Place =
+  result = noPlace()
+  if o.kind == Pair and o.pr.src != nil:
+    result = place(o.pr.src, o.pr.valLoc)
+
+# sameValue a b: b is a (the same box for a list, pair or syntax; equal for
+# an atom), which tells which item of a list an error pointed at.
+func sameValue*(a, b: Object): bool =
+  if a.kind != b.kind:
+    return false
+  case a.kind
+  of List: result = a.items == b.items
+  of Pair: result = a.pr == b.pr
+  of Syntax: result = a.form == b.form
+  of Record: result = a.rec == b.rec
+  of Command: result = a.cmd == b.cmd
+  of Scope: result = a.scopeRef == b.scopeRef
+  else: result = a == b
+
+# findItem o x: the position of x among the items of list o, or -1.
+func findItem*(o: Object, x: Object): int =
+  result = -1
+  if o.kind == List:
+    for i in 0 ..< o.items.xs.len:
+      if sameValue(o.items.xs[i], x):
+        return i
 
 func `$`*(o: Object): string =
   result = "(kind: " & $o.kind
@@ -522,18 +604,8 @@ func `$`*(o: Object): string =
       result.add $o.items.xs[i]
     result.add "]"
   of Pair:
-    let head = o.a
-    let tail = o.b
-    result.add ", a: "
-    if head != nil:
-      result.add $head[]
-    else:
-      result.add "nil"
-    result.add ", b: "
-    if tail != nil:
-      result.add $tail[]
-    else:
-      result.add "nil"
+    result.add ", a: " & $o.pr.a
+    result.add ", b: " & $o.pr.b
   of Record:
     result.add ", fields: @["
     for i in 0 ..< o.rec.xs.len:
@@ -581,19 +653,7 @@ func stringify*(o: Object): string =
         result.add " "
         result.add stringifyArg(o.items.xs[i])
   of Pair:
-    let head = o.a
-    let tail = o.b
-    result = "("
-    if head != nil:
-      result.add stringify(head[])
-    else:
-      result.add "()"
-    result.add " = "
-    if tail != nil:
-      result.add stringify(tail[])
-    else:
-      result.add "()"
-    result.add ")"
+    result = "(" & stringify(o.pr.a) & " = " & stringify(o.pr.b) & ")"
   of Record:
     result = "{}"
     for i in 0 ..< o.rec.xs.len:

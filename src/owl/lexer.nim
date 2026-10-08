@@ -6,6 +6,10 @@ type
   Token* = object
     kind*: TokenKind
     text*: string
+    # where it was written: byte offset in the source and length (a string's
+    # quotes included)
+    at*: int32
+    len*: int32
 
   Line* = object
     num*: int
@@ -15,6 +19,8 @@ type
   Tokenizer* = object
     err*: string
     line*: int
+    # the byte offset of the failure
+    errAt*: int
 
 const
   # '\r' counts as space so files with CRLF line ends read like LF ones.
@@ -33,10 +39,14 @@ func numberDot(text: string, at, stop: int): bool =
     return true
   return text[at + 1] in Digits or text[at + 1] in Delimiters
 
-proc fail(t: var Tokenizer, msg: string) {.raises.} =
+proc fail(t: var Tokenizer, msg: string, at: int) {.raises.} =
   if t.err.len == 0:
     t.err = msg
+    t.errAt = at
   raise ValueError
+
+func tok(kind: TokenKind, at: int, len: int = 1): Token =
+  Token(kind: kind, text: "", at: int32(at), len: int32(len))
 
 # The tokens of text[start ..< stop], one line of a source.
 proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token] {.raises.} =
@@ -47,16 +57,16 @@ proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token]
     of ' ', '\t', '\r':
       inc i
     of '(':
-      result.add Token(kind: Open)
+      result.add tok(Open, i)
       inc i
     of ')':
-      result.add Token(kind: Close)
+      result.add tok(Close, i)
       inc i
     of ':':
-      result.add Token(kind: Colon)
+      result.add tok(Colon, i)
       inc i
     of '=':
-      result.add Token(kind: Eq)
+      result.add tok(Eq, i)
       inc i
     of ';':
       break
@@ -69,11 +79,11 @@ proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token]
           break
         inc j
       if not closed:
-        t.fail("unterminated string")
-      result.add Token(kind: Str, text: text[i + 1 ..< j])
+        t.fail("unterminated string", i)
+      result.add Token(kind: Str, text: text[i + 1 ..< j], at: int32(i), len: int32(j + 1 - i))
       i = j + 1
     of '.':
-      result.add Token(kind: Dot)
+      result.add tok(Dot, i)
       inc i
     else:
       var j = i + 1
@@ -84,7 +94,7 @@ proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token]
             break
           dotted = true
         inc j
-      result.add Token(kind: Word, text: text[i ..< j])
+      result.add Token(kind: Word, text: text[i ..< j], at: int32(i), len: int32(j - i))
       i = j
 
 proc tokenize*(t: var Tokenizer, text: string): seq[Token] {.raises.} =

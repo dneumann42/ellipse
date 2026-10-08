@@ -126,7 +126,7 @@ block update:
   refuses("update-item", @[module, "#9", "1"], "no item #9")
   refuses("update-item", @[module, "double", "fun double x:\n    1\nfun other:\n    2"], "expected one item, got 2")
   refuses("update-item", @[module, "double", "fun double x:\n    1\n; loose\n\nfun other:\n    2"], "line 3 is outside of any item: ; loose")
-  refuses("update-item", @[module, "double", "    fun double x:"], "parse error")
+  refuses("update-item", @[module, "double", "    fun double x:"], "read error")
   let stmt = edit("update-item", @[module, "#6", "double 5"])
   expect stmt == module.replace("double 4", "double 5"), "a statement is updated by position"
 
@@ -173,6 +173,6 @@ block shapes:
     @["statement:-@1[0..1)", "export:-@2[1..3)", "statement:-@4[3..4)"],
     "a fun without a block, export and a grouped binding: " &
     describe("fun f\nexport:\n    f = f\n(g) = 1\n").join(" ")
-  refuses("source-items", @["x = (\n"], "parse error")
+  refuses("source-items", @["x = (\n"], "read error")
 
 finish("source")

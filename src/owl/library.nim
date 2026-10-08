@@ -22,14 +22,12 @@ proc runFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
     failed = true
   if failed:
     err("cannot open file: " & toStr(path))
-  let parsed = parseOwl(source)
-  if not parsed.isOk:
-    err(toStr(path) & ": " & parsed.error("parse error"))
+  let forms = readSource(source, toStr(path))
   let lib = programLib
   if lib == nil:
     err("run-file has no library to run against")
   else:
-    discard runProgram(lib, parsed.get(@[]))
+    discard runProgram(lib, forms)
   nothing()
 
 proc programModule(): Module =
@@ -47,21 +45,21 @@ proc owlLibrary*(): Library {.raises.} =
   lib.add termModule()
   lib.add fsModule()
   lib.add loaderModule(lib)
-  lib.add newModule("iterators").addSource(embedFile("libraries/iterators.owl"))
-  lib.add newModule("strings").addSource(embedFile("libraries/strings.owl"))
-  lib.add newModule("ansi").addSource(embedFile("libraries/ansi.owl"))
-  lib.add newModule("keys").addSource(embedFile("libraries/keys.owl"))
-  lib.add newModule("editor").addSource(embedFile("libraries/editor.owl"))
-  lib.add newModule("tui").addSource(embedFile("libraries/tui.owl"))
-  lib.add newModule("cmdline").addSource(embedFile("libraries/cmdline.owl"))
-  lib.add newModule("source").addSource(embedFile("libraries/source.owl"))
-  lib.add newModule("live").addSource(embedFile("libraries/live.owl"))
-  lib.add newModule("projects").addSource(embedFile("libraries/projects.owl"))
+  lib.add newModule("iterators").addLibrarySource(embedFile("libraries/iterators.owl"))
+  lib.add newModule("strings").addLibrarySource(embedFile("libraries/strings.owl"))
+  lib.add newModule("ansi").addLibrarySource(embedFile("libraries/ansi.owl"))
+  lib.add newModule("keys").addLibrarySource(embedFile("libraries/keys.owl"))
+  lib.add newModule("editor").addLibrarySource(embedFile("libraries/editor.owl"))
+  lib.add newModule("tui").addLibrarySource(embedFile("libraries/tui.owl"))
+  lib.add newModule("cmdline").addLibrarySource(embedFile("libraries/cmdline.owl"))
+  lib.add newModule("source").addLibrarySource(embedFile("libraries/source.owl"))
+  lib.add newModule("live").addLibrarySource(embedFile("libraries/live.owl"))
+  lib.add newModule("projects").addLibrarySource(embedFile("libraries/projects.owl"))
   lib.add netModule()
-  lib.add newModule("wire").addSource(embedFile("libraries/wire.owl"))
-  lib.add newModule("repl").addSource(embedFile("scripts/repl.owl"))
-  lib.add newModule("attach").addSource(embedFile("libraries/attach.owl"))
+  lib.add newModule("wire").addLibrarySource(embedFile("libraries/wire.owl"))
+  lib.add newModule("repl").addLibrarySource(embedFile("scripts/repl.owl"))
+  lib.add newModule("attach").addLibrarySource(embedFile("libraries/attach.owl"))
   lib.add guiModule(embedFile("libraries/gui.owl"))
-  lib.add newModule("repl-app").addSource(embedFile("scripts/repl-app.owl"))
+  lib.add newModule("repl-app").addLibrarySource(embedFile("scripts/repl-app.owl"))
   result = lib
 

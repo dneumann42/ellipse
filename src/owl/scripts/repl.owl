@@ -130,10 +130,11 @@ fun log-entry kind text:
 fun note text:
     log-entry "note" text
 
+; message is an error window (see error-report), or a plain message.
 fun show-error message:
     if interactive:
         log-entry "error" message
-        echo "error:" message
+        echo message
 
 ; Results print as owl code (see to-code), so a value can be pasted back in
 ; or written into a module. Piped, one that needs several lines starts
@@ -231,7 +232,7 @@ fun answer-screen value:
 fun step f:
     fun run-it:
         try (f):
-            show-error failure
+            show-error (error-report)
         (flush-output)
     capture-output run-it
     nothing
@@ -1038,13 +1039,13 @@ fun report-changes items:
 
 fun try-command input:
     try (run-command (words (trim input))):
-        show-error failure
+        show-error (error-report)
 
 fun try-code input:
     set last-input input
     if (= remote nothing):
         try (run-code input):
-            show-error failure
+            show-error (error-report)
         remote-input input
 
 ; --- projects ------------------------------------------------------------------
@@ -1264,7 +1265,7 @@ fun refresh-docs:
         when (and (<> path nothing) (file-exists path)):
             when (<> (read-file path) (module-source name)):
                 try (reload-module name):
-                    show-error failure
+                    show-error (error-report)
                 note (concat "reloaded " name " from " path)
         set i (+ i 1)
 
@@ -1379,7 +1380,7 @@ fun serve-query code:
     failed = nothing
     fun run-it:
         try (set value (eval-in (module-scope "repl") (at (parse code) 0))):
-            set failed failure
+            set failed (error-report)
     output = capture-output run-it
     if (<> failed nothing):
         concat "error" newline failed

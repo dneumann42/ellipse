@@ -1,5 +1,5 @@
 import std/result
-import owl/[lexer, objects]
+import owl/[lexer, objects, errors]
 
 type
   ItemKind = enum Object, Eq, Colon, Dot
@@ -8,6 +8,8 @@ type
     # Set on an index call folded from dots (a.b), which in parentheses is
     # called like a lone name: (w.f) calls the command in w's field f.
     dotted: bool
+    # where it was written
+    loc: Loc
     case kind: ItemKind
     of Object: value: objects.Object
     of Eq, Colon, Dot: discard
@@ -18,13 +20,24 @@ type
     pos: int
     num: int
     err: string
+    # the source read, which every list and pair made keeps a reference to
+    src: ref SourceFile
+    # where the failure is
+    errLoc: Loc
 
-proc fail(p: var Parser, msg: string) =
+proc fail(p: var Parser, msg: string, at: Loc) =
   if p.err.len == 0:
-    p.err = "line " & $p.num & ": " & msg
+    p.err = msg
+    p.errLoc = at
 
-func indexCall(target, key: objects.Object): objects.Object =
-  list(@[symbol("index"), target, key])
+func indexCall(src: ref SourceFile, target, key: Item, dot: Loc): objects.Object =
+  listAt(@[symbol("index"), target.value, key.value], src, span(target.loc, key.loc),
+    @[dot, target.loc, key.loc])
+
+func itemsLoc(items: seq[Item]): Loc =
+  result = Loc(at: 0, len: 0)
+  if items.len > 0:
+    result = span(items[0].loc, items[^1].loc)
 
 func tryNumber*(text: string): (bool, float64) =
   var i = 0
@@ -63,8 +76,13 @@ func atom*(text: string): objects.Object =
   else:
     result = symbol(text)
 
-proc assemble(p: var Parser, items: var seq[Item], bodyAt: int = -1): objects.Object =
+# assemble items into one form. whole is where the form was written (a group's
+# parentheses included); it is set to the items' run when it comes in empty.
+proc assemble(p: var Parser, items: var seq[Item], whole: var Loc,
+    bodyAt: int = -1): objects.Object =
   result = nothing()
+  if whole.len == 0:
+    whole = itemsLoc(items)
   # '=' names the equality command when it heads an expression: first in the form
   # or right behind the '=' that opens a binding. Any other '=' is the binding.
   var eqAt = -1
@@ -77,21 +95,24 @@ proc assemble(p: var Parser, items: var seq[Item], bodyAt: int = -1): objects.Ob
       if cmdAt < 0 and (i == 0 or i == eqAt + 1):
         cmdAt = i
       elif eqAt >= 0:
-        p.fail("repeated '='")
+        p.fail("repeated '='", items[i].loc)
         return
       else:
         eqAt = i
     of Colon:
-      p.fail("':' must end the line")
+      p.fail("':' must end the line", items[i].loc)
       return
     of Dot:
-      p.fail("'.' needs a value before it")
+      p.fail("'.' needs a value before it", items[i].loc)
       return
 
   var before = newSeqOfCap[objects.Object](items.len)
+  var beforeLocs = newSeqOfCap[Loc](items.len)
   var after: seq[objects.Object] = @[]
+  var afterLocs: seq[Loc] = @[]
   if eqAt >= 0:
     after = newSeqOfCap[objects.Object](items.len - eqAt)
+    afterLocs = newSeqOfCap[Loc](items.len - eqAt)
   for i in 0 ..< items.len:
     var value: objects.Object
     var keep = false
@@ -108,31 +129,35 @@ proc assemble(p: var Parser, items: var seq[Item], bodyAt: int = -1): objects.Ob
     if keep:
       if eqAt >= 0 and i > eqAt:
         after.add value
+        afterLocs.add items[i].loc
       else:
         before.add value
+        beforeLocs.add items[i].loc
 
   if eqAt >= 0:
     # The left of '=' is a raw symbol (a name to bind) or a grouped call, which
     # stays unevaluated in the pair: commands like 'cond' test the call themselves.
     if before.len != 1 or (toSymbol(before[0]) == "" and not isList(before[0])):
-      p.fail("a binding needs a name or a grouped call on the left of '='")
+      let at = if beforeLocs.len > 0: span(beforeLocs[0], beforeLocs[^1]) else: items[eqAt].loc
+      p.fail("a binding needs a name or a grouped call on the left of '='", at)
       return
     if after.len == 0:
-      p.fail("missing value after '='")
+      p.fail("missing value after '='", items[eqAt].loc)
       return
     result = if after.len == 1:
-      pair(before[0], after[0])
+      pairAt(before[0], after[0], p.src, beforeLocs[0], afterLocs[0])
     else:
-      var inner = list(after)
+      let valLoc = span(afterLocs[0], afterLocs[^1])
+      var inner = listAt(after, p.src, valLoc, afterLocs)
       if bodyAt > eqAt:
         inner.setBodyStart(bodyAt - eqAt - 1)
-      pair(before[0], inner)
+      pairAt(before[0], inner, p.src, beforeLocs[0], valLoc)
   elif before.len == 0:
-    p.fail("empty expression")
+    p.fail("empty expression", whole)
   elif before.len == 1:
     result = before[0]
   else:
-    result = list(before)
+    result = listAt(before, p.src, whole, beforeLocs)
     if bodyAt >= 0:
       result.setBodyStart(bodyAt)
 
@@ -142,15 +167,16 @@ proc foldDots(p: var Parser, items: seq[Item]): seq[Item] =
   while i < items.len:
     if items[i].kind == Dot:
       if result.len == 0 or result[^1].kind != Object:
-        p.fail("'.' needs a value before it")
+        p.fail("'.' needs a value before it", items[i].loc)
         return
       if i + 1 >= items.len or items[i + 1].kind != Object:
-        p.fail("'.' needs a key after it")
+        p.fail("'.' needs a key after it", items[i].loc)
         return
-      let target = result[^1].value
-      let key = items[i + 1].value
+      let target = result[^1]
+      let whole = span(target.loc, items[i + 1].loc)
+      let value = indexCall(p.src, target, items[i + 1], items[i].loc)
       result.setLen(result.len - 1)
-      result.add Item(kind: Object, value: indexCall(target, key), dotted: true)
+      result.add Item(kind: Object, value: value, dotted: true, loc: whole)
       i += 2
     else:
       result.add items[i]
@@ -160,21 +186,22 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
   result = newSeqOfCap[Item](toks.len - i)
   var dots = false
   while i < toks.len:
+    let here = Loc(at: toks[i].at, len: toks[i].len)
     case toks[i].kind
     of Word:
-      result.add Item(kind: Object, value: atom(toks[i].text))
+      result.add Item(kind: Object, value: atom(toks[i].text), loc: here)
       inc i
     of Str:
-      result.add Item(kind: Object, value: str(toks[i].text))
+      result.add Item(kind: Object, value: str(toks[i].text), loc: here)
       inc i
     of Eq:
-      result.add Item(kind: Eq)
+      result.add Item(kind: Eq, loc: here)
       inc i
     of Colon:
-      result.add Item(kind: Colon)
+      result.add Item(kind: Colon, loc: here)
       inc i
     of Dot:
-      result.add Item(kind: Dot)
+      result.add Item(kind: Dot, loc: here)
       dots = true
       inc i
     of Open:
@@ -183,20 +210,30 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
       if p.err.len > 0:
         return
       if i >= toks.len or toks[i].kind != Close:
-        p.fail("expected ')'")
+        p.fail("expected ')' to close this '('", here)
         return
+      var group = span(here, Loc(at: toks[i].at, len: toks[i].len))
       inc i
-      var value = p.assemble(inner)
+      let innerLoc = itemsLoc(inner)
+      var value = p.assemble(inner, group)
       # A lone name or dotted access in parentheses is a call: (f), (w.f).
       if inner.len == 1 and inner[0].kind == Object and (isSymbol(value) or inner[0].dotted):
-        value = list(@[value])
-      result.add Item(kind: Object, value: value)
+        value = listAt(@[value], p.src, group, @[innerLoc])
+      result.add Item(kind: Object, value: value, loc: group)
     of Close:
       break
   if dots:
     result = p.foldDots(result)
 
-proc parseExprs(p: var Parser, lines: seq[Line], base: int): seq[objects.Object] =
+func lineStart(line: Line): Loc =
+  result = Loc(at: 0, len: 0)
+  if line.toks.len > 0:
+    result = Loc(at: line.toks[0].at, len: line.toks[0].len)
+
+# The forms of the lines indented by base, from p.pos on; locs gets where each
+# was written.
+proc parseExprs(p: var Parser, lines: seq[Line], base: int,
+    locs: var seq[Loc]): seq[objects.Object] =
   result = @[]
   while p.pos < lines.len and p.err.len == 0:
     let at = p.pos
@@ -204,7 +241,7 @@ proc parseExprs(p: var Parser, lines: seq[Line], base: int): seq[objects.Object]
       break
     if lines[at].indent > base:
       p.num = lines[at].num
-      p.fail("unexpected indentation")
+      p.fail("unexpected indentation", lineStart(lines[at]))
       break
     inc p.pos
     p.num = lines[at].num
@@ -212,34 +249,54 @@ proc parseExprs(p: var Parser, lines: seq[Line], base: int): seq[objects.Object]
     var i = 0
     var items = p.parseItems(lines[at].toks, i)
     if p.err.len == 0 and i < lines[at].toks.len:
-      p.fail("unexpected ')'")
+      p.fail("unexpected ')'", Loc(at: lines[at].toks[i].at, len: 1))
 
     var bodyAt = -1
     if p.err.len == 0 and items.len > 0 and items[^1].kind == Colon:
+      let colon = items[^1].loc
       items.setLen(items.len - 1)
       bodyAt = items.len
       if p.pos < lines.len and lines[p.pos].indent > lines[at].indent:
-        for form in p.parseExprs(lines, lines[p.pos].indent):
-          items.add Item(kind: Object, value: form)
+        var bodyLocs: seq[Loc] = @[]
+        let forms = p.parseExprs(lines, lines[p.pos].indent, bodyLocs)
+        for k in 0 ..< forms.len:
+          items.add Item(kind: Object, value: forms[k], loc: bodyLocs[k])
       else:
-        p.fail("missing block after ':'")
+        p.fail("missing block after ':'", colon)
 
     if p.err.len == 0:
-      result.add p.assemble(items, bodyAt)
+      var whole = Loc(at: 0, len: 0)
+      result.add p.assemble(items, whole, bodyAt)
+      locs.add whole
 
-proc parseOwl*(source: string): Result[seq[objects.Object], string] =
-  var t = Tokenizer(err: "", line: 0)
+# readForms source name: the forms of an owl source, each list and pair
+# knowing where it was written (for error reports), or the error.
+proc readForms*(source: string, name: string,
+    internal: bool = false): Result[seq[objects.Object], OwlError] =
+  var t = Tokenizer(err: "", line: 0, errAt: 0)
   var lines: seq[Line] = @[]
   try:
     lines = scanLines(t, source)
   except:
     discard
-  var p = Parser(pos: 0, num: 0, err: "")
+  var p = Parser(pos: 0, num: 0, err: "", src: newSource(name, source, internal), errLoc: Loc(at: 0, len: 0))
   if t.err.len > 0:
     p.num = if t.line > 0: t.line else: 1
-    p.fail(t.err)
-  let forms = p.parseExprs(lines, 0)
+    p.fail(t.err, Loc(at: int32(t.errAt), len: 1))
+  var locs: seq[Loc] = @[]
+  let forms = p.parseExprs(lines, 0, locs)
   if p.err.len > 0:
-    result = err(p.err)
+    result = err(owlError(ReadError, p.err, place(p.src, p.errLoc)))
   else:
     result = ok(forms)
+
+proc parseOwl*(source: string, name: string = "<input>"): Result[seq[objects.Object], string] =
+  ## readForms with the error as text: "line N: message".
+  let r = readForms(source, name)
+  if r.isOk:
+    result = ok(r.get(@[]))
+  else:
+    let e = r.error(owlError(ReadError, ""))
+    let (line, col) = lineCol(source, int(e.place.loc.at))
+    discard col
+    result = err("line " & $line & ": " & e.message)

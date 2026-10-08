@@ -28,19 +28,18 @@ proc captureStdio*() =
 proc clearCaptured*() =
   outputLines = @[]
   errorLines = @[]
+  currentError.message = ""
 
+# The latest error: errors are not printed when raised (the handler that
+# ends one reports it), so this is the error window of the last one raised.
 proc lastError*(): string =
-  result = if errorLines.len > 0: errorLines[^1] else: "(no error reported)"
+  result = if currentError.message.len > 0: errorText() else: "(no error reported)"
 
 proc check*(label: string, body: proc () {.raises.}) =
-  let before = errorLines.len
   try:
     body()
   except:
-    var reason = ""
-    if errorLines.len > before:
-      reason = ": " & lastError()
-    expect false, label & " raised unexpectedly" & reason
+    expect false, label & " raised unexpectedly: " & lastError()
 
 proc finish*(name: string) =
   if failures == 0:

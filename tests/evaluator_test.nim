@@ -661,7 +661,7 @@ try:
 except:
   parseBad = true
 expect parseBad, "parse fails on malformed source"
-expect find(lastError(), "parse error") >= 0, "parse names the failure, got: " & lastError()
+expect find(lastError(), "read error") >= 0, "parse names the failure, got: " & lastError()
 
 let eTry = runOk("""
 ok = try (+ 1 2):
@@ -686,7 +686,7 @@ try:
 except:
   tryRethrow = true
 expect tryRethrow, "an error in the try handler propagates"
-expect lastError() == "two", "the handler's error is reported, got: " & lastError()
+expect currentError.message == "two", "the handler's error is reported, got: " & lastError()
 
 let eChar = runOk("""
 a = char 65

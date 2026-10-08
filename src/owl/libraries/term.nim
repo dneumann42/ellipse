@@ -8,6 +8,11 @@ import ./io
 {.compile: "owl_term.c".}
 
 proc owl_term_is_tty(): int32 {.importc: "owl_term_is_tty".}
+proc owl_term_stderr_is_tty(): int32 {.importc: "owl_term_stderr_is_tty".}
+
+# Whether stderr is a terminal: owl colors its error reports there.
+proc stderrIsTerminal*(): bool =
+  owl_term_stderr_is_tty() != 0
 proc owl_term_raw(on: int32): int32 {.importc: "owl_term_raw".}
 proc owl_term_read_byte(timeoutMs: int32): int32 {.importc: "owl_term_read_byte".}
 proc owl_term_size(rows, cols: var int32) {.importc: "owl_term_size".}

@@ -94,6 +94,7 @@ test: setup bin/owl
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/reader_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/evaluator_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/modules_test.nim
+	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/errors_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/source_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/live_test.nim
 	./build/nimony/bin/nimony --outdir:bin/ -p:src -r c ./tests/tui_test.nim

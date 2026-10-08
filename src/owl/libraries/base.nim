@@ -1,5 +1,5 @@
 import std/[cmdline, options, strutils]
-import owl/[objects, evaluator, reader, modules]
+import owl/[objects, evaluator, reader, modules, errors]
 
 # Compile-time file embedding via a Nimony template plugin (see deps/embedFile.nim).
 template embedFile(path: string): string {.plugin: "deps/embedFile".}
@@ -16,15 +16,20 @@ proc evalBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   eval(syntax, env)
 
 proc parseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
-  if args.len != 1:
-    err("parse needs one string")
+  # parse code (name): the forms of code. name is what the code is called in
+  # error reports, <input> when it is left out.
+  if args.len < 1 or args.len > 2:
+    err("parse needs a string and an optional name")
   let source = eval(args[0], env)
   if not isString(source):
-    err("parse needs a string, got " & stringify(source))
-  let parsed = parseOwl(toStr(source))
-  if not parsed.isOk:
-    err("parse error: " & parsed.error("unknown"))
-  list(parsed.get(@[]))
+    errAt(args[0], "parse needs a string, got " & stringify(source))
+  var name = "<input>"
+  if args.len == 2:
+    let n = eval(args[1], env)
+    if not isString(n):
+      errAt(args[1], "parse needs a string name, got " & stringify(n))
+    name = toStr(n)
+  list(readSource(toStr(source), name))
 
 proc charBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   # char 27 gives the one-character string with that byte, for the control
@@ -176,9 +181,6 @@ proc withBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
       fields.add pair(car(f), value)
   record(fields)
 
-proc silentReport(msg: string) =
-  discard
-
 proc blockScope(env: ref Environment): ref Environment =
   # Every block (do, if, when, while, cond and try bodies) runs in its own
   # scope: what it defines ends with it, while set still reaches outer names.
@@ -195,25 +197,28 @@ proc callerBlockScope(env: ref Environment): ref Environment =
   if caller != nil:
     setRedirect(result, caller, newEnvironment(resolveScope(env, caller)))
 
+# The error the latest `try` caught, whole: error-report shows it, and
+# `error failure` raises it again with its place and trace.
+var caught = owlError(RuntimeError, "")
+
 proc tryBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   # try expr...: handler... evaluates the forms before the block. If one fails,
   # the error is not reported; the handler block runs instead, with `failure`
-  # bound to the message. A lone `try expr` gives nothing on failure.
+  # bound to the message (error-report gives the whole report). A lone
+  # `try expr` gives nothing on failure.
   if args.len == 0:
     err("try needs something to evaluate")
   let attempt = if bodyStart >= 1 and bodyStart < args.len: bodyStart else: args.len
-  let saved = errorReport
-  errorReport = silentReport
   var failed = false
   result = nothing()
   try:
     result = evalRange(env, args, 0, attempt)
   except:
     failed = true
-  errorReport = saved
   if failed:
+    caught = currentError
     let child = blockScope(env)
-    define(child, symbol("failure"), str(lastErrorMessage))
+    define(child, symbol("failure"), str(caught.message))
     result = evalRange(child, args, attempt, args.len)
 
 proc ifBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
@@ -298,10 +303,48 @@ proc concatBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
     result = nothing()
 
 proc errorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # error message...: fail with the words of message. `error failure` in a
+  # try handler raises the caught error again, where it happened.
   var parts: seq[string] = @[]
   for a in args:
     parts.add stringify(eval(a, env))
-  err(parts.join(" "))
+  let msg = parts.join(" ")
+  if msg.len > 0 and msg == caught.message:
+    raiseError(caught)
+  err(msg)
+
+proc errorAtBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # error-at form message...: fail pointing at form, where it was written.
+  # For commands: given a parameter, the report shows the argument as the
+  # caller wrote it. A form with no place (one built at run time) leaves the
+  # error where the error-at call is.
+  if args.len < 2:
+    err("error-at needs a form and a message")
+  let form = eval(args[0], env)
+  var parts: seq[string] = @[]
+  for i in 1 ..< args.len:
+    parts.add stringify(eval(args[i], env))
+  raiseError(RuntimeError, parts.join(" "), placeOf(form))
+
+proc errorReportBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # error-report: the error the latest try caught, as a window of text with
+  # the source lines and an arrow at the place.
+  if args.len != 0:
+    err("error-report takes no arguments")
+  str(renderError(caught))
+
+proc placeOfBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
+  # place-of form: where form was written, as {} (file) (line) (column), or
+  # nothing for a value that was not read from a source.
+  if args.len != 1:
+    err("place-of needs one form")
+  let p = placeOf(eval(args[0], env))
+  let src = p.src
+  result = nothing()
+  if src != nil:
+    let (line, col) = lineCol(src.text, int(p.loc.at))
+    result = record(@[pair(symbol("file"), str(src.name)),
+      pair(symbol("line"), number(float64(line))), pair(symbol("column"), number(float64(col)))])
 
 proc setBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   if args.len != 2:
@@ -624,6 +667,9 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("false"), boolean(false))
   define(env, symbol("concat"), newBuiltin("concat", concatBuiltin, true))
   define(env, symbol("error"), newBuiltin("error", errorBuiltin, false))
+  define(env, symbol("error-at"), newBuiltin("error-at", errorAtBuiltin, false))
+  define(env, symbol("error-report"), newBuiltin("error-report", errorReportBuiltin, true))
+  define(env, symbol("place-of"), newBuiltin("place-of", placeOfBuiltin, true))
   define(env, symbol("do"), newBuiltin("do", doBuiltin, false))
   define(env, symbol("while"), newBuiltin("while", whileBuiltin, false))
   define(env, symbol("when"), newBuiltin("when", whenBuiltin, false))
@@ -679,7 +725,7 @@ proc installBaseOwl*(env: ref Environment) =
   # time and baked in as a literal (Nimony has no staticRead). The path is
   # resolved relative to this file, so the build is independent of the cwd.
   const source: string = embedFile("base.owl")
-  let parsed = parseOwl(source)
+  let parsed = readForms(source, "<base>", true)
   if parsed.isOk:
     for f in parsed.get(@[]):
       if isCommandDefinition(f):
