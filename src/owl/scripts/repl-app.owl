@@ -10,7 +10,8 @@ use repl
 ; The repl as an ellipse_ui app, drawing the session of repl.owl: in the
 ; terminal, or in a window when owl is built with SDL (unless --tui).
 ;
-;   header      the project, unsaved documents, the keys
+;   menu bar    a menu per section of the session's commands (F10), then
+;               the project and unsaved documents
 ;   transcript  inputs at their prompts, output, values, notes and errors
 ;   documents   tabs of the open documents over the active one's items; a
 ;               tab (or Ctrl+PgUp, Ctrl+PgDn) switches, F3 hides it, Alt+O
@@ -31,6 +32,9 @@ history-draft = ""
 ; The session's status (repl-status), read after each step.
 status = nothing
 show-docs = true
+; The menu bar (repl-menus) and a command picked from it this frame.
+menus = ([])
+picked-command = nothing
 ; Whether the document panel has the keys, and its selected item.
 in-docs = false
 doc-selected = 0
@@ -174,9 +178,11 @@ fun take-any keys:
 
 ; Keys of the whole app while no screen is open. Like the prompt's, they
 ; are taken first and acted on once the frame is drawn.
-fun app-keys:
+fun app-keys in-menus:
     cond:
         (take-any ([] "F1" "Alt+X")) = "menu"
+        (take-key "F10") = "menubar"
+        (and in-menus (take-key "Escape")) = "prompt"
         (take-key "F2") = "results"
         (take-key "F3") = "toggle-docs"
         (take-key "Alt+O") = "docs"
@@ -202,6 +208,8 @@ fun act what:
         (= what "leave") = (do (repl-leave) (after-step))
         (= what "toggle-docs") = (do (set show-docs (not show-docs)) (focus-docs false))
         (= what "docs") = (do (set doc-selected 1000000) (focus-docs (not in-docs)))
+        (= what "menubar") = (toggle-menus)
+        (= what "prompt") = (focus-at "prompt" draft)
         (= what "prev-doc") = (cycle-doc -1)
         (= what "next-doc") = (cycle-doc 1)
         (or (= what "menu") (= what "results")) = (do (repl-key what) (after-step))
@@ -286,17 +294,47 @@ fun doc-action name what value:
     repl-item-action name what value
     (after-step)
 
-fun header:
+; The menu bar: the session's commands by menu (picking one runs it as F1's
+; menu does), then the project and unsaved documents.
+fun menu-bar:
     where = "no project"
     when (<> status.project nothing):
         set where (concat "project " status.project)
     when (> status.dirty 0):
         set where (concat where " · " (to-string status.dirty) " unsaved")
-    row (width = (grow)) (padding = ([] 8 8 0 0)) (bg = "panel") (gap = 16) (align-y = "center"):
-        text "owl repl" (color = "accent")
-        text where (color = "dim")
+    tool-bar "menubar":
+        for m (items menus):
+            menu m.label:
+                for c (items m.items):
+                    when (menu-item c.name c.params):
+                        set picked-command c.name
         (spacer)
-        text "F1 menu · F2 results · F3/Alt+O doc · Ctrl+Enter run · Ctrl+D leave" (color = "dim")
+        text (concat where "  ·  F10 menus · F1 commands · Ctrl+Enter run ") (color = "dim")
+
+fun menus-focused:
+    found = false
+    for m (items menus):
+        when (focused (concat "menu." m.label)):
+            set found true
+    found
+
+; F10 gives the menu bar the keys (its first menu), or gives them back.
+fun toggle-menus:
+    if (menus-focused):
+        focus-at "prompt" draft
+        do:
+            set in-docs false
+            set-focus (concat "menu." (index (at menus 0) "label"))
+
+; A command picked from the menu bar runs once the frame is drawn, and the
+; keys go back to the prompt; one picked while a screen is open is dropped.
+fun run-picked live:
+    name = picked-command
+    set picked-command nothing
+    when (and live (<> name nothing)):
+        focus-at "prompt" draft
+        repl-run name
+        (after-step)
 
 ; The prompt takes keys only in frames that began with it having them: a
 ; screen answered this frame has had the frame's keys already. Clicking it
@@ -308,7 +346,9 @@ fun prompt-view live:
         if live:
             do:
                 what = (prompt-keys)
-                when (or want-focus (not (focused "prompt"))):
+                ; a menu clicked this frame took the focus after the
+                ; frame began: leave it there
+                when (or want-focus (not (or (focused "prompt") (menus-focused)))):
                     focus-at "prompt" draft
                     set want-focus false
                 set draft:
@@ -596,12 +636,13 @@ fun view:
         set in-docs false
     side = and can-show (= s nothing)
     repl-set-columns (max 40 (- (pick side (floor (* cols 0.58)) cols) 2))
+    in-menus = (menus-focused)
     what = nothing
     when (= s nothing):
-        set what (app-keys)
-    live = and (= s nothing) (not in-docs)
+        set what (app-keys in-menus)
+    live = and (= s nothing) (and (not in-docs) (not in-menus))
     column (width = (grow)) (height = (grow)) (bg = "bg"):
-        (header)
+        (menu-bar)
         if (= s nothing):
             row (width = (grow)) (height = (grow)) (gap = 1):
                 (transcript-view)
@@ -610,6 +651,7 @@ fun view:
             screen-view s
         prompt-view live
     act what
+    run-picked (= s nothing)
 
 fun copy-text text:
     set-clipboard text
@@ -623,6 +665,7 @@ fun repl-app:
         (use-terminal)
     repl-start ({} (copy = copy-text) (windows = (window-backend)))
     set status (repl-status)
+    set menus (repl-menus)
     ; closing the window (or Ctrl+Q) is exit, asking about unsaved documents
     fun closing:
         (repl-leave)

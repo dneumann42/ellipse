@@ -61,6 +61,18 @@ proc run(code: string) {.raises.} =
   typeText(code)
   key(KeyEvent(kind: kevEnter, ctrl: true))
 
+proc clickAt(label: string) {.raises.} =
+  let d = elementData(elementId(label))
+  expect d.found, label & " was laid out"
+  let x = d.box.x + d.box.width / 2
+  let y = d.box.y + d.box.height / 2
+  setPointer(x, y, false)
+  frame()
+  setPointer(x, y, true)
+  frame()
+  setPointer(x, y, false)
+  frames()
+
 let root = parentDir(parentDir(getAppFilename()))  # bin/ is in the repo root
 
 proc shot(name: string) {.raises.} =
@@ -117,6 +129,25 @@ proc script() {.raises.} =
   key(KeyEvent(kind: kevEnter))
   expect "* x 2" in transcriptText(), "the picked item is shown"
   expect "show double" in transcriptText(), "with the command it stood for:\n" & transcriptText()
+
+  # the menu bar, made from the commands: F10, Down opens File, Right steps
+  # to Items, and picking show asks for its item
+  key(KeyEvent(kind: kevF10))
+  key(KeyEvent(kind: kevDown))
+  shot("menubar")
+  key(KeyEvent(kind: kevRight))
+  key(KeyEvent(kind: kevDown))
+  key(KeyEvent(kind: kevDown))
+  key(KeyEvent(kind: kevEnter))
+  expect screenTitle() == "show: which item of scratch?", "the menu bar runs show: " & screenTitle()
+  key(KeyEvent(kind: kevEscape))
+  # a click opens a menu, which stays open: the prompt must not take the
+  # focus back in the frame of the click
+  clickAt("menu.Project")
+  expect toBool(appVar("(focused \"menu.Project\")")), "a clicked menu keeps the focus"
+  shot("menu_clicked")
+  key(KeyEvent(kind: kevEscape))
+  expect toBool(appVar("(focused \"prompt\")")), "Escape gives it back to the prompt"
 
   # the document panel: a tab per document; Ctrl+PgUp/PgDn switch, F3 hides it
   run("new other")

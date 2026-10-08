@@ -517,10 +517,16 @@ fun show-summary s:
 ; while attached to a program: `local` (on this repl) or `screens` (here,
 ; its screens reaching the program's documents through query). Any other
 ; command runs in the program. The rest is the code, run with the
-; parameters bound. help, the menu, reading what is missing and running in
-; the right place all come from the definition.
+; parameters bound. A command joins the app's menu bar under the menu the
+; last `menu-section` named (none: only F1's menu and help list it). help,
+; the menus, reading what is missing and running in the right place all
+; come from the definition.
 
 commands = ([])
+current-menu = nothing
+
+fun menu-section name:
+    set current-menu name
 
 command interactive head+ &body:
     where = syntax-scope (at head 0)
@@ -546,6 +552,7 @@ command interactive head+ &body:
         params = params
         help = help
         runs = runs
+        menu = current-menu
         scope = where
         run = (eval-in where (at (parse (concat "command-" name)) 0))
     add-command cmd
@@ -610,11 +617,37 @@ fun at-or ws i:
         nothing
 
 fun usage cmd:
-    out = cmd.name
+    concat cmd.name (params-text cmd)
+
+fun params-text cmd:
+    out = ""
     for p (items cmd.params):
         if p.optional:
             set out (concat out " [" p.name "]")
             set out (concat out " <" p.name ">")
+    out
+
+; The menu bar: records of label and items (name, params), menus in the
+; order commands first name them.
+fun command-menus:
+    out = ([])
+    for c (items commands):
+        when (<> c.menu nothing):
+            item = {} (name = c.name) (params = (params-text c)) (help = c.help)
+            set out (add-to-menu out c.menu item)
+    out
+
+fun add-to-menu menus label item:
+    out = ([])
+    found = false
+    for m (items menus):
+        if (= m.label label):
+            do:
+                set found true
+                append out (with m (items = (concat m.items ([] item))))
+            append out m
+    when (not found):
+        append out ({} (label = label) (items = ([] item)))
     out
 
 fun command-line cmd args:
@@ -1276,10 +1309,14 @@ fun last-lines text n:
 
 ; --- the commands -----------------------------------------------------------------
 
+menu-section nothing
+
 interactive menu:
     "open this menu (also F1 or M-x)"
     local
     (open-menu)
+
+menu-section "File"
 
 interactive docs:
     "list open documents (* is active)"
@@ -1305,6 +1342,8 @@ interactive save (file? = read-save-path):
 interactive text:
     "print the active document"
     write (module-source active)
+
+menu-section "Items"
 
 interactive items (module? = read-module):
     "view a module's items: select, edit, copy (Alt+O: the panel's)"
@@ -1337,6 +1376,8 @@ interactive modules:
     echo "loaded:" (module-names)
     when (<> project nothing):
         echo (concat "project " project.name ":") (project-modules project)
+
+menu-section "Project"
 
 interactive project:
     "show the current project"
@@ -1376,6 +1417,8 @@ interactive run:
     local
     (run-project)
 
+menu-section "Program"
+
 interactive apps:
     "list running owl programs a repl can attach to"
     local
@@ -1398,6 +1441,8 @@ interactive stop:
     local
     (stop-remote)
 
+menu-section "Repl"
+
 interactive settings:
     "change repl settings"
     screens
@@ -1416,6 +1461,8 @@ interactive exit:
     "leave (also quit, or C-d)"
     local
     (leave)
+
+menu-section nothing
 
 interactive quit:
     "leave"
@@ -1509,6 +1556,12 @@ fun repl-item-action name what item:
         item-action name what item
     step run-it
 
+; A command picked from the app's menu bar, run as from the menu.
+fun repl-run name:
+    fun run-it:
+        run-command ([] name) true
+    step run-it
+
 fun repl-leave:
     step leave
 
@@ -1569,6 +1622,8 @@ export:
     repl-key = repl-key
     repl-switch = repl-switch
     repl-item-action = repl-item-action
+    repl-run = repl-run
+    repl-menus = command-menus
     repl-leave = repl-leave
     repl-answer = answer-screen
     repl-take-pending = repl-take-pending

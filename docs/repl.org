@@ -211,9 +211,11 @@ fun that reads x on a screen when it is missing: always when it must be
 given, from the menu only when it may be left out. The body opens with the
 help text and may say =local= (runs in this repl even while attached) or
 =screens= (runs here while attached, its screens reaching the program's
-documents through =query=). =help=, the menu, reading what is missing,
-logging the command it stood for and where it runs all come from that one
-definition.
+documents through =query=). The command joins the app's menu bar under
+the menu the last =menu-section "Name"= named (=menu-section nothing=
+keeps it off the bar). =help=, the F1 menu, the menu bar, reading what is
+missing, logging the command it stood for and where it runs all come from
+that one definition.
 
 A statement is recorded by what it changed, not as history (=run-statement=
 in =live.owl=). The module's own bindings are compared before and after:
@@ -252,7 +254,8 @@ calls the session through =repl-*= functions, so it sees the live state;
 
 | Area       | What                                                          |
 |------------+---------------------------------------------------------------|
-| header     | the project, unsaved documents, the keys                      |
+| menu bar   | a menu per section of the commands (F10 gives it the keys,    |
+|            | Escape gives them back), then the project and unsaved docs    |
 | transcript | inputs at their prompts, output, results as owl code; the     |
 |            | wheel scrolls it, and it follows new lines                    |
 | documents  | beside the transcript: a tab per open document (• unsaved)    |

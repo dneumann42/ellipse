@@ -20,6 +20,8 @@ APP = os.path.join(BASE, "app")
 DATA = os.path.join(BASE, "data")   # the projects owl knows, kept out of ~
 RUN = b"\x1b[13;5u"      # Ctrl+Enter, as the kitty keyboard protocol sends it
 DOWN = b"\x1b[B"
+RIGHT = b"\x1b[C"
+F10 = b"\x1b[21~"
 F1 = b"\x1bOP"
 F2 = b"\x1bOQ"
 F3 = b"\x1bOR"
@@ -80,6 +82,42 @@ def panel(screen):
 def panel_row(screen, needle):
     rows = [l for l in panel(screen).split("\n") if needle in l]
     return rows[0] if rows else ""
+
+
+def click(r, col, row):
+    # an SGR mouse press, then the release in a later frame, as a hand would
+    r.type(b"\x1b[<0;%d;%dM" % (col, row), 0.4)
+    return r.type(b"\x1b[<0;%d;%dm" % (col, row), 1.2)
+
+
+def menu_bar(r):
+    s = r.screen.text()
+    expect("[File]" in s and "[Project]" in s and "[Repl]" in s,
+           "the menu bar has a menu per section of the commands:\n" + s)
+    r.type(F10, 0.8)
+    s = r.type(DOWN, 1.0)
+    expect("open   <module>" in s, "F10 then Down opens File, listing its commands:\n" + s)
+    s = r.type(RIGHT, 1.0)
+    expect("rerun" in s and "open   <module>" not in s, "Right moves to the next menu:\n" + s)
+    r.type(DOWN + DOWN + b"\r", 1.5)
+    expect(r.shows("show: which item of"), "picking show reads its item:\n" + r.screen.text())
+    r.type(ESC, 1.0)
+    # a click opens a menu, which stays open (it used to blink shut)
+    col = r.screen.text().split("\n")[0].index("[Project]") + 2
+    s = click(r, col, 1)
+    expect("open-project" in s, "a clicked menu stays open:\n" + s)
+    s = r.type(b"", 0.8)
+    expect("open-project" in s, "and is still open a moment later:\n" + s)
+    # clicking one of its items runs that command
+    lines = s.split("\n")
+    row = [i for i, l in enumerate(lines) if "projects" in l and "open-project" not in l][0]
+    col = lines[row].index("projects") + 2
+    click(r, col, row + 1)
+    expect(r.shows("* app"), "clicking projects in the menu lists them:\n" + r.screen.text())
+    r.type(F10, 0.8)
+    r.type(ESC, 0.8)
+    r.run(b"(+ 2 3)")
+    expect(r.shows("=> 5"), "Escape gives the keys back to the prompt:\n" + r.screen.text())
 
 
 def documents(r):
@@ -192,6 +230,7 @@ def main():
         time.sleep(2)
         r = Repl(APP)
         screens(r, "local", "scratch")
+        menu_bar(r)
         documents(r)
         r.run(b"attach %d" % app.pid, 1.5)
         expect(r.shows("attached to app"), "attach:\n" + r.screen.text())
