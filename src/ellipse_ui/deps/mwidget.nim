@@ -84,6 +84,22 @@
 ## A direct `emit Name(...)` of an event the widget does not declare is a
 ## compile error.
 ##
+## Hot widgets: a `hot` modifier (with or without `focusable`)
+##
+##   widget hot StatusPill(label: string):
+##     ...
+##
+## keeps the source exactly this small and generates the rest: a packed
+## `NameParams` object, a library entry exported as
+## `(exportc "ellipseHot_Name")` -- the record the module's NIF carries
+## and the running app dlsyms -- and three `when defined(...)` shapes:
+## the plain app compiles the body as usual; the hot app
+## (`-d:ellipseHotApp`) turns `NameImpl` into pack-and-dispatch through
+## `hotWidget` (`ellipse_ui/widgets`, `ellipse/hotload`); the library
+## (`-d:ellipseHotLib`) compiles the body plus its entry. The body never
+## lands in the hot app, so the library's fresh copy can never be
+## interposed by the executable's stale one. See `ellipse/hotload`.
+##
 ## Input shape (verified against nifler output):
 ##   (stmts widget (oconstr Name (kv pname ptype)...) (stmts impl...))
 ## or, for `widget Name():`, the head is `(call Name)`; for `widget Name:`
@@ -93,7 +109,7 @@
 ## `pragmax` argument even for an `untyped` parameter and asserts on it.)
 
 import plugins
-import std/[syncio, envvars]
+import std/[syncio, strutils, envvars]
 import ./meventgen
 
 type
@@ -295,6 +311,277 @@ proc emitSlotProcAndCall(dest: var NifBuilder; info: LineInfo; name: string;
         dest.addIdent p.name
     dest.addSymUse slotSym, info
 
+proc lcFirst(s: string): string =
+  if s.len == 0: s else: toLowerAscii(s[0]) & substr(s, 1)
+
+proc emitArgsObject(dest: var NifBuilder; info: LineInfo; name: string;
+                    params: seq[WidgetParam]) =
+  ## `type NameParams = object`, one field per (final) parameter. App and
+  ## library compile this from the same source identically, so the packed
+  ## layout agrees without a second definition anywhere.
+  dest.openTree("type", info)
+  dest.addIdent name & "Params"
+  dest.addEmptyNode3 info
+  dest.openTree("object", info)
+  dest.addEmptyNode info             # no inheritance
+  for p in params:
+    dest.openTree("fld", info)
+    dest.addIdent p.name
+    dest.addEmptyNode2 info          # exported, pragmas
+    if p.injected.len > 0:
+      dest.addIdent p.injected
+    else:
+      dest.emitType(p.typ, true)
+    dest.addEmptyNode info           # no default
+    dest.closeTree()
+  dest.closeTree()                   # object
+  dest.closeTree()                   # type
+
+proc emitPackVar(dest: var NifBuilder; info: LineInfo; name: string;
+                 params: seq[WidgetParam]): SymId =
+  ## `var packed = NameParams(p = p, ...)` from the in-scope parameters;
+  ## returns the local's symbol.
+  result = genSym()
+  dest.openTree("var", info)
+  dest.addSymDef result, info
+  dest.addEmptyNode3 info
+  dest.openTree("oconstr", info)
+  dest.addIdent name & "Params"
+  for p in params:
+    dest.openTree("kv", info)
+    dest.addIdent p.name
+    dest.addIdent p.name
+    dest.closeTree()
+  dest.closeTree()
+  dest.closeTree()
+
+proc emitAddrOf(dest: var NifBuilder; info: LineInfo; arg: SymId) =
+  dest.openTree("cmd", info)
+  dest.addIdent "addr"
+  dest.addSymUse arg, info
+  dest.closeTree()
+
+proc emitImplShape(dest: var NifBuilder; info: LineInfo; name: string;
+                   params: seq[WidgetParam]; hasRet: bool; callee: string;
+                   viaWidget: bool) =
+  ## `proc NameImpl*(params...) [-> bool]` for one of the two app shapes:
+  ## pack the arguments, then either hand the block to `hotWidget` (the
+  ## dispatcher, which paints a placeholder itself while no library is
+  ## loaded) or call the in-binary draw proc directly (plain builds).
+  dest.openTree("proc", info)
+  dest.addIdent name & "Impl"
+  dest.addIdent "x"
+  dest.addEmptyNode2 info
+  dest.openTree("params", info)
+  for p in params:
+    emitParam(dest, info, p)
+  dest.closeTree()
+  if hasRet:
+    dest.addIdent "bool"
+    dest.addEmptyNode2 info
+  else:
+    dest.addEmptyNode3 info
+  dest.openTree("stmts", info)
+  let packed = emitPackVar(dest, info, name, params)
+  if hasRet:
+    dest.openTree("asgn", info)
+    dest.addIdent "result"
+    if viaWidget:
+      dest.openTree("infix", info)
+      dest.addIdent ">"
+      dest.openTree("call", info)
+      dest.addIdent "hotWidget"
+      dest.addStrLit "ellipseHot_" & name
+      dest.addStrLit name
+      emitAddrOf(dest, info, packed)
+      dest.closeTree()
+      dest.addIntLit 0
+      dest.closeTree()                # infix
+    else:
+      dest.openTree("call", info)
+      dest.addIdent callee
+      emitAddrOf(dest, info, packed)
+      dest.closeTree()
+    dest.closeTree()                  # asgn
+  else:
+    # plain builds: the draw call is a void statement (discarding a void
+    # expression is illegal); the dispatcher returns cint, so discard it
+    if viaWidget:
+      dest.openTree("discard", info)
+      dest.openTree("call", info)
+      dest.addIdent "hotWidget"
+      dest.addStrLit "ellipseHot_" & name
+      dest.addStrLit name
+      emitAddrOf(dest, info, packed)
+      dest.closeTree()
+      dest.closeTree()                  # discard
+    else:
+      dest.openTree("call", info)
+      dest.addIdent callee
+      emitAddrOf(dest, info, packed)
+      dest.closeTree()
+  dest.closeTree()                    # stmts
+  dest.closeTree()                    # proc
+
+proc emitHotDrawProc(dest: var NifBuilder; info: LineInfo; name: string;
+                     params: seq[WidgetParam]; hasRet: bool;
+                     focusable: bool; sections: EventSections;
+                     idIdent: string) =
+  ## The body proper in packed form: `proc nameDraw(a: ptr NameParams)`
+  ## unpacks every field to a local of its source name, so the author's
+  ## body runs verbatim -- event frame included.
+  dest.openTree("proc", info)
+  dest.addIdent lcFirst(name) & "Draw"
+  dest.addEmptyNode info
+  dest.addEmptyNode2 info
+  dest.openTree("params", info)
+  dest.openTree("param", info)
+  dest.addIdent "a"
+  dest.addEmptyNode2 info
+  dest.openTree("ptr", info)
+  dest.addIdent name & "Params"
+  dest.closeTree()
+  dest.addEmptyNode info
+  dest.closeTree()                    # param a
+  dest.closeTree()                    # params
+  if hasRet:
+    dest.addIdent "bool"
+    dest.addEmptyNode2 info
+  else:
+    dest.addEmptyNode3 info
+  dest.openTree("stmts", info)
+  for p in params:
+    dest.openTree("let", info)
+    dest.addIdent p.name
+    dest.addEmptyNode3 info
+    dest.openTree("dot", info)
+    dest.addIdent "a"
+    dest.addIdent p.name
+    dest.closeTree()
+    dest.closeTree()                  # let
+  if focusable:
+    dest.withTree CallS, info:
+      dest.addIdent "registerFocus"
+      dest.addIdent "id"
+      dest.addIdent "tabIndex"
+  emitEventFrame(dest, info, sections, name, idIdent)
+  dest.closeTree()                    # stmts
+  dest.closeTree()                    # proc
+
+proc emitHotEntry(dest: var NifBuilder; info: LineInfo; name: string;
+                  hasRet: bool) =
+  ## The exported library entry -- `(exportc "ellipseHot_Name")` is exactly
+  ## the record the module's NIF carries, and the name the running app
+  ## scans for and dlsyms.
+  dest.openTree("proc", info)
+  dest.addIdent lcFirst(name) & "HotEntry"
+  dest.addEmptyNode info
+  dest.addEmptyNode2 info
+  dest.openTree("params", info)
+  dest.openTree("param", info)
+  dest.addIdent "args"
+  dest.addEmptyNode2 info
+  dest.addIdent "pointer"
+  dest.addEmptyNode info
+  dest.closeTree()                    # param args
+  dest.closeTree()                    # params
+  dest.addIdent "cint"
+  dest.openTree("pragmas", info)
+  dest.addIdent "cdecl"
+  dest.openTree("kv", info)
+  dest.addIdent "exportc"
+  dest.addStrLit "ellipseHot_" & name
+  dest.closeTree()
+  dest.closeTree()                    # pragmas
+  dest.addEmptyNode info              # effects
+  dest.openTree("stmts", info)
+  dest.openTree("let", info)
+  dest.addIdent "a"
+  dest.addEmptyNode3 info
+  dest.openTree("cast", info)
+  dest.openTree("ptr", info)
+  dest.addIdent name & "Params"
+  dest.closeTree()
+  dest.addIdent "args"
+  dest.closeTree()                    # cast
+  dest.closeTree()                    # let a
+  if hasRet:
+    # result = cint(ord(nameDraw(a)))
+    dest.openTree("asgn", info)
+    dest.addIdent "result"
+    dest.openTree("call", info)
+    dest.addIdent "cint"
+    dest.openTree("call", info)
+    dest.addIdent "ord"
+    dest.openTree("call", info)
+    dest.addIdent lcFirst(name) & "Draw"
+    dest.addIdent "a"
+    dest.closeTree()                  # draw
+    dest.closeTree()                  # ord
+    dest.closeTree()                  # cint
+    dest.closeTree()                  # asgn
+  else:
+    dest.openTree("call", info)
+    dest.addIdent lcFirst(name) & "Draw"
+    dest.addIdent "a"
+    dest.closeTree()
+    dest.openTree("asgn", info)
+    dest.addIdent "result"
+    dest.addIntLit 0
+    dest.closeTree()
+  dest.closeTree()                    # stmts
+  dest.closeTree()                    # proc
+
+proc emitHotScaffolding(dest: var NifBuilder; info: LineInfo; name: string;
+                        params: seq[WidgetParam]; hasRet: bool;
+                        retType: NifCursor; focusable: bool;
+                        sections: EventSections; idIdent: string) =
+  ## One widget, three shapes chosen by `when defined(...)` -- invisible
+  ## from the source, which stays a plain `widget hot Name(...):`.
+  ##
+  ##   -d:ellipseHotApp   `NameImpl` packs and dispatches through the
+  ##                      loaded library's entry (placeholder until one is)
+  ##   -d:ellipseHotLib   the body proper (`nameDraw`) plus its entry
+  ##   plain builds       the body, forwarded to directly: behaves exactly
+  ##                      like a widget written without the modifier
+  ##
+  ## The body compiles into the library and the plain app only, never into
+  ## the hot app -- so the library's (fresh) copy can never be interposed
+  ## by the executable's (stale) one.
+  emitArgsObject(dest, info, name, params)
+
+  dest.openTree("when", info)
+  dest.openTree("elif", info)
+  dest.openTree("call", info)
+  dest.addIdent "defined"
+  dest.addIdent "ellipseHotApp"
+  dest.closeTree()                    # defined(ellipseHotApp)
+  dest.openTree("stmts", info)
+  emitImplShape(dest, info, name, params, hasRet, "", true)
+  dest.closeTree()                    # stmts
+  dest.closeTree()                    # elif
+
+  dest.openTree("else", info)
+  dest.openTree("stmts", info)
+  emitHotDrawProc(dest, info, name, params, hasRet, focusable, sections,
+                  idIdent)
+  dest.openTree("when", info)
+  dest.openTree("elif", info)
+  dest.openTree("call", info)
+  dest.addIdent "defined"
+  dest.addIdent "ellipseHotLib"
+  dest.closeTree()
+  dest.openTree("stmts", info)
+  emitHotEntry(dest, info, name, hasRet)
+  dest.closeTree()                    # stmts
+  dest.closeTree()                    # elif
+  dest.closeTree()                    # inner when
+  emitImplShape(dest, info, name, params, hasRet,
+                lcFirst(name) & "Draw", false)
+  dest.closeTree()                    # stmts
+  dest.closeTree()                    # else
+  dest.closeTree()                    # outer when
+
 proc parseParams(head: NifCursor): seq[WidgetParam] =
   result = @[]
   var c = firstChild(head)
@@ -339,16 +626,21 @@ proc transform(n: NifCursor): NifBuilder =
 
   var head = args
   var focusable = false
-  if head.kind == TagLit and head.tagText == "cmd":
-    # `widget focusable Name(...)`: the modifier, then the real head
+  var hot = false
+  # modifiers nest: `widget hot focusable Name(...)` arrives as
+  # (cmd hot (cmd focusable <head>)); accept either order
+  while head.kind == TagLit and head.tagText == "cmd":
     var mc = firstChild(head)
-    if not mc.eqIdent("focusable"):
+    if mc.eqIdent("focusable"):
+      focusable = true
+    elif mc.eqIdent("hot"):
+      hot = true
+    else:
       return errorTree("widget: unknown modifier `" & mc.atomText &
-        "` (supported: focusable)", mc)
-    focusable = true
+        "` (supported: focusable, hot)", mc)
     skip mc
     if not mc.hasMore:
-      return errorTree("widget: expected `widget focusable Name(params)`",
+      return errorTree("widget: expected `widget [modifiers] Name(params)`",
         head)
     head = mc
   # `Name(params) -> T`: a widget with a value, returned by both the
@@ -426,6 +718,12 @@ proc transform(n: NifCursor): NifBuilder =
         (p.typ.kind == Ident and p.typ.identText == "ElementId")):
       idIdent = "id"
 
+  if hot and hasRet and not (retType.kind == Ident and
+      retType.identText == "bool"):
+    return errorTree("widget `" & name & "`: hot widgets return nothing, " &
+      "or `bool` through `focusable` (packed returns cross the library " &
+      "boundary by value)", head)
+
   # --- (proc NameImpl* <params> = impl) ---------------------------------
   result.withTree StmtsS, info:
     # --- event types this widget declares ---------------------------------
@@ -433,27 +731,31 @@ proc transform(n: NifCursor): NifBuilder =
       if d.declares:
         emitEventType(result, d, moduleName(info))
 
-    result.withTree ProcS, info:
-      result.addIdent name & "Impl"
-      result.addIdent "x"                 # exported
-      result.addEmptyNode2 info           # pattern, typevars
-      result.withTree ParamsU, info:
-        for p in params:
-          emitParam(result, info, p)
-      if hasRet:
-        result.emitType(retType, false)
-        result.addEmptyNode2 info         # pragmas, effects
-      else:
-        result.addEmptyNode3 info         # result, pragmas, effects
-      result.withTree StmtsS, info:
-        if focusable:
-          # registerFocus(id, tabIndex) ahead of the body
-          result.withTree CallS, info:
-            result.addIdent "registerFocus"
-            result.addIdent "id"
-            result.addIdent "tabIndex"
-        # handlers + pushEventFrame + try: body finally: popEventFrame()
-        emitEventFrame(result, info, sections, name, idIdent)
+    if hot:
+      emitHotScaffolding(result, info, name, params, hasRet, retType,
+                         focusable, sections, idIdent)
+    else:
+      result.withTree ProcS, info:
+        result.addIdent name & "Impl"
+        result.addIdent "x"                 # exported
+        result.addEmptyNode2 info           # pattern, typevars
+        result.withTree ParamsU, info:
+          for p in params:
+            emitParam(result, info, p)
+        if hasRet:
+          result.emitType(retType, false)
+          result.addEmptyNode2 info         # pragmas, effects
+        else:
+          result.addEmptyNode3 info         # result, pragmas, effects
+        result.withTree StmtsS, info:
+          if focusable:
+            # registerFocus(id, tabIndex) ahead of the body
+            result.withTree CallS, info:
+              result.addIdent "registerFocus"
+              result.addIdent "id"
+              result.addIdent "tabIndex"
+          # handlers + pushEventFrame + try: body finally: popEventFrame()
+          emitEventFrame(result, info, sections, name, idIdent)
 
     # --- (template Name* <untyped params> = ...closure wrapper...) ------
     result.withTree TemplateS, info:

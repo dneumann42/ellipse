@@ -1,28 +1,6 @@
 ## The tabbed view container: a strip of tab buttons over one content
-## panel that swaps pages with the selection.
-##
-## Which tab is active is *view* state, not screen data, so -- like an
-## open dropdown -- it lives in this module keyed by the view's element
-## id. `TabbedView` renders the strip, folds the click into its table,
-## then calls the body slot inside the panel; the body asks `activeTab`
-## which page to draw, so a click takes effect in the very frame it
-## happens:
-##
-##   let settingsId = hashId("settings")
-##   TabbedView(id = settingsId, tabs = @["General", "Audio"]):
-##     case activeTab(settingsId)
-##     of 0: generalPane()
-##     else: audioPane()
-##
-## `setActiveTab` moves the selection from anywhere (tab counts shifting
-## between frames are clamped by the view). For callers who own the
-## selection themselves, `tabStrip` is the standalone checkbox-style
-## piece: `tab = tabStrip(id, labels, tab)`.
-##
-## The strip is one Tab stop (`tabStripId(id)`); while it holds focus
-## Left/Right step the selection (wrapping) and Home/End jump to the ends.
-##
-## A selection change emits `Picked` with the view's `id` and the new tab.
+## panel that swaps pages with the selection. See
+## `documentation/nim-tutorial.md` §6.8 (Tabs).
 
 import std/tables
 

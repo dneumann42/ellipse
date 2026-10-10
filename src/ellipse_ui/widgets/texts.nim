@@ -1,13 +1,7 @@
 ## Reading matter: the body-text scale that pairs with the headings, plus a
-## few small named styles so screens share one voice. Everything here is a
-## one-liner over `common.textLine` (a static `textElement` in a sized
-## auto-id row) except `textLink`, which adds the checkbox's click
-## detection, and `badge`, which adds a pill. Sizes and colours follow the
-## live theme (see `ellipse_ui/theme`).
-##
-## Text elements wrap at their container's width: give the paragraph room
-## (a `grow`-width parent, e.g. `Prose`) and long lines break on
-## whitespace.
+## few small named styles so screens share one voice. See
+## `documentation/nim-tutorial.md` §6.7 (Headings and reading text) and
+## `documentation/reference-widgets.md` §2.
 
 import clay
 import ../ui

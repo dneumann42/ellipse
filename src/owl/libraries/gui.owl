@@ -10,71 +10,15 @@ use net
 use attach
 
 ; Owl apps on the ellipse_ui toolkit. The builtins (gui.nim) are the toolkit
-; itself: row, column, text, the stock widgets, event frames and the frame
-; loop. This half is what owl adds on top: `widget`, `run-app`, and the
-; reloading and repl serving a running app does.
-;
-;   use gui
-;
-;   count = 0
-;
-;   widget focusable Counter label n:
-;       emits Bumped by
-;       row (gap = 8) (align-y = "center"):
-;           text (concat label ": " (to-string n))
-;           when (button (concat id ".more") "+1"):
-;               emit Bumped (by = 1)
-;
-;   fun view:
-;       handle-events:
-;           event Bumped e:
-;               set count (+ count e.by)
-;           column (padding = 24):
-;               Counter "clicks" "Clicks" count
-;
-;   run-app (title = "Counter"):
-;       (view)
-;
-; run-app calls its block every frame, so redefining view (or anything it
-; calls) changes the next frame, and module state lives in plain bindings,
-; which a reload keeps.
+; itself; gui.owl adds `widget`, `run-app`, hot reload and the repl. See
+; `documentation/owl-tutorial.md` for the full walkthrough.
 
 ; --- widgets ------------------------------------------------------------------
 ;
 ; `widget` is the owl port of ellipse_ui's `widget` macro: it rewrites a
 ; definition into a fun whose body runs inside an event frame, shared with
-; the Nim widgets, so events bubble through owl and Nim widgets alike.
-;
-;   widget focusable Toggle label on:
-;       emits Toggled              ; a stock event: fields id and on
-;       event Toggled e:           ; catch it here first...
-;           set e (with e (on = (and e.on enabled)))
-;           reemit                 ; ...and pass it on, changed
-;       row (id = id) (focus-ring = id):
-;           text label
-;       when (or (clicked id) (activated id)):
-;           emit Toggled (id = id) (on = (not on))
-;
-;   widget Settings &body:
-;       emits SettingsChanged
-;       event Toggled e:
-;           emit SettingsChanged   ; starts at Settings' parent frame
-;       (body)
-;
-; - `focusable` adds an id parameter first and (tab-index = 0) last, and
-;   registers the widget on the Tab chain before its body runs.
-; - `emits Name field...` declares an event and its fields; a bare
-;   `emits Name` names one declared elsewhere (the stock ones: Pressed,
-;   Toggled, Picked, TextChanged, TextCommitted, NumberChanged, MenuPicked).
-;   An `emit` of an event the widget does not declare is refused when the
-;   widget is defined.
-; - `event Name e:` sections are the widget's handlers. A handler consumes
-;   the event unless it calls reemit; `set e` changes what is passed on.
-; - A parameter written &name is the slot the call's `:` block fills; a slot
-;   left empty draws nothing. Other slots are passed by name as funs.
-; - The widget gives back its body's last value, like a fun.
-;
-; (widget-code Name) shows the fun a widget became.
+; the Nim widgets. See `documentation/owl-tutorial.md` §5 (Widgets with
+; slots and the `widget` form).
 
 widget-codes = ([])
 
@@ -317,15 +261,8 @@ fun item-radius:
 
 ; --- running an app ------------------------------------------------------------
 ;
-; run-app opens the window and runs the frame loop until it closes. While it
-; runs, the app:
-;   - serves repls on its socket: `owl repl`, then `attach` (see wire.owl);
-;   - reloads a project module whose file changes on disk (live.owl keeps
-;     the state of its bindings), so saving in any editor shows at once.
-; Both wait on the frame loop's fd watching: an idle app stays asleep.
-;
-; A reload that reruns this statement (its text changed) only swaps in the
-; new block and title; the loop keeps running.
+; run-app opens the window and runs the frame loop until it closes. See
+; `documentation/owl-tutorial.md` §9 and §10.
 
 fun run-app (title = "owl") (width = 1280) (height = 720) (debug = true) &view:
     config = {} (title = title) (width = width) (height = height) (debug = debug)

@@ -1,49 +1,6 @@
-## Widget cadences: how often each part of the UI refreshes.
-##
-## The app loop only runs frames somebody asked for (see
-## `ellipse/platform/pacing`), and every frame re-runs the whole widget tree --
-## that is immediate mode. A widget whose *content* is costly or naturally
-## slow (a clock, a battery gauge, a window list read over IPC) guards that
-## work with `refresh`, which both decides whether the block runs this frame
-## and schedules the frame it is due in next:
-##
-##   var clockText = ""
-##
-##   widget Clock():
-##     refresh every(1000, wall = true):   # on the second, every second
-##       clockText = formatClock(now())
-##     text(clockText)
-##
-##   widget Title():
-##     refresh everyFrame():               # keep it live at vsync
-##       titleText = focusedWindowTitle()
-##     text(titleText)
-##
-##   widget CpuGraph():
-##     item(hashId("cpu"), row(...)):
-##       refresh onHover(every(100)):      # sample only while looked at
-##         samples.add readCpu()
-##       ...
-##
-## The loop then wakes at the rate of the fastest *due* guard -- with only
-## the clock on screen, once per second; nothing at all while idle -- and
-## every slower guard keeps its own schedule inside the frames that run.
-##
-## Cadences (from `pacing`): `everyFrame()`, `every(ms, wall = false)`,
-## `onInput()` (first frame and `invalidate` only), `onHover(rate)` and
-## `c.whileHovered(rate)`. Hover means the pointer is over the element open
-## at the guard -- put the guard inside the widget's own `item` -- or over
-## the `hoverId` passed explicitly.
-##
-## A guard is identified by its widget (the event system's `WidgetKey`) and
-## its position among that widget's guards this frame; pass a `label` when
-## guards come and go conditionally, or when code outside the UI needs to
-## wake it with `invalidate(label)`.
-##
-## Animations ask for frames themselves: `approach` eases a value toward a
-## target and keeps frames coming until it lands, `requestFrame()` asks for
-## just the next one, and `trackPointer()` makes every pointer move wake the
-## loop for a widget that follows the cursor.
+## Widget cadences: how often each part of the UI refreshes. See
+## `documentation/nim-tutorial.md` §11 (Cadence, animation and the frame
+## loop).
 
 import std/[tables, math]
 

@@ -1,14 +1,5 @@
-## Checkboxes: `checkbox` toggles a caller-owned bool.
-##
-## The tick box itself is a filled inner square rather than a glyph -- the
-## renderer only promises rectangles and the UI font, so no `✓` to tofu out.
-## That square is `common.tickBox`; both widgets here hang it in a
-## `ui.item` over a `common.toggleRowDecl` frame. All geometry and colour
-## comes from the live theme (see `ellipse_ui/theme`).
-##
-## Both are Tab stops at `tabIndex`; Space or Enter flips them while
-## focused. Each returns the state to store back and emits `Toggled` (with
-## its id and the new state) when it flips.
+## Checkboxes: `checkbox` toggles a caller-owned bool. See
+## `documentation/nim-tutorial.md` §6.2 (Checkboxes and switches).
 
 import clay
 import ../ui

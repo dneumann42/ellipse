@@ -1,18 +1,5 @@
-## A multi-choice dropdown: the field summarises the set, the popover holds
-## checkbox rows plus an All/None footer. The selection is a caller-owned
-## bitmask -- `bit(i)` is option `i`'s flag -- so one value travels through
-## the immediate-mode round trip without allocating.
-##
-## The dropdown scaffolding (open-dropdown slot, summary field, floating
-## panel, option rows, shaded footer buttons) comes from `common`, shared
-## with `comboBox`; only the tick rows and their bitmask bookkeeping are
-## this widget's own.
-##
-## Keyboard: a Tab stop at `tabIndex`; Enter toggles the list, Space opens
-## it, Escape closes it. In the open list Up/Down move a highlight and
-## Space ticks the highlighted option.
-##
-## A changed mask emits `SelectionChanged` with the widget's id.
+## A multi-choice dropdown over a caller-owned bitmask. See
+## `documentation/nim-tutorial.md` §6.4 (Multi-choice dropdown).
 
 import clay
 import ../ui

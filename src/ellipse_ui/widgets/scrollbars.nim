@@ -1,40 +1,5 @@
-## Floating, draggable scrollbars for clay clip/scroll containers.
-##
-## The pattern follows the gothivania HUD's `clay::Scrollbar`
-## (`src/hud/clay_dsl.hpp`): the bar is a pair of *floating* elements -- a
-## translucent track plus a proportional thumb -- anchored over the right
-## edge (or bottom edge) of the scroll container currently being declared.
-## Geometry comes from the container's previous-frame layout, so a bar
-## appears one frame after its container. It hides whenever the content
-## fits, unless the caller asks for `always`: then every clipped axis
-## keeps its bar, with a full-length thumb while there is nothing to
-## scroll -- a document area that shouldn't flicker its chrome as it grows. The thumb is grabbable: press it and the container follows the
-## pointer 1:1 through `setScrollPosition`; a press on the bare track
-## jumps the thumb to the click.
-##
-## Immediate-mode contract: `scrollbar` is called *inside* the container's
-## scope, after its children -- the same slot position gothivania uses:
-##
-##   clay "panel", col(...)
-##       .clip(horizontal = false, vertical = true,
-##             childOffset = currentScrollOffset()):
-##     for long things...
-##     scrollbar(hashId("panelbar"), hashId("panel"))
-##
-## `scrollPanel` wraps that whole container shape -- open, configure (the
-## caller's decl), children, bar, close -- and names the bar `<panel>.bar`:
-##
-##   scrollPanel "panel", col(...)
-##       .clip(horizontal = false, vertical = true,
-##             childOffset = currentScrollOffset()):
-##     for long things...
-##
-## The bar floats, but inside whatever clips its container: a list
-## scrolled half out of its page shows only the part of its bar the page
-## shows (`clipToAttachedParent`).
-##
-## Drag state lives here, keyed by container id -- like `menu`'s
-## `openMenuId`, one frame's pointer decides the next frame's position.
+## Floating, draggable scrollbars for clay clip/scroll containers. See
+## `documentation/nim-tutorial.md` §6.9 (Scrollbars and scrollPanel).
 
 import std/[math]
 

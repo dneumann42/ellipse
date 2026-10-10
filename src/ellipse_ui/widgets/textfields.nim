@@ -1,17 +1,5 @@
-## Text entry fields. `textField` edits a caller-owned string through the
-## shared caret/selection engine in `common`: click or Tab focuses (see
-## `fieldFocus`; `tabIndex` places the field on the Tab chain), typing mutates, Enter commits (leaves the
-## field), Escape reverts to the value the field was focused with. Editing
-## keys follow the Emacs/readline default map -- C-a/C-e, C-b/C-f, M-b/M-f,
-## C-k/C-u/C-w/C-y, C-g -- see `common`.
-##
-## The returned string is what the caller stores back every frame --
-## intermediate edits are already visible in it; commit only moves focus.
-## The field box itself is `ui.item` over `common.fieldDecl`, the
-## placeholder pick is `common.fieldText`.
-##
-## Events: `TextChanged` whenever the value differs from what came in,
-## and -- for `textField` -- `TextCommitted` when Enter leaves the field.
+## Text entry fields. See `documentation/nim-tutorial.md` §6.5 (Text fields
+## and the editor).
 
 import clay
 import ../ui

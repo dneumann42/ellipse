@@ -123,6 +123,8 @@ test: setup bin/owl
 	python3 -I ./tests/repl_screens_test.py
 	python3 -I ./tests/repl_commands_test.py
 	$(MAKE) bin/gallery
+	$(MAKE) bin/ellipse
+	python3 -I ./tests/hotload_test.py
 	python3 -I ./tests/tui_backend_test.py
 
 bin/bar: setup

@@ -1,51 +1,7 @@
-## The standard widget set for the new (clay-based) UI system.
-##
-## Import this module for the whole set, or the individual fragments:
-##
-##   import ellipse_ui/widgets          ## everything
-##   import ellipse_ui/widgets/checkboxes
-##
-## The pieces:
-##
-##   module         provides
-##   -------------+----------------------------------------------------------
-##   theme          `Theme` tokens + `activeTheme`, push/pop/`withTheme`
-##   common         click edges, the caret edit engine (on the shared
-##                  focus slot of `ellipse_ui/focus`), the shared
-##                  scaffold layer -- `container`/`item` brackets,
-##                  `spacer`/`chevron`/`tickBox`/`textLine` parts,
-##                  `fieldDecl`/`shadeDecl`/`toggleRowDecl`/`optionRowDecl`
-##                  builders, the dropdown plumbing
-##                  (`toggleDropdown`/`dropdownField`/`dropdownPanel`/
-##                  `optionRow`) -- and `widget Labeled`
-##   checkboxes     `checkbox`, `switch`
-##   comboboxes     `comboBox` -- a single-choice dropdown
-##   multiselects   `multiSelect` -- a checkable list over a bitmask
-##   textfields     `textField`, `multilineField`
-##   numberfields   `numberField`, `intNumberField`
-##   headings       `heading`/`h1`..`h6`, `widget Section`
-##   texts          `label`, `bodyText`, `caption`, `overline`, `badge`,
-##                  `textLink`, `widget Prose`
-##   editor         `editor` -- the full document area: scrollable,
-##                  painted selection, click/drag caret, undo history
-##   tabs           `widget TabbedView`, `tabStrip`, `activeTab`,
-##                  `setActiveTab`
-##   cards          `widget Card`, `widget StatCard`, `widget CardRow`
-##   scrollbars     `scrollbar` -- floating draggable bars for clip
-##                  containers, `scrollPanel` -- a framed clip container
-##                  with its bar attached, `ScrollbarStyle`
-##
-## Immediate-mode contract: pass the current value in, store the return
-## value back -- `checked = checkbox(id, "Wifi", checked)`. Every input
-## widget also emits an event carrying its id (`Pressed`, `Toggled`,
-## `Picked`, `TextChanged`, `TextCommitted`, `NumberChanged` from `ui`;
-## `SelectionChanged`, `IntChanged` from their modules), so code further
-## up the tree can catch the change instead -- see `ellipse_ui/events`.
-## The input widgets are `widget` definitions, so each call opens an event
-## frame (its `WidgetKey`) whether or not anything listens. Transient state
-## (which field has the caret, which dropdown is open) lives in the widget
-## modules -- the dropdown slot in `common` -- keyed by element id, like
-## `ui.menu` already does.
+## The standard widget set for the clay-based UI system. Import this module
+## for the whole set, or the individual fragments. See
+## `documentation/nim-tutorial.md` §6 (The widget set) and
+## `documentation/reference-widgets.md` for the full signature tables.
 
 import ./widgets/[common, checkboxes, comboboxes, multiselects, textfields,
                   numberfields, headings, texts, editor, tabs, cards, scrollbars]

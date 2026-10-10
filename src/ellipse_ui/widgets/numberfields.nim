@@ -1,17 +1,5 @@
-## Numeric entry: a text field that parses, clamps and steps.
-##
-## While unfocused the field shows the caller's value formatted plainly;
-## focusing it seeds an editable digit buffer (the shared caret engine, with
-## a `0-9 . -` filter). Enter commits the parse + clamp, Escape discards the
-## buffer, and leaving the field (a click outside, Tab) commits too.
-## Up/Down arrows and the hover steppers add/subtract `step` immediately.
-##
-## The field box is `ui.item` over `common.fieldDecl`; the steppers are
-## plain items over `shadeDecl`, so they share the small-button look with
-## the multiselect footer.
-##
-## Events: `numberField` emits `NumberChanged` whenever its value moves;
-## `intNumberField` catches that and emits `IntChanged` instead.
+## Numeric entry: a text field that parses, clamps and steps. See
+## `documentation/nim-tutorial.md` §6.6 (Number fields).
 
 import clay
 import ../ui

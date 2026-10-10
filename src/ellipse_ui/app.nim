@@ -1,47 +1,12 @@
-## The app shell: everything an ellipse_ui program used to spell out in
-## its `main` -- stdout logging, `bootup`, the F1 debug overlay, the
-## per-frame `updateUI` + `layout` pass, the `drawCommands` render and the
-## paced `start` loop -- behind one `run`.
-##
-##   import ellipse_ui/app
-##
-##   var count = 0
-##
-##   proc view() {.raises.} =
-##     clay "root", col(width = grow(), height = grow()).bg(bgColor):
-##       if textLink(hashId("more"), "Clicked " & $count): inc count
-##
-##   when isMainModule:
-##     run App(window: WindowConfig(title: "counter"), view: view)
-##
-## Importing this module brings the whole kit along: clay, the platform
-## and renderer, the logger, `ui`, the widget set and the debug overlay.
-##
-## A frame runs, in order:
-##
-##   hook      when                               typical use
-##   --------+----------------------------------+------------------------------
-##   input     inside `updateUI`, before focus,   app-wide bindings that take
-##             widgets and scrolling see input    keys (`consumeKeys`) or the
-##                                                wheel (`holdWheel`)
-##   before    after `updateUI`, before layout    chords read from `keyEvents`
-##   view      inside `layout`                    the widget tree
-##   after     after layout                       focus restores, window title
-##
-## `prepare` runs first, before the window opens, in every process the
-## app starts -- dialog windows included (see `ellipse_ui/dialogs`): the
-## place to define dialogs and pick the theme. `setup` runs once, after
-## the window is up and before the first frame, in the main process only.
-##
-## Dialogs ride along every frame: `updateDialogs` right after `updateUI`
-## (window dialogs that finished deliver their results), `drawDialogs`
-## after the view inside `layout`. Started with `--ellipse-dialog=...`,
-## `run` shows that one dialog in a window of its own instead of the app,
-## and exits when it closes.
+## The app shell: logging, the F1 debug overlay, the per-frame
+## `updateUI` + `layout` pass, the render and the paced loop, behind one
+## `run`. See `documentation/nim-tutorial.md` §12 (The app shell and its
+## hooks) and `documentation/README.md` for the two quick starts.
 
 import std/envvars
 
 import clay
+import ellipse/hotload
 import ellipse/logger
 import ellipse/platform/platform
 import ellipse/platform/renderer
@@ -99,6 +64,7 @@ proc launch*(app: App) {.raises.} =
   if prepare != nil:
     prepare()
   bootup(app.window)
+  startHotLoading()
   if app.debugMode:
     installDebugMode()
   let input = app.input

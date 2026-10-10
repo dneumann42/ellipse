@@ -1,38 +1,6 @@
 ## The full text-editing surface -- the document area a Notepad-style app
-## edits. Where `textField`/`multilineField` are small entry boxes that
-## commit and release focus, `editor` is an endless scrollable page: the
-## shared edit engine from `common` (caret, selection, Emacs chords, the
-## system clipboard) plus everything a document area needs on top --
-## painted selection, click / drag / double-click caret placement,
-## word wrap or horizontal scrolling, PageUp/PageDown by view height,
-## scrolling that follows the caret, and an undo / redo history.
-##
-## Immediate-mode contract, same shape as the fields: the caller owns the
-## text, hands it in, and stores the edited one back out of the stats:
-##
-##   doc = editor(hashId("doc"), doc).text
-##
-## or, event-driven, catch the `TextChanged` it emits on every edit:
-##
-##   event TextChanged(e):
-##     if e.id == docId: doc = e.text
-##
-## The widget's transient state (undo history, the position mirror below)
-## lives here, keyed by element id like the dropdown slot in `common`.
-## The menu-side entry points (`editorUndo`, `editorCut`, `editorSelect`,
-## ...) let an application drive the same acts a keystroke would -- with
-## the same history bookkeeping -- from anywhere in its frame.
-##
-## Caret & selection are mirrored even while another widget holds focus:
-## a modal dialog steals the keyboard (its text field takes the engine's
-## caret), yet the document keeps a position, a selection worth painting
-## behind the dialog, and search actions that must resolve "from here".
-## One remembered pair per editor, refreshed whenever the editor is live.
-##
-## Selection painting is a translucent rectangle per wrapped line floated
-## over the glyphs -- the renderer only promises rectangles, so an
-## opaque Notepad-blue would bury the text. The washed accent reads like
-## a modern editor's highlight.
+## edits. See `documentation/nim-tutorial.md` §6.5 (Text fields and the
+## editor) and `documentation/reference-widgets.md` §3.9.
 
 import std/[math, monotimes, strutils]
 

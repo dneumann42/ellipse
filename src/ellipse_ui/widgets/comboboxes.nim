@@ -1,15 +1,5 @@
-## A single-choice dropdown. The field shows the selection; clicking opens
-## a floating option list attached to it, dismissed by a click anywhere
-## else. All of that scaffolding -- the open-dropdown slot, the summary
-## field, the floating clipped panel, the option-row chrome -- is shared
-## with `multiSelect` through `common` (`dropdownFocus`, `dropdownField`,
-## `dropdownPanel`, `optionRow`), so opening either dropdown closes the
-## other.
-##
-## Keyboard: a Tab stop at `tabIndex`; Enter toggles the list, Space opens
-## it, Escape closes it, and Up/Down step the selection open or closed.
-##
-## A selection change emits `Picked` with the new index.
+## A single-choice dropdown. See `documentation/nim-tutorial.md` §6.3
+## (Single-choice dropdown).
 
 import clay
 import ../ui

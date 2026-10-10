@@ -1,8 +1,6 @@
 ## A type scale: six heading levels plus a `Section` widget that wraps a
-## heading and its content. Levels differ in size, colour, spacing and --
-## for the top two -- a bottom rule, all on one proc so the look stays
-## consistent across screens. Sizes and spacing come from the live theme
-## (see `ellipse_ui/theme`).
+## heading and its content. See `documentation/nim-tutorial.md` §6.7
+## (Headings and reading text).
 
 import clay
 import ../ui

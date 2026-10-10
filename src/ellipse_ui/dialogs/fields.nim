@@ -1,21 +1,7 @@
 ## `Fields`: the ordered string bag a dialog takes as arguments and hands
-## back as its result -- and the one-line wire form that carries both
-## across a process boundary when the dialog runs in its own window.
-##
-##   var f = Fields()
-##   f.put("name", "Grace")
-##   f.put("hours", 40)
-##   f.put("remote", true)
-##   f.getInt("hours")          ## 40
-##   let line = encode(f)       ## "name=Grace&hours=40&remote=1"
-##   decode(line) == f
-##
-## Values are strings underneath; the typed `put`/`get*` pairs convert at
-## the edges, and a missing or unparsable key yields the default. Lists
-## ride as one value (`putList`/`getList`). The wire form escapes every
-## byte outside `[A-Za-z0-9._~-]` as `%XX`, so it holds no spaces, quotes
-## or newlines: safe as a single command-line argument on every platform,
-## and as a single line on a pipe.
+## back as its result, and the one-line wire form used to carry it across a
+## process boundary. See `documentation/nim-tutorial.md` §13.1 (The Fields
+## wire form).
 
 import std/[strutils, parseutils]
 

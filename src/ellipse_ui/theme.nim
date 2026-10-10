@@ -1,41 +1,6 @@
-## Theming for the ellipse_ui widget set.
-##
-## A `Theme` collects every visual decision the standard widgets make:
-## colours (`Palette`), the type scale (`TextSizes`), corner radii
-## (`Radii`), sizes/paddings/borders/gaps (`Metrics`) and the default
-## scrollbar style. Widgets read the live theme *while they render*, so
-## pushing a change takes effect from the next widget declaration on --
-## the immediate-mode way to customise a control or apply an effect:
-##
-##   activeTheme.palette.accent = rgb(220, 60, 60)  ## onward for the frame
-##
-##   pushTheme()                                    ## snapshot ..
-##   activeTheme.radii.button = 0.0                 ## .. square buttons ..
-##   discard button(id, "Square")
-##   popTheme()                                     ## .. and restore
-##
-##   withTheme:                                     ## scoped: only the
-##     activeTheme.palette.buttonBg = rgb(150, 40, 40) ## widgets in the block
-##     discard button(id, "Delete")
-##
-## `pushTheme(t)` swaps in a whole theme, `popTheme()` restores the one
-## underneath it; `setTheme(t)` replaces the current theme without a
-## snapshot, and `setTheme(defaultTheme())` resets everything.
-##
-## **In the terminal** (`--tui`, `ELLIPSE_TUI=1`) the palette, type scale
-## and radii apply as they are -- colours as 24-bit, 256 or 16 colours,
-## large type as bold, radii as rounded box corners -- while sizes come from
-## the theme's `cells` look: `Metrics` and scrollbar geometry tuned for 8x16
-## cells (one-row controls, one-column insets), which `setTheme` and
-## `pushTheme(t)` swap in for `metrics` and the scrollbar's geometry. A
-## theme tunes its terminal look by editing `cells`; values are virtual
-## pixels, snapped to whole cells by clay's grid.
-##
-## `defaultTheme()` reproduces the widget set's original hard-coded look
-## token for token. The colour tokens keep the old exported constant
-## names (`bgColor`, `panelBg`, `accent`, `textColor`, ...) as zero-
-## argument templates over the live theme, so existing call sites like
-## `col(...).bg(panelBg)` now read the theme instead of a const.
+## Theming for the ellipse_ui widget set. See
+## `documentation/nim-tutorial.md` §10 (The theme) and
+## `documentation/owl-tutorial.md` §8 (Themes).
 
 import clay
 import ellipse/platform/termmode

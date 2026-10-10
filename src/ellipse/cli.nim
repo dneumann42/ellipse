@@ -4,7 +4,8 @@
 ##                               the app's main module and a copy of the fonts
 ##   ellipse new widget [Name]   a widget in a new module of the project the
 ##                               current directory is in, imported by the
-##                               app's main module
+##                               app's main module; `--hot` makes it
+##                               hot-loadable (see `ellipse/hotload`)
 ##
 ## `new` takes what to make next; `game` is reserved for game projects.
 ##
@@ -45,6 +46,9 @@ Options for `new widget`:
   --kind:KIND          container, display or focusable   [display]
   --params:LIST        parameters, e.g. "label: string, count: int"
   --desc:TEXT          doc comment for the widget
+  --hot                hot-loadable: `make hot` rebuilds just this module
+                       into a shared library the running app reloads on
+                       save; the definition gains the `hot` modifier
   --project:DIR        project root               [found from cwd]
 
 Common:
@@ -79,6 +83,9 @@ proc parseArgs(args: seq[string]): Options =
       result.yes = true
     elif a == "-f" or a == "--force":
       result.force = true
+    elif a == "--hot":
+      result.keys.add "hot"
+      result.vals.add ""
     elif a == "-h" or a == "--help":
       result.command = "help"
     elif a.startsWith("--"):
@@ -301,7 +308,7 @@ const makefileTpl = """
 ELLIPSE ?= {{root}}
 NIMONY  ?= $(ELLIPSE)/build/nimony/bin/nimony
 
-.PHONY: build run clean
+.PHONY: build run hot clean
 
 build: bin/{{name}}
 
@@ -311,8 +318,17 @@ bin/{{name}}: $(wildcard src/*.nim src/*/*.nim)
 run: bin/{{name}}
 	./bin/{{name}}
 
+# Hot-loading: an app built with the hot stubs, plus lib<module>.so for
+# every `# ellipse:hot` widget. Save a hot widget's source and the running
+# app rebuilds just that module (nimony's per-module cache) and swaps it in.
+bin/{{name}}-hot: $(wildcard src/*.nim src/*/*.nim)
+	$(NIMONY) --outdir:bin/ -o:bin/{{name}}-hot -d:ellipseHotApp c ./src/{{name}}.nim
+
+hot: bin/{{name}}-hot
+	ELLIPSE_HOT=1 NIMONY=$(NIMONY) ./bin/{{name}}-hot
+
 clean:
-	rm -rf bin nimcache
+	rm -rf bin nimcache build
 """
 
 const pathsTpl = """
@@ -325,6 +341,7 @@ src
 const gitignoreTpl = """
 bin/
 nimcache/
+build/
 """
 
 const projectTpl = """
@@ -460,7 +477,7 @@ proc projectApp(dir: string): string {.raises.} =
     fail(dir / projectFile & " doesn't name the app (app = <name>)")
 
 proc widgetSource(widget, module, kind, desc: string;
-                  params: seq[Param]): string =
+                  params: seq[Param]; hot: bool): string =
   var sig = ""
   for p in params:
     if sig.len > 0: sig.add ", "
@@ -471,6 +488,10 @@ proc widgetSource(widget, module, kind, desc: string;
   lines.add "import ellipse"
   lines.add ""
 
+  # `widget hot [focusable] Name(...)`: the plugin generates the packed
+  # arguments, the library entry and the dispatcher from this one word
+  let hotm = (if hot: "hot " else: "")
+
   # the body paints each string parameter, so the stub shows its inputs
   var shown: seq[string] = @[]
   for p in params:
@@ -480,7 +501,7 @@ proc widgetSource(widget, module, kind, desc: string;
   case kind
   of "container":
     if sig.len > 0: sig.add ", "
-    lines.add "widget " & widget & "(" & sig & "body: proc(): void):"
+    lines.add "widget " & hotm & widget & "(" & sig & "body: proc(): void):"
     lines.add "  ## " & (if desc.len > 0: desc else: "A panel around the caller's block:")
     lines.add "  ##"
     lines.add "  ##   " & widget & "(...):"
@@ -495,7 +516,7 @@ proc widgetSource(widget, module, kind, desc: string;
       lines.add "    text(" & s & ")"
     lines.add "    body()"
   of "focusable":
-    lines.add "widget focusable " & widget & "(" & sig & ") -> bool:"
+    lines.add "widget " & hotm & "focusable " & widget & "(" & sig & ") -> bool:"
     lines.add "  ## " & (if desc.len > 0: desc else:
       "A focus stop. Returns true in the frame it was clicked or activated " &
       "with Space/Enter.")
@@ -512,7 +533,7 @@ proc widgetSource(widget, module, kind, desc: string;
       lines.add "    text(" & s & ")"
     lines.add "  result = clickedIn(id) or keyActivated(id)"
   else:
-    lines.add "widget " & widget & "(" & sig & "):"
+    lines.add "widget " & hotm & widget & "(" & sig & "):"
     lines.add "  ## " & (if desc.len > 0: desc else: widget & ".")
     lines.add "  let t = activeTheme"
     lines.add "  container(col(width = grow(), height = fit(), gap = t.metrics.gapTight,"
@@ -536,7 +557,7 @@ proc usageExample(widget, kind: string; params: seq[Param]): string =
   else: discard
 
 proc newWidget(o: Options) {.raises.} =
-  o.checkKeys(["module", "kind", "params", "desc", "project"])
+  o.checkKeys(["module", "kind", "params", "desc", "project", "hot"])
   let proj = findProject(o)
   let app = projectApp(proj)
 
@@ -568,8 +589,15 @@ proc newWidget(o: Options) {.raises.} =
     "Parameters (e.g. label: string, count: int)", "label: string"))
   let desc = o.value("desc", "Description", "")
 
+  let hot = o.has("hot") or
+    (if o.yes: false
+     else: o.confirm("Make it hot-loadable? `make hot` rebuilds just this " &
+                     "module and the running app swaps it in when you save",
+                     false))
+
   let rel = "src" / app / (module & ".nim")
-  o.writeNew(proj / rel, widgetSource(widget, module, kind, desc, params), rel)
+  o.writeNew(proj / rel,
+             widgetSource(widget, module, kind, desc, params, hot), rel)
 
   # import it from the main module, under the marker `ellipse new gui` wrote
   let mainRel = "src" / (app & ".nim")

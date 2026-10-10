@@ -1,34 +1,7 @@
-## Shared plumbing for the standard widget set (see `ellipse_ui/widgets`).
-##
-## Everything here is built on the clay DSL (`clay` blocks, `row`/`col`
-## declarations) and the slot-based `widget` definitions from
-## `ellipse_ui/ui`. Interactive widgets follow the immediate-mode contract
-## the built-in `button`/`menu` set already uses:
-##
-##   - the *caller* owns persistent data (a checkbox's bool, a field's text)
-##     and passes it in; the widget returns the value to store back;
-##   - the *widget modules* own transient interaction state -- which field
-##     has the caret, which dropdown is open -- keyed by element id, exactly
-##     like `menu`'s `openMenuId`.
-##
-## On top of the edit engine this module is the widget set's *scaffold
-## layer*: the element brackets (`container`, plus `ui.item` for explicit
-## ids), the repeated declaration shapes (`fieldDecl`, `shadeDecl`,
-## `toggleRowDecl`, `optionRowDecl`), the shared parts (`spacer`,
-## `chevron`, `tickBox`, `textLine`) and the whole dropdown plumbing
-## (`toggleDropdown`, `dropdownField`, `dropdownPanel`, `optionRow`) that
-## the widgets under `widgets/` are defined from. A tiny widget is the
-## goal:
-##
-##   proc checkbox*(id, label, checked): bool =
-##     item(id, toggleRowDecl(pointerOver(id))):
-##       tickBox(checked)
-##       textElement(label, ...)
-##     result = if clickedIn(id): not checked else: checked
-##
-## Keyboard and wheel input arrives through `ellipse/platform/platform`'s
-## per-frame event queues; `updateUI` advances them, and `editStep` applies
-## one frame's events to the focused field.
+## Shared plumbing for the standard widget set: the element brackets, the
+## repeated declaration shapes, the shared parts, the dropdown plumbing and
+## the caret edit engine. See `documentation/nim-tutorial.md` §6 (The widget
+## set) and `documentation/reference-widgets.md`.
 
 import std/[monotimes, strutils]
 
@@ -1141,3 +1114,24 @@ widget Labeled(label: string, control: proc(): void):
   textElement(label, TextConfig(fontSize: t.text.label, color: t.palette.labelColor))
   control()
   closeElement()
+
+import ../../ellipse/hotload
+
+proc hotWidget*(entry, widget: string; args: pointer): cint =
+  ## The call site of a `widget hot` definition (see `ellipse_ui/deps/mwidget`):
+  ## run the loaded library's entry `entry` over the packed `args`, and
+  ## paint a placeholder panel in the widget's place while no library is
+  ## loaded -- the first frames, or a build that has not landed yet.
+  ## Returns the entry's result (the activation bit for focusables), or -1
+  ## when the placeholder was painted.
+  let rc = hotCall(entry, args)
+  if rc >= 0:
+    return rc
+  let t = activeTheme
+  container(col(width = grow(), height = fit(), gap = t.metrics.gapTight,
+      padding = padAll(t.metrics.padMinor))
+    .bg(t.palette.panelBg)
+    .border(t.metrics.borderHairline, t.palette.panelBorder)
+    .corner(t.radii.card)):
+    text(widget & " -- hot library not loaded yet")
+  -1

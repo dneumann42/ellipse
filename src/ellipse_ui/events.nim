@@ -1,67 +1,7 @@
 ## Widget events: typed, payload-carrying messages that bubble up the live
-## widget nesting until something catches them.
-##
-## A widget declares what it emits and what it catches in its body (the
-## `widget` macro lifts both out, see `ellipse_ui/ui`):
-##
-##   widget focusable Toggle(label: string, on: bool):
-##     emits Toggled(on: bool)      # declares `type Toggled* = object`
-##     event Toggled(e):            # the widget may catch its own events
-##       e.on = e.on and enabled    # `e` points at the live payload
-##       reemit                     # ...and pass it on, changed
-##     if keyActivated(id):
-##       emit Toggled(on: not on)   # -> true when something consumed it
-##
-##   widget Form(body: proc(): void):
-##     event Toggled(e):
-##       dirty = true               # caught: bubbling stops here
-##     body()
-##
-## `emits Name(field: T, ...)` declares the event type (an exported object
-## plus its `emit` overload); a bare `emits Name` names one declared
-## elsewhere -- by another widget or a top-level `defineEvent Name(...)`.
-## The macro rejects a direct `emit Name` in a widget body that does not
-## declare `emits Name`.
-##
-## Dispatch is synchronous, during layout. Every widget invocation pushes an
-## *event frame* for the duration of its body; `emit` walks the frames from
-## the innermost outwards and runs the first handler for the event's kind:
-##
-##   - the handler *consumes* the event by default: bubbling stops;
-##   - `reemit` inside the handler lets it continue to the next frame up,
-##     carrying whatever the handler changed in the payload;
-##   - an `emit` inside a handler starts at the handler's *parent* frame, so
-##     a widget can translate an event (catch `Toggled`, emit `FormChanged`)
-##     without catching its own translation.
-##
-## Slot content runs inside the frame of the widget that calls the slot, so
-## an `emit` in a caller's block bubbles through the host widget first --
-## the composed-tree rule DOM events follow.
-##
-## Code outside any widget catches events with a `handleEvents:` block, which
-## installs a frame around its statements:
-##
-##   handleEvents:
-##     event FormChanged:
-##       save()
-##     drawUi()
-##
-## Because handlers run mid-layout, whatever a catching widget already drew
-## this frame reflects the state before the event. The *event log* records
-## that precisely: each frame's records name the emitting widget, the frames
-## the event passed, and the frames that handled it -- the set of UI
-## sections an event invalidates. `eventLog()` is the last complete frame's
-## log; records with `consumed == false` reached the root unhandled.
-##
-## In a valued widget (`-> T`), emit before the final `result = x`: Nimony
-## may move `x` into `result`, and an emit after it would carry -- or
-## compare -- an emptied value.
-##
-## Widget identity: each frame gets a `WidgetKey` derived from its parent's
-## key, the widget's name and its position among the parent's widget
-## children (a focusable widget's element id replaces the position), so a
-## widget keeps its key across frames as long as the tree above it is
-## stable.
+## widget nesting until something catches them. See
+## `documentation/nim-tutorial.md` §9 (Events) and
+## `documentation/owl-tutorial.md` §6.
 
 import std/syncio
 

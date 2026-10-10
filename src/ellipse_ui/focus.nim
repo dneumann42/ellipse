@@ -1,33 +1,6 @@
 ## Keyboard focus: one focus slot for the whole widget set, and the Tab
-## chain that walks it.
-##
-## A widget becomes *focusable* by registering itself while it lays out:
-##
-##   registerFocus(id, tabIndex)
-##
-## The `widget` macro does that for you -- define it as
-## `widget focusable Name(...)` and it injects the `id`/`tabIndex`
-## parameters and the registration (see `ellipse_ui/ui`). Registering
-## makes the widget:
-##
-##   - focusable by click: a press inside its box takes focus, a press
-##     outside while it holds focus lets go;
-##   - a stop on the Tab chain: Tab / Shift+Tab walk the widgets registered
-##     during the last frame.
-##
-## Tab order follows the HTML `tabindex` rules: widgets with a positive
-## `tabIndex` come first, ascending (ties in layout order), then every
-## `tabIndex == 0` widget in layout order. A negative `tabIndex` keeps the
-## widget click-focusable but off the Tab chain. The chain wraps around.
-##
-## Tab only moves focus when nothing is focused or the focus holder is on
-## the chain itself: an element that took focus by hand (`setFocus`) without
-## registering -- the full document editor, say -- keeps its Tab key.
-##
-## The chain is rebuilt every frame from the registrations, so it always
-## matches what is on screen; it rotates lazily on clay's frame generation,
-## so frame drivers need nothing beyond calling `stepFocus` with the frame's
-## keys (`updateUI` does).
+## chain that walks it. See `documentation/nim-tutorial.md` §7 (Focus and
+## the keyboard) and §8 (Keymaps and shortcuts).
 
 import clay
 

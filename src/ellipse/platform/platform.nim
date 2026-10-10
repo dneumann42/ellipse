@@ -6,6 +6,10 @@ export termmode
 when withSdl:
   when defined(windows):
     {.passL: "-lSDL3".}
+  elif defined(library):
+    # `-no-pie` suits the app's startup layout and would pull crt1.o into
+    # a shared-library link (the hot widget libraries); `-shared` alone.
+    {.passL: "-lSDL3".}
   else:
     {.passL: "-lSDL3 -no-pie".}
 
@@ -223,6 +227,9 @@ when withSdl:
 
   proc SDL_Init(flags: uint32): bool {.importc: "SDL_Init", header: "<SDL3/SDL.h>".}
   proc SDL_GetError(): cstring {.importc: "SDL_GetError", header: "<SDL3/SDL.h>".}
+  when not defined(windows):
+    proc setenv(name, value: cstring; overwrite: cint): cint {.
+      importc: "setenv", header: "<stdlib.h>".}
   proc SDL_SetAppMetadata(appname, appversion, appidentifier: cstring): bool {.importc: "SDL_SetAppMetadata", header: "<SDL3/SDL.h>".}
   proc SDL_CreateWindowAndRenderer(title: cstring; width, height: int32; flags: uint32; window: ptr ptr SDL_Window; renderer: ptr ptr SDL_Renderer): bool {.importc: "SDL_CreateWindowAndRenderer", header: "<SDL3/SDL.h>".}
   proc SDL_StartTextInput(win: ptr SDL_Window): bool {.importc: "SDL_StartTextInput", header: "<SDL3/SDL.h>".}
@@ -669,6 +676,17 @@ when withSdl:
     var aid = "org.ellipse.platform"
 
     sdlHandle(SDL_SetAppMetadata(an.toCString, av.toCString, aid.toCString), "SDL_SetAppMetadata()")
+    # A compositor that publishes WAYLAND_DISPLAY should get a wayland
+    # window: left to itself SDL may still reach for X11 (XWayland), where
+    # GLX context creation fails outright on some drivers (proprietary
+    # nvidia) -- BadValue before a frame is ever drawn. An explicit
+    # SDL_VIDEODRIVER/SDL_VIDEO_DRIVER always wins; offscreen test runs set
+    # one.
+    when not defined(windows):
+      if getEnv("WAYLAND_DISPLAY").len > 0 and
+          getEnv("SDL_VIDEODRIVER").len == 0 and
+          getEnv("SDL_VIDEO_DRIVER").len == 0:
+        discard setenv("SDL_VIDEODRIVER", "wayland", 1)
     sdlHandle(SDL_Init(Video or Audio), "SDL_Init()")
     fdWakeType = ellipse_sdl_fdwake_start()
     if cfg.layer.enabled:

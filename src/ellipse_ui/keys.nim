@@ -1,39 +1,6 @@
 ## Keyboard shortcuts: chords written the way menus print them, gathered
-## into keymaps that run before the widget tree sees the keys.
-##
-##   var main = Keymap(name: "notepad")
-##   main.bindKey("Ctrl+S", quickSave)
-##   main.bindKey("Ctrl+Shift+S", saveAs)
-##   main.bindKey("F3", findNext)
-##   installKeymap(main)
-##
-##   var dialog = Keymap(name: "dialog", active: dialogOpen, modal: true)
-##   dialog.bindKey("Enter", confirm)
-##   dialog.bindKey("Escape", cancel)
-##   installKeymap(dialog)
-##
-## `updateUI` runs the installed keymaps once per frame, right after the
-## input hooks and before focus, the widgets and the app's `before` hook.
-## The newest active keymap goes first. The first binding a key matches
-## runs, and the key is *taken*: `keyEvents()`, `frameKeys()` and every
-## widget see the frame without it, so Ctrl+F opens Find and doesn't also
-## move the caret (C-f) in the focused field. An active `modal` keymap
-## hides every keymap installed before it. While a dialog is up, the app's
-## chords are dead, and only the dialog's bindings and the plain keys its
-## fields type with get through. `active` is asked again for each key, so
-## a chord that opens a dialog hands the rest of the frame's keys to it.
-##
-## Chord syntax: modifiers `Ctrl`, `Shift`, `Alt` (any order, any case, `+`
-## between), then one key. A key is either a character (`Ctrl+S`,
-## `Ctrl+/`, `Alt+[`, `Ctrl+0`) or a name: Enter (Return), Escape (Esc),
-## Tab, Backspace, Delete (Del), Insert (Ins), Left, Right, Up, Down,
-## Home, End, PageUp (PgUp), PageDown (PgDn), Space, F1..F12, Plus and
-## Minus. With Ctrl or Alt, a character names the *unshifted* key, as
-## `KeyEvent.ch` carries it, so the shifted symbol goes as `Shift+`:
-## `Ctrl+Shift+/`, not `Ctrl+?`. `Ctrl+Plus` matches Ctrl+= with or
-## without Shift, and the keypad's +, because '+' shares the '=' key on
-## most boards. A character chord without Ctrl or Alt matches typed text:
-## `?` is any keypress that types a question mark.
+## into keymaps that run before the widget tree sees the keys. See
+## `documentation/nim-tutorial.md` §8 (Keymaps and shortcuts).
 
 import std/syncio
 

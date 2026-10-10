@@ -1,7 +1,8 @@
 import ellipse/clock
+import ellipse/hotload
 import ellipse_ui/app
 
-export clock, app
+export clock, hotload, app
 
 when isMainModule:
   import std/[cmdline, syncio]

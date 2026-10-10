@@ -3,21 +3,8 @@ import owl/[objects, evaluator, modules, errors]
 import ellipse_ui/app
 
 # The ellipse_ui toolkit as owl sees it: layout elements, the stock
-# widgets, the widget event frames and the app loop. This is a bridge, not
-# a second toolkit: every widget here is the Nim one, and owl widgets
-# (`widget` in gui.owl) open the same event frames as Nim widgets, so an
-# event bubbles through both alike. ellipse_ui knows nothing of owl.
-#
-# Ids are strings, hashed with clay's `elementId`; an id that comes back
-# from Nim (an event's `id`) is its label again. Colours are theme palette
-# names ("accent", "panel", "text", ...), "#rrggbb[aa]" or records of r g
-# b (a). Sizes are numbers (pixels) or the records `grow`, `fit` and `pct`
-# give.
-#
-# Owl code runs inside Nim callbacks (slots, event handlers) that cannot
-# raise. A failure there is kept and raised again once the Nim call it ran
-# under returns (`rethrow`), so clay elements and event frames still close
-# in order.
+# widgets, the widget event frames and the app loop. A bridge, not a second
+# toolkit. See `documentation/owl-tutorial.md` for the Owl side.
 
 # --- errors across Nim callbacks ------------------------------------------------
 

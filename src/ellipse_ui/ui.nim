@@ -25,13 +25,8 @@ export cadence
 
 ## --- wheel feel ----------------------------------------------------------------
 ##
-## Scroll feel borrowed from the gothivania HUD (`src/hud/gui.cpp`): a fast
-## wheel spin accumulates velocity and each notch moves progressively
-## farther (acceleration, capped), and the accumulated notch count bleeds
-## into the engine over an exponential ease (deceleration / glide). The
-## clay-side spring on top of that adds the overshoot-and-settle at the
-## ends. Frames run at whatever rate the pacer picks, so every step takes the
-## frame's real `frameDelta()`.
+## Velocity-accumulating, accelerating wheel scroll with an exponential glide.
+## See `documentation/nim-tutorial.md` §3.7 (Scrolling).
 
 const
   wheelBaseScale = 3.0'f32    ## pixels per notch at rest (x the engine's 10)
@@ -64,19 +59,9 @@ proc smoothedWheel*(rawY: float32, dt: float32): float32 =
 
 ## --- press hold ----------------------------------------------------------------
 ##
-## Clay reports the click *edge* (`pressedThisFrame`) but not which element the
-## press belongs to, so after that single frame nothing can answer "is my
-## button still being held down?". `updateUI` snapshots the pointer-over list
-## on the press edge; while the pointer stays down, membership in that
-## snapshot is the press claim of every element that contained the down point
-## -- exactly what `clickedIn` reads, stretched over the whole hold. Release
-## clears it, and dragging off the button does not: a held button stays
-## compressed until the finger lifts.
-##
-## Widgets fold the claim into a *compressed state*: `shade(over, press)`
-## sinks the surface to `buttonPressBg` and `squeeze(pad, press)` moves the
-## content down by `pressOffset` -- top inset grows, bottom shrinks -- so the
-## control looks pushed in without changing its outer box.
+## The held-press snapshot: `updateUI` records which elements the press began
+## on, so `pressing`/`clickedIn` can answer over the whole hold. See
+## `documentation/nim-tutorial.md` §5 (Interaction primitives).
 
 var pressHeld: seq[uint32] = @[]
 
@@ -252,25 +237,9 @@ proc shade*(over: bool, idle: Color, hover = buttonHoverBg): Color =
 
 ## --- items: bracketed child elements ------------------------------------------
 ##
-## The low-level clay rhythm -- `openElement` / `configureOpenElement` /
-## children / `closeElement` -- is what every repeated row or card dances
-## to. `item` brackets that rhythm so screens read as nesting and content;
-## the declaration stays a free-form clay builder at the call site. Like
-## the `clay` blocks, the declaration is configured *while the element is
-## open*, so it may call `hovered()` and `currentScrollOffset()`.
-##
-##   var r = 0
-##   while r < 24:
-##     item("list.row", r, row(width = grow(), padding = padAll(padItem))
-##         .bg(shade(hovered(), panelBg)).corner(itemRadius)):
-##       text("Entry " & $r)
-##     inc r
-##
-## `listRow` and `listCard` are that pattern with the theme's list styling
-## pre-answered -- take them when the default look fits, drop to `item`
-## the moment it doesn't. The styling lives in the `listRowDecl` /
-## `listCardDecl` procs, so a call site can reuse or fork it:
-## `item(label, i, listRowDecl(idle = fieldBg)):`.
+## `item` brackets clay's open/configure/children/close rhythm so repeated rows
+## and cards read as nesting. See `documentation/nim-tutorial.md` §4 (Elements,
+## ids and items).
 
 proc listRowDecl*(idle: Color = panelBg, hover = buttonHoverBg): ElementDeclaration =
   ## The standard list-row declaration (see `listRow`): `grow` wide,
@@ -499,87 +468,11 @@ proc menuSeparator*() =
 
 ## --- widgets ------------------------------------------------------------------
 ##
-## Reusable UI components with *slots*: parameters of type `proc(): void`
-## that call sites fill with procs or a trailing block. `widget` is a
-## Nimony template plugin (`ellipse_ui/deps/mwidget`) that turns a
-## definition like
-##
-##   widget PageWrapper(title: string, rightAction: proc(): void,
-##                      body: proc(): void):
-##     clay "page", col(width = grow(), height = grow()).bg(bgColor):
-##       clay "toolbar", row(width = grow(), height = fixedPx(48)):
-##         textElement(title, TextConfig(fontSize: 24))
-##         rightAction()
-##       body()
-##
-## into the pair `proc PageWrapperImpl*` (the widget proper: slots are real
-## `{.closure.}` proc params with `emptySlot` defaults, so `slot()` is an
-## ordinary call -- conditional, repeated, or passed on like
-## `toolBar("bar", body)`) plus a template `PageWrapper*` providing the
-## trailing-block call syntax:
-##
-##   PageWrapper(title = "Home", rightAction = renderAct):
-##     textElement("This is the body")
-##
-## Named arguments bind slots by name, the block after the colon fills the
-## last declared slot, and the wrapper routes it through a named
-## `{.closure.}` proc -- so the block may read and modify the *caller's*
-## locals. One Nimony constraint still applies inside a widget body: a
-## `do:` literal there cannot reference the widget's own slots (plain
-## `do:` procs don't capture); pass the slot as an argument instead.
-##
-## A widget may produce a value -- `-> T` after the parameters -- and give
-## parameters defaults with `name = value` (the type is inferred from the
-## value, as for a proc parameter):
-##
-##   widget focusable checkbox(label: string, checked: bool,
-##                             fontSize = activeTheme.text.control) -> bool:
-##     ...
-##     result = if clicked: not checked else: checked
-##
-##   agree = checkbox(hashId("agree"), "Agree", agree)
-##
-## The default is repeated in the wrapper template and evaluated at the
-## call site, so it should only name things every caller can see.
-##
-## Keyboard focus is opt-in per widget with the `focusable` modifier:
-##
-##   widget focusable Chip(label: string):
-##     item(id, row(padding = padAll(6)).bg(panelBg).focusRing(id)):
-##       text(label)
-##     if clickedIn(id) or keyActivated(id):
-##       ...
-##
-##   Chip(id = hashId("save"), label = "Save", tabIndex = 1)
-##
-## The widget gains an `id: ElementId` parameter (first) and a
-## `tabIndex: int = 0` one (last before the block slot), and registers on
-## the Tab chain before its body runs: click focuses it, Tab / Shift+Tab
-## walk the chain in `tabIndex` order, and the body reads `focused(id)`,
-## `gainedFocus(id)` and `keyActivated(id)`. See `ellipse_ui/focus`.
-##
-## Widgets talk upward with *events*: typed payloads that bubble from the
-## emitting widget through its enclosing widgets until one catches them.
-## A widget declares what it emits and catches at the top of its body:
-##
-##   widget focusable Toggle(label: string, on: bool):
-##     emits Toggled(on: bool)        # declares the event type
-##     ...
-##     if clickedIn(id) or keyActivated(id):
-##       emit Toggled(on: not on)
-##
-##   widget Settings(body: proc(): void):
-##     event Toggled(e):              # caught: stops here...
-##       dirty = true
-##       reemit                       # ...unless passed on
-##     body()
-##
-## The emitter's own handlers run first, then each enclosing widget's, then
-## a `handleEvents:` block around the whole tree. A handler may change the
-## payload before a `reemit`, or `emit` a different event, which starts at
-## the handler's parent. Every emit is recorded per frame (`eventLog`) with
-## the widgets it passed and the ones that handled it. See
-## `ellipse_ui/events`.
+## Reusable UI components with *slots* (`proc(): void` parameters a call site
+## fills with a trailing block), optional focus (`widget focusable`) and events.
+## See `documentation/nim-tutorial.md` §5 (The `widget` form) and
+## `documentation/owl-tutorial.md` §5 (Widgets with slots and the `widget`
+## form); the template plugin itself is in `ellipse_ui/deps/mwidget`.
 
 proc emptySlot*() =
   ## The no-op slot: what a widget renders where a call site passed nothing.
@@ -589,10 +482,8 @@ template widget*(head: untyped, body: untyped) {.
 
 ## --- standard widget events ----------------------------------------------------
 ##
-## What the stock widgets emit, each tagged with the emitter's element id so
-## one handler can serve several controls (`if e.id == saveId: ...`). The
-## widgets still return their value too -- `checked = checkbox(...)` keeps
-## working -- the event is the same news for code further up the tree.
+## What the stock widgets emit, each tagged with the emitter's element id.
+## See `documentation/nim-tutorial.md` §9 (Events).
 
 ## `button` / `textLink` clicked, or Enter/Space on it while focused.
 defineEvent Pressed(id: ElementId)
@@ -612,14 +503,8 @@ defineEvent MenuPicked(label: string)
 
 ## --- terminal button shadows ----------------------------------------------------
 ##
-## Turbo Vision's: half blocks in the shadow colour over whatever lies
-## beneath, inside the button's own box --
-##
-##    OK ▄       face, then `▄` beside its first row (`█` below that)
-##    ▀▀▀▀       a row of `▀`, one column in
-##
-## One painter per edge (`registerCellPainter`); the colour is the
-## element's `.bg`, which a custom element hands its painter.
+## Turbo Vision-style half-block shadows, one cell painter per edge. See
+## `documentation/nim-tutorial.md` §6.1 (Buttons and links).
 
 proc paintShadowRight(buf: var CellBuffer; cmd: RenderCommand;
                       area: CellRect) =
