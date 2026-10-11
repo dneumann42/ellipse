@@ -222,9 +222,10 @@ widget multiSelect(id: ElementId, options: seq[string], selection: Selection,
 ### 3.6 Tabs
 
 ```nim
-widget tabStrip(id: ElementId, labels: seq[string], selected: int,
+widget TabStrip(id: ElementId, labels: seq[string], selected: int,
                tabIndex = 0) -> int
-widget TabbedView(id: ElementId, tabs: seq[string], body: proc(): void)
+widget TabbedView(id: ElementId, tabs: seq[string],
+                  body: proc(tabIndex: int): void)
 
 proc activeTab*(id: ElementId): int
 proc setActiveTab*(id: ElementId, index: int)

@@ -47,7 +47,7 @@ proc tabStripId*(id: ElementId): ElementId =
   ## The focusable strip element of `id`'s tabs.
   localId("tabs.strip", id.id)
 
-widget tabStrip(id: ElementId, labels: seq[string], selected: int,
+widget TabStrip(id: ElementId, labels: seq[string], selected: int,
                tabIndex = 0) -> int:
   ## Draw a tab strip as a child of `id`'s element and return the index
   ## of a tab clicked (or arrow-stepped) this frame, else `selected`. The
@@ -68,7 +68,7 @@ widget tabStrip(id: ElementId, labels: seq[string], selected: int,
       of kevEnd: result = labels.len - 1
       else: discard
   var d = row(width = grow(), height = fit(), gap = th.metrics.padToolbar,
-      padding = Padding(left: th.metrics.padToolbar, right: th.metrics.padToolbar,
+      padding = Padding(left: 0, right: th.metrics.padToolbar,
                         top: th.metrics.padToolbar, bottom: 0))
   d.border = BorderConfig(color: th.palette.panelBorder,
     width: BorderWidth(bottom: th.metrics.borderHairline))
@@ -94,18 +94,20 @@ widget tabStrip(id: ElementId, labels: seq[string], selected: int,
   if result != selected:
     emit Picked(id: id, index: result)
 
-widget TabbedView(id: ElementId, tabs: seq[string], body: proc(): void):
+widget TabbedView(id: ElementId, tabs: seq[string],
+                  body: proc(tabIndex: int): void):
   ## The full container: tab strip plus the page panel `body` renders
-  ## into. `body` runs after the selection has been updated, so
-  ## `activeTab(id)` inside it names the page to draw. The panel grows
-  ## to fill the view and clips nothing -- pages scroll themselves.
+  ## into. `body` runs after the selection has been updated and receives
+  ## the selected tab index; callers that ignore the parameter can still
+  ## ask `activeTab(id)` inside the block. The panel grows to fill the
+  ## view and clips nothing -- pages scroll themselves.
   openElement(id)
   configureOpenElement(col(width = grow(), height = grow(), gap = 0))
   var sel = activeTab(id)
   if tabs.len > 0 and (sel < 0 or sel >= tabs.len):
     sel = 0
     setActiveTab(id, sel)
-  let picked = tabStrip(id, tabs, sel)
+  let picked = TabStrip(id, tabs, sel)
   if picked != sel:
     setActiveTab(id, picked)
   item(localId("tabs.panel", id.id), col(width = grow(), height = grow(),
@@ -114,5 +116,5 @@ widget TabbedView(id: ElementId, tabs: seq[string], body: proc(): void):
     .border(activeTheme.metrics.borderHairline, panelBorder)
     .corner(0, activeTheme.radii.tabPanel, activeTheme.radii.tabPanel,
             activeTheme.radii.tabPanel)):
-    body()
+    body(picked)
   closeElement()

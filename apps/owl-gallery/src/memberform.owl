@@ -194,40 +194,40 @@ fun form-body:
     group "IDENTITY"
     row (id = "mf.r1") (width = grow) (height = fit) (gap = 12) (align-y = "top"):
         labeled "Full name":
-            set draft (with draft (name = (text-field "mf.name" draft.name "Grace Hopper")))
+            set draft (with draft (name = (text-field "gallery.member.name" draft.name "Grace Hopper")))
             field-error (name-error)
         labeled "Email":
-            set draft (with draft (email = (text-field "mf.email" draft.email "grace@example.com")))
+            set draft (with draft (email = (text-field "gallery.member.email" draft.email "grace@example.com")))
             field-error (email-error)
     row (id = "mf.r2") (width = grow) (height = fit) (gap = 12) (align-y = "top"):
         labeled "Role":
-            set draft (with draft (role = (combo-box "mf.role" role-names draft.role "Pick a role")))
+            set draft (with draft (role = (combo-box "gallery.member.role" role-names draft.role "Pick a role")))
         labeled "Team":
-            set draft (with draft (team = (combo-box "mf.team" team-names draft.team "Choose a team")))
+            set draft (with draft (team = (combo-box "gallery.member.team" team-names draft.team "Choose a team")))
             field-error (team-error)
 
     group "ACCESS & SCHEDULE"
     row (id = "mf.r3") (width = grow) (height = fit) (gap = 12) (align-y = "top"):
         labeled "Access areas":
-            set draft (with draft (access = (multi-select "mf.access" access-names draft.access "No access")))
+            set draft (with draft (access = (multi-select "gallery.member.access" access-names draft.access "No access")))
             field-error (access-error)
         labeled "Hours / week":
-            set draft (with draft (hours = (int-number-field "mf.hours" draft.hours 1 1 60)))
+            set draft (with draft (hours = (int-number-field "gallery.member.hours" draft.hours 1 1 60)))
             field-error (hours-error)
         labeled "Hourly rate":
-            set draft (with draft (rate = (number-field "mf.rate" draft.rate 5 0 500)))
+            set draft (with draft (rate = (number-field "gallery.member.rate" draft.rate 5 0 500)))
     row (id = "mf.r4") (width = grow) (height = fit) (gap = 28) (padding = t.metrics.pad-minor) (align-y = "center"):
-        set draft (with draft (admin = (switch "mf.admin" "Administrator" draft.admin)))
-        set draft (with draft (remote = (switch "mf.remote" "Remote" draft.remote)))
+        set draft (with draft (admin = (switch "gallery.member.admin" "Administrator" draft.admin)))
+        set draft (with draft (remote = (switch "gallery.member.remote" "Remote" draft.remote)))
         (spacer)
         caption (concat "Weekly cost: " (money (* draft.rate draft.hours)))
 
     group "ABOUT"
     labeled "Bio":
-        set draft (with draft (bio = (multiline-field "mf.bio" draft.bio "A few lines for the team page..." (rows = 3) (max-lines = 6))))
+        set draft (with draft (bio = (multiline-field "gallery.member.bio" draft.bio "A few lines for the team page..." (rows = 3) (max-lines = 6))))
     column (id = "mf.r5") (width = grow) (height = fit) (gap = 6) (padding = t.metrics.pad-minor):
-        set draft (with draft (welcome = (checkbox "mf.welcome" "Send a welcome email" draft.welcome)))
-        set agreed (checkbox "mf.agree" "I've checked this person's details with them" agreed)
+        set draft (with draft (welcome = (checkbox "gallery.member.welcome" "Send a welcome email" draft.welcome)))
+        set agreed (checkbox "gallery.member.agree" "I've checked this person's details with them" agreed)
         field-error (agree-error)
 
 fun member-body:
@@ -235,9 +235,9 @@ fun member-body:
         set draft (blank)
         set agreed false
         set tried false
-        focus-at "mf.name" draft.name
+        focus-at "gallery.member.name" draft.name
     ; Enter submits -- except in the bio, where it breaks the line
-    when (focused "mf.bio"):
+    when (focused "gallery.member.bio"):
         (pass-enter)
     when (dialog-enter):
         (submit)
@@ -245,15 +245,15 @@ fun member-body:
     (form-body)
 
 fun member-footer:
-    when (text-link "mf.reset" "Reset form"):
+    when (text-link "gallery.member.btn.reset" "Reset form"):
         (reset-form)
     (spacer)
     when (and tried (not (valid))):
         text "Fix the errors above" (theme).text.caption (color = err-color)
     fs = (theme).text.control
-    when (button "mf.cancel" "Cancel" (width = 110) (height = 38) (font-size = fs)):
+    when (button "gallery.member.btn.cancel" "Cancel" (width = 110) (height = 38) (font-size = fs)):
         (cancel)
-    when (button "mf.submit" "Add member" (width = 130) (height = 38) (font-size = fs)):
+    when (button "gallery.member.btn.submit" "Add member" (width = 130) (height = 38) (font-size = fs)):
         (submit)
 
 define-dialog "gallery.member" (title = "Add team member") (width = 680) (max-height = 680) (scroll = true) (header = ({} (enabled = true) (fullscreen = true))) (body = member-body) (footer = member-footer)

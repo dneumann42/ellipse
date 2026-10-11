@@ -1,6 +1,7 @@
-## Dialogs and quick popups -- in the app's window, or in a window of
-## their own. See `documentation/nim-tutorial.md` §13 (Dialogs) and
-## `documentation/owl-tutorial.md` §9 (App, dialogs and popups).
+## Dialogs, form dialogs and quick popups -- in the app's window, or in a
+## window of their own. See `documentation/nim-tutorial.md` §13 (Dialogs), its
+## §13.3 for the forms helpers below, and `documentation/owl-tutorial.md`
+## §9 (App, dialogs and popups).
 
 import std/[strutils, syncio, os, cmdline, envvars]
 
@@ -234,6 +235,127 @@ proc accept*(values = Fields(); answer = "ok") =
 
 proc cancel*() =
   closeDialog(dsCancelled, "cancel")
+
+## --- forms ------------------------------------------------------------------------
+##
+## The shape nearly every form dialog repeats, taken apart: a record edited as a
+## draft, fields identified by short names under the dialog's own namespace
+## instead of spelled-out `hashId` constants, validation lines that stay hidden
+## until the first submit attempt, Enter as Submit except inside a multiline,
+## and standard-sized footer buttons. See `documentation/nim-tutorial.md` §13.3
+## (Form dialogs).
+
+var formTried* = false   ## a submit was attempted: the field errors show
+
+proc dialogName*(): string =
+  ## The running dialog body's spec name, "" outside a body.
+  if inBody(): specNames[stack[cur].spec] else: ""
+
+proc fieldId*(name: string): ElementId =
+  ## A form field's id: `name` under the running dialog's namespace, so the
+  ## same field name in two dialogs is two widgets -- and no `hashId`
+  ## constants to declare.
+  ##
+  ##   draft.title = textField(fieldId("title"), draft.title, "What is it?")
+  let n = dialogName()
+  elementId(if n.len > 0: n & "." & name else: name)
+
+proc errorText*(msg: string) =
+  ## A field's or footer's red one-line complaint.
+  text(msg, activeTheme.text.caption, rgb(232, 96, 96))
+
+proc fieldError*(msg: string) =
+  ## A field's validation error -- drawn once a submit has been attempted
+  ## (see `formSubmit`), so the form starts out quiet.
+  if formTried and msg.len > 0:
+    errorText(msg)
+
+proc formArgs*[T: tuple|object](x: T; key = "form"): Fields =
+  ## Arguments for `open`: the record `x` under `key`, to `beginForm`.
+  result = Fields()
+  result.putFields(key, fieldsOf(x))
+
+proc beginForm*[T: tuple|object](draft: var T; key = "form") =
+  ## Call at the top of a form body. On the dialog's first frame: fill
+  ## `draft` from the opener's record (`fillFrom` -- keys the bag lacks
+  ## keep the draft's own defaults) and forget a previous submit attempt.
+  if dialogOpened():
+    draft.fillFrom(dialogArgs().getFields(key))
+    formTried = false
+
+proc focusField*(name, text: string) =
+  ## Put the caret at the end of the named field's text, before the form
+  ## draws it -- at the top of the body, on the first frame.
+  focusAt(fieldId(name), text, text.len)
+
+proc enterThrough*(names: varargs[string]) =
+  ## Let this frame's Enter reach the named multiline fields (where it
+  ## breaks a line) instead of the `formEnter` action.
+  for n in names:
+    if focusIdOf() == fieldId(n).id:
+      passEnter()
+
+template formEnter*(multiline: untyped, body: untyped) =
+  ## Enter runs `body` -- except while the caret sits in a named multiline
+  ## field, where the newline wins:
+  ##
+  ##   formEnter "notes":
+  ##     submit()
+  enterThrough(multiline)
+  if dialogEnter():
+    body
+
+template formEnter*(body: untyped) =
+  ## Enter runs `body`; the form has no multiline to make room for.
+  if dialogEnter():
+    body
+
+proc formErrors*(errs: varargs[string]): seq[string] =
+  ## Collect field complaints into a validation list -- the shape the
+  ## `formDialog` macro feeds to `formValid` and `formSubmit`.
+  result = @[]
+  for e in errs:
+    result.add e
+
+proc formValid*(errors: openArray[string]): bool =
+  ## Nothing to complain about?
+  result = true
+  for e in errors:
+    if e.len > 0:
+      return false
+
+proc formSubmit*[T: tuple|object](draft: T; answer = "ok";
+                                  errors: openArray[string]): bool
+    {.discardable.} =
+  ## A submit was attempted: from now on the field errors show; when all
+  ## are empty the dialog closes accepted with `draft` as its record.
+  formTried = true
+  result = formValid(errors)
+  if result:
+    accept(fieldsOf(draft), answer)
+
+proc formButton*(label: string; name = ""; width: float32 = 110.0'f32): bool {.raises.} =
+  ## A footer button of the standard dialog size, at `fieldId`
+  ## `"btn." & name` (or the label, unnamed).
+  button(fieldId("btn." & (if name.len > 0: name else: label)), label,
+         width = fixedPx(width), height = fixedPx(38),
+         fontSize = activeTheme.text.control)
+
+proc formLink*(text: string; name = ""): bool {.raises.} =
+  ## A footer `textLink` at `fieldId("btn." & name)`.
+  textLink(fieldId("btn." & (if name.len > 0: name else: text)), text)
+
+## --- dialog definitions ---------------------------------------------------------------
+##
+## `dialog` and `formDialog` are definition macros in the style of `widget`
+## (the template plugin is `ellipse_ui/deps/mdialog`). See
+## `documentation/nim-tutorial.md` §13.4 (Defining dialogs).
+
+template dialog*(head: untyped, body: untyped) {.
+  plugin: "ellipse_ui/deps/mdialog".}
+
+template formDialog*(head: untyped, body: untyped) {.
+  plugin: "ellipse_ui/deps/mdialog".}
 
 ## --- opening -------------------------------------------------------------------------------
 

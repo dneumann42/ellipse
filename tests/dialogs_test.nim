@@ -33,19 +33,47 @@ var
   results = 0
   draft = ""
 
-let echoDialog = defineDialog("test.echo", DialogSpec(
-  title: "Echo",
-  body: proc () {.closure, raises.} =
-    inc bodyFrames
-    if dialogOpened():
-      inc openedSeen
-      draft = dialogArgs().get("seed")
-    if dialogEnter():
-      inc enterSeen
-      var r = Fields()
-      r.put("draft", draft & "!")
-      accept(r, "enter")
-    text("echo " & draft)))
+dialog echoDialog("test.echo", title = "Echo"):
+  inc bodyFrames
+  if dialogOpened():
+    inc openedSeen
+    draft = dialogArgs().get("seed")
+  if dialogEnter():
+    inc enterSeen
+    var r = Fields()
+    r.put("draft", draft & "!")
+    accept(r, "enter")
+  text("echo " & draft)
+
+type
+  Rec = object
+    title: string
+    count: int
+    on: bool
+
+var
+  formDraft = Rec(count: 1)
+  formSeeded = 0
+  formIdBad = 0
+
+proc formErr(): string =
+  if formDraft.title.len == 0: "A title is required." else: ""
+
+formDialog theForm("test.form", title = "Form", answer = "add",
+                   draft = formDraft):
+  if dialogOpened():
+    inc formSeeded
+    if fieldId("title") != elementId("test.form.title"):
+      inc formIdBad
+    focusField("title", draft.title)
+  draft.title = textField(fieldId("title"), draft.title, "title")
+  draft.count = intNumberField(fieldId("count"), draft.count, 1, 0, 99)
+  draft.on = checkbox(fieldId("on"), "On", draft.on)
+  fieldError(formErr())
+  footer:
+    if formButton("Cancel"): cancel()
+  validate:
+    formErr()
 
 proc record(r: DialogResult) =
   lastResult = r
@@ -154,6 +182,39 @@ proc script() {.raises.} =
   toast("hello")
   frame()
   expect(not anyDialogOpen(), "a toast is not modal")
+
+  # --- forms ---------------------------------------------------------------------
+  let bag = fieldsOf(Rec(title: "t", count: 3, on: true))
+  expect(bag.get("title") == "t" and bag.getInt("count") == 3 and
+         bag.getBool("on"), "fieldsOf stores every field")
+  var keep = Rec(count: 9)
+  keep.fillFrom(decode("title=x"))
+  expect(keep.title == "x" and keep.count == 9,
+         "fillFrom keeps defaults for keys the bag lacks")
+
+  results = 0
+  lastResult = DialogResult(status: dsOpen)
+  formSeeded = 0
+  formIdBad = 0
+  theForm.open(args = formArgs(Rec(count: 5, on: true)),
+                  onDone = proc (r: DialogResult) {.closure.} = record(r))
+  frames(2)
+  expect(formSeeded == 1 and formIdBad == 0,
+         "beginForm seeds once, fieldId namespaces by dialog")
+  expect(formDraft.count == 5 and formDraft.on, "the opener's record arrived")
+  key(kevEnter)                       # no title: formSubmit only marks the attempt
+  frame()
+  expect(results == 0 and formTried, "an invalid Enter stays open, errors shown")
+  typeText("Hi")
+  key(kevEnter)
+  frame()
+  expect(results == 1 and lastResult.status == dsAccepted,
+         "the Enter after a fix accepts")
+  expect(lastResult.answer == "add" and
+         lastResult.fields.get("title") == "Hi" and
+         lastResult.fields.getInt("count") == 5 and
+         lastResult.fields.getBool("on"),
+         "the draft came back as a record")
 
   # --- window mode: a real child process --------------------------------------
   results = 0

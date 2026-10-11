@@ -468,11 +468,13 @@ proc menuSeparator*() =
 
 ## --- widgets ------------------------------------------------------------------
 ##
-## Reusable UI components with *slots* (`proc(): void` parameters a call site
-## fills with a trailing block), optional focus (`widget focusable`) and events.
-## See `documentation/nim-tutorial.md` §5 (The `widget` form) and
-## `documentation/owl-tutorial.md` §5 (Widgets with slots and the `widget`
-## form); the template plugin itself is in `ellipse_ui/deps/mwidget`.
+## Reusable UI components with *slots* (`proc`-typed parameters a call site
+## fills with a trailing block -- with or without parameters; a parameterized
+## slot puts its declared names in the block's scope), optional focus
+## (`widget focusable`) and events. See `documentation/nim-tutorial.md` §5
+## (The `widget` form) and `documentation/owl-tutorial.md` §5 (Widgets with
+## slots and the `widget` form); the template plugin itself is in
+## `ellipse_ui/deps/mwidget`.
 
 proc emptySlot*() =
   ## The no-op slot: what a widget renders where a call site passed nothing.
@@ -489,7 +491,7 @@ template widget*(head: untyped, body: untyped) {.
 defineEvent Pressed(id: ElementId)
 ## `checkbox` / `switch` flipped; `on` is the new state.
 defineEvent Toggled(id: ElementId, on: bool)
-## A single choice moved: `comboBox` selection, `tabStrip` tab.
+## A single choice moved: `comboBox` selection, `TabStrip` tab.
 defineEvent Picked(id: ElementId, index: int)
 ## A text widget's contents changed this frame (`textField`,
 ## `multilineField`, `editor`); `text` is the new value.

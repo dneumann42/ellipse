@@ -805,7 +805,7 @@ proc comboBoxBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): O
 proc tabStripBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   # tab-strip id labels selected: the tab to store back.
   let a = parseArgs(env, args, bodyStart)
-  let r = tabStrip(id = idOf(need(a, "id", 0, "tab-strip")),
+  let r = TabStrip(id = idOf(need(a, "id", 0, "tab-strip")),
     labels = stringsOf(arg(a, "labels", 1), "tab-strip"),
     selected = int(numOr(a, "selected", 2, 0.0, "tab-strip")),
     tabIndex = int(numOr(a, "tab-index", -1, 0.0, "tab-strip")))
@@ -885,6 +885,17 @@ proc slotProc(fn: Object): proc () {.closure.} =
     result = proc () {.closure.} =
       discard
 
+proc slotProcIdx(fn: Object): proc (tabIndex: int) {.closure.} =
+  ## Slot for a Nim widget whose body proc receives a value (a tab index).
+  ## Owl blocks are parameterless, so the index is dropped: the body still
+  ## reads `(active-tab id)` for it.
+  if isCommand(fn):
+    result = proc (tabIndex: int) {.closure.} =
+      runQuietly(fn)
+  else:
+    result = proc (tabIndex: int) {.closure.} =
+      discard
+
 proc cardBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object {.raises.} =
   # card title (actions = fun): body -- a framed panel.
   let a = parseArgs(env, args, bodyStart)
@@ -931,7 +942,7 @@ proc tabbedViewBuiltin(env: ref Environment, args: seq[Object], bodyStart: int):
   # tabbed-view id tabs: body -- the body reads (active-tab id).
   let a = parseArgs(env, args, bodyStart)
   TabbedViewImpl(idOf(need(a, "id", 0, "tabbed-view")),
-    stringsOf(arg(a, "tabs", 1), "tabbed-view"), slotProc(slotArg(a, "body")))
+    stringsOf(arg(a, "tabs", 1), "tabbed-view"), slotProcIdx(slotArg(a, "body")))
   rethrow()
   nothing()
 

@@ -42,6 +42,26 @@
 ## as the block slot when its type is a proc type; `emptySlot` (declared
 ## next to the `widget` template) backs the defaults.
 ##
+## Value slots: a block slot may declare parameters --
+##
+##   widget TabbedView(id: ElementId, tabs: seq[string],
+##                     body: proc(tabIndex: int): void):
+##     ...
+##     body(picked)
+##
+## The generated slot proc carries the declared parameter list, so the
+## caller's trailing block sees those names in scope (`TabbedView(...):
+## text(pageNames[tabIndex])`) and still captures caller locals. The
+## widget declares the names; the caller does not restate them -- a
+## `do(tabIndex: int):` literal compiles to a plain proc (no capture) and
+## is rejected as a dead expression. Omitting a value slot's block splices
+## its filler ident into the generated slot proc and fails there with a
+## type error; `NameImpl` alone keeps working, since the implementation
+## proc's default is the same generated `emptySlot_<Widget>_<param>` no-op
+## of the slot's exact shape, emitted beside the widget.
+## Callers that want the index without naming it can ignore the
+## parameter and read view state (`activeTab(id)`) as before.
+##
 ## Note on ownership: `NifBuilder` (TokenBuf) is move-only -- copies break
 ## its cursor ownership -- so parameter type trees are carried as
 ## `NifCursor`s into the (refcounted) input tree, never as copied buffers.
@@ -117,6 +137,8 @@ type
     name: string
     typ: NifCursor  ## the declared type, a value in the input tree
     isSlot: bool    ## declared type is a proc type
+    slotArgs: bool  ## slot proctype declares parameters (a *value slot*)
+    filler: string  ## non-empty: the generated no-op name backing its default
     injected: string  ## non-empty: a macro-added param of this type ident
     zeroDefault: bool ## defaults to `0` (the injected `tabIndex`)
     default: NifCursor ## `name = value`: the default (type inferred)
@@ -133,6 +155,23 @@ proc atomText(n: NifCursor): string =
 
 proc isSlotType(n: NifCursor): bool =
   n.kind == TagLit and n.typeKind == ProctypeT
+
+proc slotParamsOf(n: NifCursor): NifCursor =
+  ## The `(params ...)` child of a proctype tree, or an invalid cursor.
+  ## Source layout puts dots before it; the params children themselves are
+  ## canonical five-slot `(param name . . type .)` trees, reusable as proc
+  ## parameters verbatim.
+  result = default(NifCursor)
+  if n.kind == TagLit and n.tagText == "proctype":
+    var c = firstChild(n)
+    while c.hasMore:
+      if c.kind == TagLit and c.tagText == "params":
+        return c
+      skip c
+
+proc proctypeHasParams(n: NifCursor): bool =
+  let p = slotParamsOf(n)
+  p.hasMore and p.kind == TagLit and firstChild(p).hasMore
 
 proc isVoidIdent(n: NifCursor): bool =
   n.kind == Ident and n.identText == "void"
@@ -241,6 +280,38 @@ proc emitType(dest: var NifBuilder; n: NifCursor; injectClosure: bool) =
     var c = n
     dest.takeTree c
 
+proc emitSlotFiller(dest: var NifBuilder; info: LineInfo; p: WidgetParam) =
+  ## `proc emptySlot_<Widget>_<param>(<slot params>): void = discard` -- a
+  ## typed no-op backing a value slot's default: the implementation proc
+  ## takes it as a proc *value* default (the wrapper template's block slot
+  ## is required, since a default naming the slot's parameters would be
+  ## judged at the template's declaration scope, where they are unbound).
+  ## The parameter list is copied verbatim from the declared proctype.
+  dest.openTree("proc", info)
+  dest.addIdent p.filler
+  dest.addIdent "x"                    # exported
+  dest.addEmptyNode2 info              # pattern, typevars
+  let pp = slotParamsOf(p.typ)
+  if pp.hasMore and pp.kind == TagLit:
+    var c = firstChild(pp)
+    dest.openTree("params", info)
+    while c.hasMore:
+      var q = c
+      dest.takeTree q
+      skip c
+    dest.closeTree()
+  else:
+    dest.withTree ParamsU, info:
+      discard
+  dest.addEmptyNode3 info              # result(void), pragmas, effects
+  dest.withTree StmtsS, info:
+    # `discard` with an empty operand: the same inert statement the event
+    # frame emits. A fully empty `(stmts)` body trips the back end.
+    dest.openTree("discard", info)
+    dest.addEmptyNode info
+    dest.closeTree()
+  dest.closeTree()                     # proc
+
 proc emitParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam) =
   ## (param name . . TYPE [default]) -- typed parameter of the generated
   ## implementation proc; proc-typed slots get `{.closure.}` types and
@@ -255,7 +326,8 @@ proc emitParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam) =
     else:
       dest.emitType(p.typ, p.isSlot)
     if p.isSlot:
-      dest.addIdent "emptySlot"      # value default: a no-op closure
+      # a no-op closure of the slot's own shape backs the default
+      dest.addIdent(if p.filler.len > 0: p.filler else: "emptySlot")
     elif p.zeroDefault:
       dest.addIntLit 0
     elif p.hasDefault:
@@ -266,16 +338,20 @@ proc emitParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam) =
 
 proc emitSlotParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam;
                    isBlockSlot: bool) =
-  ## untyped parameter of the generated wrapper template. The block slot
-  ## defaults to a *statement* (`emptySlot()`), since its argument lands
-  ## in the closure proc's body; every other slot defaults to the bare
-  ## `emptySlot` ident, a valid proc value. Non-slot parameters get
-  ## `emptySlot()` so that omitting a required data argument fails with a
-  ## type mismatch at the implementation call instead of silently
-  ## binding the trailing block. The injected `tabIndex` defaults to `0`;
-  ## a `name = value` parameter repeats its default here, so an omitted
-  ## argument reaches the implementation as that value (evaluated at the
-  ## call site -- defaults should name things every caller can see).
+  ## untyped parameter of the generated wrapper template. A plain block
+  ## slot defaults to a *statement* (`emptySlot()`), since its argument
+  ## lands in the closure proc's body; a *value* block slot (declared with
+  ## parameters) defaults to the bare filler ident -- a *called* no-op
+  ## would have to name the slot's parameters at the template's decla-
+  ## ration scope, where they are unbound. Every other slot defaults to a
+  ## bare proc ident (`emptySlot`, or the widget's generated filler for a
+  ## value slot), a valid proc value. Non-slot
+  ## parameters get `emptySlot()` so that omitting a required data argument
+  ## fails with a type mismatch at the implementation call instead of
+  ## silently binding the trailing block. The injected `tabIndex` defaults
+  ## to `0`; a `name = value` parameter repeats its default here, so an
+  ## omitted argument reaches the implementation as that value (evaluated
+  ## at the call site -- defaults should name things every caller can see).
   dest.withTree ParamU, info:
     dest.addIdent p.name
     dest.addEmptyNode2 info          # exported, pragmas
@@ -286,19 +362,37 @@ proc emitSlotParam(dest: var NifBuilder; info: LineInfo; p: WidgetParam;
       var d = p.default
       dest.takeTree d
     elif p.isSlot and not isBlockSlot:
-      dest.addIdent "emptySlot"
+      dest.addIdent(if p.filler.len > 0: p.filler else: "emptySlot")
+    elif p.isSlot and p.filler.len > 0:
+      # value block slot: the filler ident -- a valid default at the
+      # template's declaration scope (a *called* no-op would have to name
+      # the slot's own parameters, which are unbound there). Omitting the
+      # block splices a bare proc into the slot's body and fails there
+      # with a plain type error, which is what an empty value slot should
+      # do; a sigmatch-visible `.` default would instead mis-bind the
+      # trailing block for widgets with parameters after it (focusable).
+      dest.addIdent p.filler
     else:
       dest.addEmptyCall(info, "emptySlot")
 
 proc emitSlotProcAndCall(dest: var NifBuilder; info: LineInfo; name: string;
                          params: seq[WidgetParam]; blockSlot: string;
-                         slotSym: SymId) =
-  ## `proc slot() {.closure.} = <block param>` then `NameImpl(..., slot)`.
+                         slotSym: SymId; slotParams: NifCursor) =
+  ## `proc slot(<slot params>) {.closure.} = <block param>` then
+  ## `NameImpl(..., slot)`. `slotParams` -- the declared parameter list of
+  ## a value slot -- lands in the generated proc, so the caller's trailing
+  ## block sees those names; an empty cursor keeps the plain `()` slot.
   dest.withTree ProcS, info:
     dest.addSymDef slotSym, info
     dest.addEmptyNode3 info         # export, pattern, typevars
-    dest.withTree ParamsU, info:    # ()
-      discard
+    dest.openTree("params", info)
+    if slotParams.hasMore and slotParams.kind == TagLit:
+      var c = firstChild(slotParams)
+      while c.hasMore:
+        var q = c
+        dest.takeTree q
+        skip c
+    dest.closeTree()
     dest.addEmptyNode info          # result (void)
     emitPragmasClosure(dest, info)  # {.closure.}
     dest.addEmptyNode info          # effects
@@ -592,6 +686,7 @@ proc parseParams(head: NifCursor): seq[WidgetParam] =
       let pname = kv.atomText
       skip kv
       var p = WidgetParam(name: pname, typ: kv, isSlot: isSlotType(kv))
+      p.slotArgs = p.isSlot and proctypeHasParams(kv)
       result.add p
     elif c.kind == TagLit and c.tagText == "vv":       # name = default
       var vv = firstChild(c)
@@ -694,6 +789,12 @@ proc transform(n: NifCursor): NifBuilder =
   if params.len > 0 and params[^1].isSlot:
     blockSlot = params[^1].name
 
+  # value slots (parameterized proc types): each gets a generated no-op
+  # proc of the same shape backing its defaults, named after the widget
+  for i in 0 ..< params.len:
+    if params[i].slotArgs:
+      params[i].filler = "emptySlot_" & name & "_" & params[i].name
+
   # focusable: `id` leads, `tabIndex` sits right before the block slot so
   # `W(id = x, ..., tabIndex = 2): body` still hands the block to the slot
   if focusable:
@@ -730,6 +831,11 @@ proc transform(n: NifCursor): NifBuilder =
     for d in sections.decls:
       if d.declares:
         emitEventType(result, d, moduleName(info))
+
+    # --- no-op procs backing value slots' defaults -------------------------
+    for p in params:
+      if p.slotArgs:
+        emitSlotFiller(result, info, p)
 
     if hot:
       emitHotScaffolding(result, info, name, params, hasRet, retType,
@@ -773,6 +879,12 @@ proc transform(n: NifCursor): NifBuilder =
       var slotSym = default(SymId)
       if blockSlot.len > 0:
         slotSym = genSym()
+      # the value slot's declared parameter list, for the generated proc
+      var slotParams = default(NifCursor)
+      if blockSlot.len > 0:
+        for p in params:
+          if p.name == blockSlot and p.slotArgs:
+            slotParams = slotParamsOf(p.typ)
       result.withTree StmtsS, info:
         if blockSlot.len == 0:
           result.withTree CallS, info:
@@ -781,20 +893,20 @@ proc transform(n: NifCursor): NifBuilder =
               result.addIdent p.name      # positional pass-through
         else:
           # block:
-          #   proc slot(): void {.closure.} = <block stmts>
+          #   proc slot(<value-slot params>): void {.closure.} = <block>
           #   NameImpl(args..., slot)
           # A valued widget drops the `block:` -- Nimony cannot prove a
           # `let x = block: ...` initialized -- and leaves the slot proc
           # in the caller's scope; its gensym name cannot collide.
           if hasRet:
             emitSlotProcAndCall(result, info, name, params, blockSlot,
-                                slotSym)
+                                slotSym, slotParams)
           else:
             result.withTree BlockS, info:
               result.addEmptyNode info      # unnamed block
               result.withTree StmtsS, info:
                 emitSlotProcAndCall(result, info, name, params, blockSlot,
-                                    slotSym)
+                                    slotSym, slotParams)
 
   # WIDGET_DSL_DEBUG=1 dumps to /tmp/opencode, =<dir> into that directory
   let debugDir = getEnv("WIDGET_DSL_DEBUG")

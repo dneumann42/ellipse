@@ -61,16 +61,17 @@ if own-window:
 
 ```owl
 cond:
-    (= index 1) = (light-theme)
-    (= index 2) = (contrast-theme)
-    true = ({})
+    (= index 1) (light-theme)
+    (= index 2) (contrast-theme)
+    true ({})
 ```
 
 `while cond:` loops; `do:` runs a block; `set name value` assigns. `with record
 (field = value)` returns an updated copy:
 
 ```owl
-set draft (with draft (name = "Grace"))
+set draft (with draft:
+    name = "Grace")
 ```
 
 Common operations: `=`, `<>`, `<`, `>`, `<=`, `>=`, `+ - * /`, `and`, `or`,
@@ -91,12 +92,17 @@ count = 0
 
 fun view:
     handle-events:
-        column (padding = 24) (gap = 8) (align-x = "center"):
-            text (concat "Clicked " (to-string count) " times") 32
+        column:
+            padding = 24
+            gap = 8
+            align-x = "center"
+            text:
+                concat "Clicked " (to-string count) " times"
             when (button "inc" "Increment"):
                 set count (+ count 1)
 
-run-app (title = "Counter"):
+run-app:
+    title = "Counter"
     (view)
 ```
 

@@ -182,3 +182,47 @@ proc putFields*(f: var Fields; key: string; nested: Fields) =
 
 proc getFields*(f: Fields; key: string): Fields =
   decode(f.get(key))
+
+## --- records -----------------------------------------------------------------------
+##
+## Any record of plain fields round-trips through `Fields` without a hand
+## written conversion: `fieldsOf` stores every field under its own name,
+## `fillFrom` reads the keys the bag has -- absent ones keep the record's
+## own values, so a freshly made draft carries its defaults into a dialog.
+## Field types: string, bool, int, float, uint64 and enums; anything else
+## wants its own `put`/`readInto` overload, which is also how a nested
+## record or a list of strings joins the round trip.
+
+proc put*(f: var Fields; key: string; value: uint64) = f.put(key, value.int)
+proc put*[E: enum](f: var Fields; key: string; value: E) =
+  f.put(key, value.ord)
+
+proc readInto*(v: var string; f: Fields; key: string) =
+  if f.has(key): v = f.get(key)
+proc readInto*(v: var int; f: Fields; key: string) =
+  if f.has(key): v = f.getInt(key)
+proc readInto*(v: var bool; f: Fields; key: string) =
+  if f.has(key): v = f.getBool(key)
+proc readInto*(v: var float; f: Fields; key: string) =
+  if f.has(key): v = f.getFloat(key)
+proc readInto*(v: var uint64; f: Fields; key: string) =
+  if f.has(key): v = f.getInt(key).uint64
+proc readInto*[E: enum](v: var E; f: Fields; key: string) =
+  if f.has(key): v = E(f.getInt(key))
+
+proc fieldsOf*[T: tuple|object](x: T): Fields =
+  ## Every field of `x`, stored under its name.
+  result = Fields()
+  for k, v in x.fieldPairs:
+    result.put(k, v)
+
+proc fillFrom*[T: tuple|object](x: var T; f: Fields) =
+  ## Set the fields of `x` that `f` carries; the rest keep their values.
+  for k, v in x.fieldPairs:
+    v.readInto(f, k)
+
+proc withFields*[T: tuple|object](x: sink T; f: Fields): T =
+  ## `x` filled from `f` -- reading a form's record back from the result:
+  ## `members.add blank().withFields(r.fields)`.
+  result = x
+  result.fillFrom(f)

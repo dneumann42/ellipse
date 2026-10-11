@@ -566,19 +566,20 @@ container width -- give the paragraph room (a `grow`-width parent).
 
 ```nim
 TabbedView(id = hashId("settings"), tabs = @["General", "Audio"]):
-  case activeTab(hashId("settings"))
+  case tabIndex
   of 0: generalPane()
   else: audioPane()
 ```
 
 `TabbedView(id, tabs, body)` renders the strip and the page panel; `body` runs
-after the selection was folded in, so `activeTab(id)` names the page to draw in
-the same frame as the click. The selection is view state kept by the module;
+after the selection was folded in and receives it as `tabIndex`, in the same
+frame as the click (`activeTab(id)` answers the same question for callers who
+prefer to ask). The selection is view state kept by the module;
 move it from anywhere with `setActiveTab(id, index)`. It emits `Picked(id,
 index)`. The strip is one Tab stop; Left/Right step it, Home/End jump.
 
-For callers who own the selection, `tabStrip(id, labels, selected,
-tabIndex = 0) -> int` is the standalone strip: `tab = tabStrip(id, labels,
+For callers who own the selection, `TabStrip(id, labels, selected,
+tabIndex = 0) -> int` is the standalone strip: `tab = TabStrip(id, labels,
 tab)`.
 
 ### 6.9 Scrollbars and scrollPanel
@@ -827,7 +828,7 @@ label) so one handler can serve several controls:
 | --- | --- | --- |
 | `Pressed` | `id` | `button`, `textLink` |
 | `Toggled` | `id`, `on` | `checkbox`, `switch` |
-| `Picked` | `id`, `index` | `comboBox`, `tabStrip`, `TabbedView` |
+| `Picked` | `id`, `index` | `comboBox`, `TabStrip`, `TabbedView` |
 | `TextChanged` | `id`, `text` | `textField`, `multilineField`, `editor` |
 | `TextCommitted` | `id`, `text` | `textField` (Enter) |
 | `NumberChanged` | `id`, `value` | `numberField` |
@@ -1144,6 +1145,9 @@ f.getList("tags")        # @["a", "b"]
 f.getFields("nested")    # a nested Fields
 let line = encode(f)     # "name=Grace&hours=40&remote=1"
 decode(line) == f
+
+fieldsOf(task)           # a whole record, each field under its own name (§13.3)
+task.fillFrom(f)         # the keys the bag has; the rest keep their defaults
 ```
 
 ### 13.2 Quick popups
@@ -1162,6 +1166,125 @@ messageBox("...", @["OK", "Cancel"], title = "...")
 
 Each takes an optional `mode = dmInline/dmWindow`. When the app started a dialog
 in its own window, the child's answer comes back serialised through `onDone`.
+
+### 13.3 Form dialogs
+
+A form dialog edits a record as a draft, validates it and hands it back on
+submit. The recurring shape is provided, so the dialog's own code is just its
+fields and its errors:
+
+```nim
+type Task = object
+  title: string
+  notes: string
+  status: int
+  done: bool
+
+var draft: Task
+
+proc titleError(): string =
+  if strip(draft.title).len == 0: "A title is required." else: ""
+
+proc submit() =
+  formSubmit(draft, "save", @[titleError()])   # errors show from now on;
+                                               # an empty list closes the dialog
+
+proc body() {.raises.} =
+  beginForm(draft)                              # first frame: seed from args
+  if dialogOpened():
+    focusField("title", draft.title)
+  formEnter "notes":                            # Enter submits -- except in notes
+    submit()
+  Labeled(label = "Title"):
+    draft.title = textField(fieldId("title"), draft.title, "What needs doing?")
+    fieldError(titleError())
+  draft.notes = multilineField(fieldId("notes"), draft.notes, "Details...",
+                               rows = 3)
+  draft.status = comboBox(fieldId("status"), statusNames, draft.status)
+  draft.done = checkbox(fieldId("done"), "Done", draft.done)
+
+proc footer() {.raises.} =
+  if formButton("Cancel"): cancel()
+  if formButton("Save", width = 130.0'f32): submit()
+
+let taskEdit = defineDialog("app.taskEdit", DialogSpec(
+  title: "Edit task", width: 460, body: body, footer: footer))
+
+taskEdit.open(args = formArgs(Task(title: "Write docs")),
+  onDone = proc (r: DialogResult) {.closure.} =
+    if r.accepted:
+      commit(Task().withFields(r.fields)))
+```
+
+| call | meaning |
+| --- | --- |
+| `fieldId("title")` | the field's `ElementId`, under the running dialog's namespace -- no `hashId` constants to declare, and the same name in two dialogs is two widgets |
+| `formArgs(record)` | the record packed for `open(args = ...)` |
+| `beginForm(draft)` | first frame: `fillFrom` the opener's record (keys the bag lacks keep the draft's defaults) and forget the last submit attempt |
+| `focusField(name, text)` | caret at the end of the named field, before it draws |
+| `formEnter multiline: ...` / `formEnter: ...` | Enter runs the block; the named multiline keeps Enter for its newlines |
+| `fieldError(msg)` | the field's red line -- drawn only after a submit attempt (`formTried`) |
+| `formSubmit(draft, answer, errors)` | mark the attempt; with no message left, close accepted with `draft` as its record |
+| `formButton(label)` / `formLink(label)` | footer controls at the standard dialog size |
+| `fieldsOf` / `fillFrom` / `withFields` | any record of plain fields round-trips through `Fields` on its own |
+
+`apps/gallery/memberform.nim` is the full example, with a multiselect, number
+fields and switches on top.
+
+### 13.4 Defining dialogs
+
+`dialog` and `formDialog` are definition macros in the style of `widget` --
+the template plugin is `ellipse_ui/deps/mdialog`. They lift the two shapes
+above into one declaration each: the body statements and a `footer:` block
+become the `DialogFn` procs and the `defineDialog` call.
+
+```nim
+dialog noteDialog("app.note", title = "Note", width = 320):
+  text("The build finished.")
+  footer:
+    if formButton("OK"): accept()
+```
+
+The head is `Name("spec.name", <DialogSpec field = value>...)`; the `Name`
+becomes the dialog handle (a `let` of the same name) and every generated
+proc is named after it (`NameBody`, `NameFooter`). Spec fields pass through
+verbatim: `title`, `width`, `maxHeight`, `scroll`, `dismissable`, `header`.
+
+`formDialog` wraps the §13.3 helpers around the same shape: it emits
+`beginForm` and the Enter rule ahead of the body, generates `NameErrors`,
+`NameValid` and `NameSubmit` from a `validate:` section, and defines the
+draft plumbing:
+
+```nim
+formDialog taskEdit("app.taskEdit", title = "Edit task", width = 460,
+                    answer = "save", enter = "notes"):
+  if dialogOpened():
+    focusField("title", draft.title)
+  Labeled(label = "Title"):
+    draft.title = textField(fieldId("title"), draft.title, "What needs doing?")
+    fieldError(titleError())
+  draft.notes = multilineField(fieldId("notes"), draft.notes, "Details...",
+                               rows = 3)
+  footer:
+    if formButton("Cancel"): cancel()
+    if formButton("Save"): submit()
+  validate:
+    titleError()
+```
+
+Inside the sections four words name the form itself: `draft` (the record;
+`draft = task` points it at another variable), and the generated `submit`,
+`valid` and `errors`. The rest of the form is plain code -- the `caption`,
+`formBody` and error procs of §13.3 all work as they are.
+
+| head argument | meaning |
+| --- | --- |
+| the leading `"spec.name"` | what `defineDialog` registers; `fieldId` namespaces by it |
+| `title = "..."` etc. | DialogSpec fields, copied as written |
+| `draft = <var>` | the record the form edits (default: `draft`) |
+| `answer = "..."` | the `DialogResult.answer` of a successful `submit` (default `"ok"`) |
+| `enter = "..."` | a multiline whose Enter stays its own; repeat for several |
+| `key = "..."` | the `Fields` key `formArgs`/`beginForm` round-trip under (default `"form"`) |
 
 ---
 

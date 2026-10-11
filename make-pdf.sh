@@ -19,5 +19,6 @@ pandoc "${INFILES[@]}" \
     --metadata date="$(date +%Y-%m-%d)" \
     -V colorlinks=true \
     -V geometry:margin=1in \
+    --highlight-style tango \
     -o "$OUT"
 echo "Wrote $OUT"

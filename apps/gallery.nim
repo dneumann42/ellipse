@@ -310,7 +310,7 @@ proc drawGallery() =
       caption("A TabbedView container: the strip swaps whole pages, and cards frame the controls on them.")
       clay "tabwrap", row(width = grow(), height = fixedPx(250)):
         TabbedView(id = hashId("gallery-tabs"), tabs = tabNames):
-          let page = activeTab(hashId("gallery-tabs"))
+          let page = tabIndex
           if page == 0:
             CardRow:
               StatCard(label = "Count", value = $count, hint = "menu or buttons")

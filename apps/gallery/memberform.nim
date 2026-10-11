@@ -3,16 +3,21 @@
 ## number fields, switches and checkboxes -- with validation and a
 ## draft/commit round trip.
 ##
-## It is an `ellipse_ui/dialogs` dialog, so it opens either over the
-## gallery or in a window of its own (a child process): `begin(mode)`.
-## The form edits `draft`, a private copy seeded on the dialog's first
-## frame; nothing the gallery shows changes until Submit validates it.
-## The accepted draft travels back as `Fields` (`toFields`/`fromFields`)
-## -- across the process boundary in window mode -- and is appended to
-## `members`. Cancel, Escape or a click on the backdrop throw the draft
-## away. Errors stay hidden until the first submit attempt, then track
-## every edit live. The title and footer stay put; the form between them
-## scrolls when the window is too short for it.
+## It is a `formDialog` -- the definition macro over the `ellipse_ui/dialogs`
+## forms helpers: `beginForm` and the record round trip (`fieldsOf`/
+## `fillFrom`), the Enter rule, the `validate:` list behind `valid`/`submit`,
+## and `fieldId` namespaced widgets. The macro adds those; what is written
+## here is the form proper.
+##
+## It opens either over the gallery or in a window of its own (a child
+## process): `begin(mode)`. The form edits `draft`, a private copy seeded
+## from the opener's record on the dialog's first frame; nothing the
+## gallery shows changes until Submit validates it. The accepted draft
+## travels back as `Fields` -- across the process boundary in window mode
+## -- and is appended to `members`. Cancel, Escape or a click on the
+## backdrop throw the draft away. Errors stay hidden until the first
+## submit attempt, then track every edit live. The title and footer stay
+## put; the form between them scrolls when the window is too short for it.
 
 import std/strutils
 
@@ -30,30 +35,12 @@ type
 var
   members*: seq[Member] = @[]
 
-  tried = false        ## a submit was attempted: show the errors
-  agreed = false
+  agreed = false       ## the "checked with them" box: not part of the record
   draft: Member
 
   roleNames*: seq[string] = @[]
   teamNames*: seq[string] = @[]
   accessNames: seq[string] = @[]
-
-let
-  nameId = hashId("mf.name")
-  emailId = hashId("mf.email")
-  roleId = hashId("mf.role")
-  teamId = hashId("mf.team")
-  accessId = hashId("mf.access")
-  hoursId = hashId("mf.hours")
-  rateId = hashId("mf.rate")
-  adminId = hashId("mf.admin")
-  remoteId = hashId("mf.remote")
-  welcomeId = hashId("mf.welcome")
-  agreeId = hashId("mf.agree")
-  bioId = hashId("mf.bio")
-  resetId = hashId("mf.reset")
-  cancelId = hashId("mf.cancel")
-  submitId = hashId("mf.submit")
 
 proc fillLists*() =
   ## The choice lists. Run from the app's `prepare`: a dialog process
@@ -78,27 +65,6 @@ proc fillLists*() =
 proc blank(): Member =
   Member(role: 0, team: -1, access: bit(0), hours: 40, rate: 85.0,
          welcome: true)
-
-proc toFields(m: Member): Fields =
-  result = Fields()
-  result.put("name", m.name)
-  result.put("email", m.email)
-  result.put("bio", m.bio)
-  result.put("role", m.role)
-  result.put("team", m.team)
-  result.put("access", int(m.access))
-  result.put("hours", m.hours)
-  result.put("rate", m.rate)
-  result.put("admin", m.admin)
-  result.put("remote", m.remote)
-  result.put("welcome", m.welcome)
-
-proc fromFields(f: Fields): Member =
-  Member(name: f.get("name"), email: f.get("email"), bio: f.get("bio"),
-         role: f.getInt("role"), team: f.getInt("team", -1),
-         access: Selection(f.getInt("access")), hours: f.getInt("hours"),
-         rate: f.getFloat("rate"), admin: f.getBool("admin"),
-         remote: f.getBool("remote"), welcome: f.getBool("welcome"))
 
 ## --- validation ------------------------------------------------------------------
 
@@ -134,30 +100,14 @@ proc hoursError(): string =
 proc agreeError(): string =
   if not agreed: "Confirm before adding someone." else: ""
 
-proc valid(): bool =
-  nameError().len == 0 and emailError().len == 0 and
-    teamError().len == 0 and accessError().len == 0 and
-    hoursError().len == 0 and agreeError().len == 0
-
 ## --- verbs -------------------------------------------------------------------------
-
-proc submit() =
-  tried = true
-  if valid():
-    accept(toFields(draft), "add")
 
 proc resetForm() =
   draft = blank()
   agreed = false
-  tried = false
+  formTried = false
 
 ## --- drawing -------------------------------------------------------------------------
-
-let errColor = rgb(232, 96, 96)
-
-proc fieldError(msg: string) =
-  if tried and msg.len > 0:
-    text(msg, activeTheme.text.caption, errColor)
 
 proc group(title: string) =
   ## A form group's overline-style title.
@@ -172,84 +122,83 @@ proc formBody() =
   group("IDENTITY")
   clay "mf.r1", row(width = grow(), height = fit(), gap = 12, alignY = top):
     Labeled(label = "Full name"):
-      draft.name = textField(nameId, draft.name, "Grace Hopper")
+      draft.name = textField(fieldId("name"), draft.name, "Grace Hopper")
       fieldError(nameError())
     Labeled(label = "Email"):
-      draft.email = textField(emailId, draft.email, "grace@example.com")
+      draft.email = textField(fieldId("email"), draft.email,
+                              "grace@example.com")
       fieldError(emailError())
   clay "mf.r2", row(width = grow(), height = fit(), gap = 12, alignY = top):
     Labeled(label = "Role"):
-      draft.role = comboBox(roleId, roleNames, draft.role, "Pick a role")
+      draft.role = comboBox(fieldId("role"), roleNames, draft.role,
+                            "Pick a role")
     Labeled(label = "Team"):
-      draft.team = comboBox(teamId, teamNames, draft.team, "Choose a team")
+      draft.team = comboBox(fieldId("team"), teamNames, draft.team,
+                            "Choose a team")
       fieldError(teamError())
 
   group("ACCESS & SCHEDULE")
   clay "mf.r3", row(width = grow(), height = fit(), gap = 12, alignY = top):
     Labeled(label = "Access areas"):
-      draft.access = multiSelect(accessId, accessNames, draft.access,
+      draft.access = multiSelect(fieldId("access"), accessNames, draft.access,
                                  "No access")
       fieldError(accessError())
     Labeled(label = "Hours / week"):
-      draft.hours = intNumberField(hoursId, draft.hours, 1, 1, 60)
+      draft.hours = intNumberField(fieldId("hours"), draft.hours, 1, 1, 60)
       fieldError(hoursError())
     Labeled(label = "Hourly rate"):
-      draft.rate = numberField(rateId, draft.rate, 5.0, 0.0, 500.0)
+      draft.rate = numberField(fieldId("rate"), draft.rate, 5.0, 0.0, 500.0)
   clay "mf.r4", row(width = grow(), height = fit(), gap = 28,
                     padding = padAll(t.metrics.padMinor), alignY = centerY):
-    draft.admin = switch(adminId, "Administrator", draft.admin)
-    draft.remote = switch(remoteId, "Remote", draft.remote)
+    draft.admin = switch(fieldId("admin"), "Administrator", draft.admin)
+    draft.remote = switch(fieldId("remote"), "Remote", draft.remote)
     spacer()
     caption("Weekly cost: " & money(draft.rate * float(draft.hours)))
 
   group("ABOUT")
   Labeled(label = "Bio"):
-    draft.bio = multilineField(bioId, draft.bio,
+    draft.bio = multilineField(fieldId("bio"), draft.bio,
                                "A few lines for the team page...",
                                rows = 3, maxLines = 6)
   clay "mf.r5", col(width = grow(), height = fit(), gap = 6,
                     padding = padAll(t.metrics.padMinor)):
-    draft.welcome = checkbox(welcomeId, "Send a welcome email", draft.welcome)
-    agreed = checkbox(agreeId, "I've checked this person's details with them",
-                      agreed)
+    draft.welcome = checkbox(fieldId("welcome"), "Send a welcome email",
+                             draft.welcome)
+    agreed = checkbox(fieldId("agree"),
+                      "I've checked this person's details with them", agreed)
     fieldError(agreeError())
 
-proc body() {.raises.} =
+formDialog memberDialog("gallery.member",
+                        title = "Add team member", width = 680,
+                        maxHeight = 680, scroll = true,
+                        header = DialogHeader(enabled: true, fullscreen: true),
+                        answer = "add", enter = "bio"):
   if dialogOpened():
-    draft = blank()
     agreed = false
-    tried = false
-    focusAt(nameId, draft.name, draft.name.len)
-  # Enter submits -- except in the bio, where it breaks the line
-  if focusIdOf() == bioId.id:
-    passEnter()
-  if dialogEnter():
-    submit()
+    focusField("name", draft.name)
   caption("Everything below is a draft until you press Add member.")
   formBody()
-
-proc footer() {.raises.} =
-  if textLink(resetId, "Reset form"):
-    resetForm()
-  spacer()
-  if tried and not valid():
-    text("Fix the errors above", activeTheme.text.caption, errColor)
-  let fs = activeTheme.text.control
-  if button(cancelId, "Cancel", width = fixedPx(110), height = fixedPx(38),
-            fontSize = fs):
-    cancel()
-  if button(submitId, "Add member", width = fixedPx(130),
-            height = fixedPx(38), fontSize = fs):
-    submit()
-
-let memberDialog = defineDialog("gallery.member", DialogSpec(
-  title: "Add team member", width: 680, maxHeight: 680, scroll: true,
-  header: DialogHeader(enabled: true, fullscreen: true),
-  body: body, footer: footer))
+  footer:
+    if formLink("Reset form", "reset"):
+      resetForm()
+    spacer()
+    if formTried and not valid():
+      errorText("Fix the errors above")
+    if formButton("Cancel", "cancel"):
+      cancel()
+    if formButton("Add member", "submit", width = 130.0'f32):
+      submit()
+  validate:
+    nameError()
+    emailError()
+    teamError()
+    accessError()
+    hoursError()
+    agreeError()
 
 proc begin*(mode = dmInline) =
   ## Open the form -- over the gallery, or in a window of its own.
-  memberDialog.open(mode = mode,
+  memberDialog.open(args = formArgs(blank()), mode = mode,
     onDone = proc (r: DialogResult) {.closure.} =
       if r.accepted:
-        members.add fromFields(r.fields))
+        members.add blank().withFields(r.fields))

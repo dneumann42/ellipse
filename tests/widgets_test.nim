@@ -154,8 +154,8 @@ proc drawWidgets() =
     if textLink(noteId, "Notes"):
       noteClicked = true
     TabbedView(id = viewId, tabs = viewTabs):
-      panelTab = activeTab(viewId)
-      bodyText("Page " & $panelTab)
+      panelTab = tabIndex
+      bodyText("Page " & $tabIndex)
     clay "cardhost", row(width = grow(), height = fit()):
       Card(title = "Network", actions = cardActions):
         bodyText("Linked at 1 Gb/s")

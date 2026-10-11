@@ -5,7 +5,9 @@
 ##   ellipse new widget [Name]   a widget in a new module of the project the
 ##                               current directory is in, imported by the
 ##                               app's main module; `--hot` makes it
-##                               hot-loadable (see `ellipse/hotload`)
+##                               hot-loadable (see `ellipse/hotload`). Kinds:
+##                               display, container, focusable, tabbed, card,
+##                               section, list, stat
 ##
 ## `new` takes what to make next; `game` is reserved for game projects.
 ##
@@ -43,8 +45,12 @@ Options for `new gui`:
 
 Options for `new widget`:
   --module:NAME        module under src/<app>/    [snake_case of Name]
-  --kind:KIND          container, display or focusable   [display]
+  --kind:KIND          display, container, focusable, tabbed, card,
+                       section, list or stat             [display]
   --params:LIST        parameters, e.g. "label: string, count: int"
+                       (defaults: label for display/container/focusable;
+                       card, section, tabbed, list and stat supply their
+                       own title/tabs/items/label-value-hint)
   --desc:TEXT          doc comment for the widget
   --hot                hot-loadable: `make hot` rebuilds just this module
                        into a shared library the running app reloads on
@@ -532,6 +538,107 @@ proc widgetSource(widget, module, kind, desc: string;
     for s in shown:
       lines.add "    text(" & s & ")"
     lines.add "  result = clickedIn(id) or keyActivated(id)"
+  of "tabbed":
+    var parts: seq[string] = @["id: ElementId", "tabs: seq[string]"]
+    if sig.len > 0: parts.add sig
+    parts.add "body: proc(): void"
+    lines.add "widget " & hotm & widget & "(" & parts.join(", ") & "):"
+    lines.add "  ## " & (if desc.len > 0: desc else: "A tab strip over one panel; the block draws the page named by")
+    lines.add "  ## `activeTab(hashId(...))` at the call site:"
+    lines.add "  ##"
+    lines.add "  ##   " & widget & "(id = hashId(" & quoteNim(snakeCase(widget)) &
+      "), tabs = @[\"One\", \"Two\"]):"
+    lines.add "  ##     case activeTab(hashId(" & quoteNim(snakeCase(widget)) & "))"
+    lines.add "  ##     of 0: text(\"page one\")"
+    lines.add "  ##     else: text(\"page two\")"
+    lines.add "  # A local copy: feeding our own `tabs` parameter straight into"
+    lines.add "  # another widget template trips a Nimony hygiene assert."
+    lines.add "  let pageNames = tabs"
+    lines.add "  let t = activeTheme"
+    lines.add "  openElement(id)"
+    lines.add "  configureOpenElement(col(width = grow(), height = grow(), gap = 0))"
+    lines.add "  var sel = activeTab(id)"
+    lines.add "  if pageNames.len > 0 and (sel < 0 or sel >= pageNames.len):"
+    lines.add "    sel = 0"
+    lines.add "    setActiveTab(id, sel)"
+    lines.add "  let picked = tabStrip(id, pageNames, sel)"
+    lines.add "  if picked != sel:"
+    lines.add "    setActiveTab(id, picked)"
+    lines.add "  item(localId(\"tabs.panel\", id.id), col(width = grow(),"
+    lines.add "      height = grow(), gap = 8, padding = padAll(t.metrics.padPanel))"
+    lines.add "    .bg(t.palette.panelBg)"
+    lines.add "    .border(t.metrics.borderHairline, t.palette.panelBorder)"
+    lines.add "    .corner(0, t.radii.tabPanel, t.radii.tabPanel, t.radii.tabPanel)):"
+    for s in shown:
+      lines.add "    text(" & s & ")"
+    lines.add "    body()"
+    lines.add "  closeElement()"
+  of "card":
+    var parts: seq[string] = @["title: string"]
+    if sig.len > 0: parts.add sig
+    parts.add "body: proc(): void"
+    lines.add "widget " & hotm & widget & "(" & parts.join(", ") & "):"
+    lines.add "  ## " & (if desc.len > 0: desc else:
+      "A title bar over the caller's block, in the standard card panel:")
+    lines.add "  ##"
+    lines.add "  ##   " & widget & "(title = \"Notes\"):"
+    lines.add "  ##     text(\"inside\")"
+    lines.add "  let t = activeTheme"
+    lines.add "  container(col(width = grow(), height = fit(), gap = t.metrics.gapCard,"
+    lines.add "      padding = padAll(t.metrics.padCard))"
+    lines.add "    .bg(t.palette.panelBg)"
+    lines.add "    .border(t.metrics.borderHairline, t.palette.panelBorder)"
+    lines.add "    .corner(t.radii.card)):"
+    lines.add "    if title.len > 0:"
+    lines.add "      text(title, t.text.cardTitle)"
+    for s in shown:
+      lines.add "    text(" & s & ")"
+    lines.add "    body()"
+  of "section":
+    var parts: seq[string] = @["title: string"]
+    if sig.len > 0: parts.add sig
+    parts.add "body: proc(): void"
+    lines.add "widget " & hotm & widget & "(" & parts.join(", ") & "):"
+    lines.add "  ## " & (if desc.len > 0: desc else:
+      "A heading-2 over the caller's block, spaced as one section:")
+    lines.add "  ##"
+    lines.add "  ##   " & widget & "(title = \"Audio\"):"
+    lines.add "  ##     text(\"inside\")"
+    lines.add "  container(col(width = grow(), gap = activeTheme.metrics.gapCard)):"
+    lines.add "    heading(title, 2)"
+    lines.add "    container(col(width = grow(), gap = activeTheme.metrics.gapTight)):"
+    for s in shown:
+      lines.add "      text(" & s & ")"
+    lines.add "      body()"
+  of "list":
+    var listSig = "items: seq[string]"
+    if sig.len > 0: listSig.add ", " & sig
+    lines.add "widget " & hotm & widget & "(" & listSig & "):"
+    lines.add "  ## " & (if desc.len > 0: desc else:
+      "A scrollable list, one themed row per `items` entry:")
+    lines.add "  ##"
+    lines.add "  ##   " & widget & "(items = @[\"Alpha\", \"Beta\"])"
+    lines.add "  let t = activeTheme"
+    lines.add "  scrollPanel(\"rows\","
+    lines.add "      col(width = grow(), height = grow(), gap = t.metrics.gapList,"
+    lines.add "          padding = padAll(t.metrics.padMinor))"
+    lines.add "        .bg(t.palette.fieldBg)"
+    lines.add "        .border(t.metrics.borderHairline, t.palette.panelBorder)"
+    lines.add "        .corner(t.radii.card)"
+    lines.add "        .clip(horizontal = false, vertical = true,"
+    lines.add "              childOffset = currentScrollOffset())):"
+    lines.add "    for i, row in items:"
+    lines.add "      listRow(row, i):"
+    lines.add "        text(row)"
+  of "stat":
+    var parts: seq[string] = @["label: string", "value: string", "hint = \"\""]
+    if sig.len > 0: parts.add sig
+    lines.add "widget " & hotm & widget & "(" & parts.join(", ") & "):"
+    lines.add "  ## " & (if desc.len > 0: desc else:
+      "A label, value and hint in a stat panel:")
+    lines.add "  ##"
+    lines.add "  ##   " & widget & "(label = \"FPS\", value = \"60\", hint = \"vsync\")"
+    lines.add "  StatCard(label, value, hint)"
   else:
     lines.add "widget " & hotm & widget & "(" & sig & "):"
     lines.add "  ## " & (if desc.len > 0: desc else: widget & ".")
@@ -546,14 +653,32 @@ proc widgetSource(widget, module, kind, desc: string;
 
 proc usageExample(widget, kind: string; params: seq[Param]): string =
   var args: seq[string] = @[]
-  if kind == "focusable":
+  case kind
+  of "tabbed":
     args.add "id = hashId(" & quoteNim(snakeCase(widget)) & ")"
+    args.add "tabs = @[\"One\", \"Two\"]"
+  of "list":
+    args.add "items = @[\"Alpha\", \"Beta\"]"
+  of "card", "section":
+    args.add "title = " & quoteNim(titleCase(widget))
+  of "stat":
+    args.add "label = \"FPS\""
+    args.add "value = \"60\""
+    args.add "hint = \"vsync\""
+  of "focusable":
+    args.add "id = hashId(" & quoteNim(snakeCase(widget)) & ")"
+  else: discard
   for p in params:
     args.add p.name & " = " & (if p.typ == "string": quoteNim(titleCase(p.name)) else: "...")
   result = widget & "(" & args.join(", ") & ")"
   case kind
-  of "container": result.add ":\n      text(\"inside\")"
-  of "focusable": result = "if " & result & ":\n      discard"
+  of "container", "card", "section":
+    result.add ":\n      text(\"inside\")"
+  of "tabbed":
+    result.add ":\n      case activeTab(hashId(" & quoteNim(snakeCase(widget)) &
+      "))\n      of 0: text(\"page one\")\n      else: text(\"page two\")"
+  of "focusable":
+    result = "if " & result & ":\n      discard"
   else: discard
 
 proc newWidget(o: Options) {.raises.} =
@@ -577,16 +702,40 @@ proc newWidget(o: Options) {.raises.} =
   checkModuleName("module", module)
 
   var kind = o.value("kind",
-    "Kind: display (no block), container (takes a block), focusable (clickable focus stop)",
+    "Kind: display (paints params), container (takes a block), " &
+      "focusable (clickable focus stop), tabbed (tabbed view), card " &
+      "(title + block), section (heading + block), list (rows from " &
+      "items), stat (label/value/hint)",
     "display").toLowerAscii()
   case kind
   of "d", "display": kind = "display"
   of "c", "container": kind = "container"
   of "f", "focusable": kind = "focusable"
-  else: fail("kind must be display, container or focusable, not '" & kind & "'")
+  of "t", "tabbed": kind = "tabbed"
+  of "card": kind = "card"
+  of "s", "section": kind = "section"
+  of "l", "list": kind = "list"
+  of "stat": kind = "stat"
+  else: fail("kind must be display, container, focusable, tabbed, card, " &
+    "section, list or stat, not '" & kind & "'")
 
+  let paramsDefault =
+    case kind
+    of "tabbed", "list", "stat", "card", "section": ""
+    else: "label: string"
   let params = parseParams(o.value("params",
-    "Parameters (e.g. label: string, count: int)", "label: string"))
+    "Parameters (e.g. label: string, count: int)", paramsDefault))
+  let supplied =
+    case kind
+    of "tabbed": @["tabs"]
+    of "card", "section": @["title"]
+    of "list": @["items"]
+    of "stat": @["label", "value", "hint"]
+    else: @[]
+  for p in params:
+    if p.name in supplied:
+      fail("'" & p.name & "' is supplied by the " & kind &
+           " kind; pick another name")
   let desc = o.value("desc", "Description", "")
 
   let hot = o.has("hot") or
