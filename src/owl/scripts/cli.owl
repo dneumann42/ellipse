@@ -8,6 +8,7 @@ use fs
 use modules
 use source
 use projects
+use repl
 use term
 
 
@@ -17,6 +18,7 @@ fun usage:
     echo "commands:"
     echo "  new <dir> [gui]               create a project: project.owl and src/main.owl;"
     echo "                                gui makes a windowed app on ellipse_ui"
+    echo "  repl                          interactive session: enter owl code, quit to leave"
     echo "  run [<file>]                  evaluate an owl file, or the project's main module"
     echo "  projects                      list the projects owl knows"
     echo "  modules                       list the project's modules"
@@ -120,6 +122,39 @@ fun read-stdin:
             set line (readline "")
     out
 
+fun ends-colon s:
+    and (> (length s) 0) (= (index s (- (length s) 1)) ":")
+
+fun read-block first:
+    code = first
+    more = true
+    while (and more (ends-colon code)):
+        do:
+            cont = (readline "    ")
+            if (= cont nothing):
+                set more false
+            when (<> cont nothing):
+                if (<> cont ""):
+                    set code (concat code newline "    " cont)
+                    set more false
+    code
+
+fun print-out s:
+    if (= (index s (- (length s) 1)) newline):
+        echo (slice s 0 (- (length s) 1))
+        echo s
+
+fun repl-command:
+    echo "owl repl; type quit to leave"
+    st = (serve-input "")
+    line = (readline (concat st.prompt "> "))
+    while (and (<> line nothing) st.going):
+        do:
+            set st (serve-input (read-block line))
+            when (<> st.output ""):
+                (print-out st.output)
+            set line (readline (concat st.prompt "> "))
+
 fun read-input path:
     if (= path nothing):
         (read-stdin)
@@ -188,6 +223,7 @@ fun dispatch arg next:
         (= arg.name "new") = (new-command next)
         (= arg.name "modules") = (modules-command)
         (= arg.name "projects") = (projects-command)
+        (= arg.name "repl") = (repl-command)
         (= arg.name "run") = (run-command next)
         (= arg.name "items") = (items-command next)
         (= arg.name "show") = (show-command next)

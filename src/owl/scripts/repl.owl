@@ -1370,6 +1370,8 @@ fun serve-start:
         if (and (<> project nothing) (has-module project.main)):
             activate project.main
             (new-doc)
+        when (= active nothing):
+            (new-doc)
 
 fun serve-input input:
     (serve-start)
