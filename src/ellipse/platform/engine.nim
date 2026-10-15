@@ -7,6 +7,8 @@ const
   TargetUpdateHz* = 60.0'f64
   FixedUpdateSeconds* = 1.0'f64 / TargetUpdateHz
 
+var currentFrameDeltaSecondsValue = FixedUpdateSeconds
+
 proc secondsBetween*(startCounter, endCounter, frequency: uint64): float64 =
   float64(endCounter - startCounter) / float64(frequency)
 
@@ -44,8 +46,9 @@ proc sleepUntilCounter*(target, frequency: uint64) =
 proc beginFrame*(engine: var Engine): tuple[started: uint64, dt: float64] =
   let now = getPerformanceCounter()
   result.started = now
-  result.dt = min(secondsBetween(engine.previousTime, now, engine.frequency)
+  result.dt = min(secondsBetween(engine.previousTime, now, engine.frequency),
                    MaxDeltaTime)
+  currentFrameDeltaSecondsValue = result.dt
   engine.previousTime = now
 
 proc endFrame*(engine: var Engine, running: bool) =
@@ -56,5 +59,3 @@ proc endFrame*(engine: var Engine, running: bool) =
   let now = getPerformanceCounter()
   while engine.nextFrameCounter <= now:
     engine.nextFrameCounter += engine.frameStepCounters
-
-# template generateUpdate(dt: float64, scene)
