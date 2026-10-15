@@ -1,0 +1,42 @@
+
+command and a b:
+    va = eval a
+    if va:
+        eval b
+        va
+
+command or a b:
+    va = eval a
+    if va:
+        va
+        eval b
+
+command unless cond body+:
+    if (eval cond):
+        nothing
+        do:
+            forms = body
+            while (not (= (length forms) 0)):
+                eval (pop-front forms)
+
+fun is-nothing x:
+    = x nothing
+
+fun is-empty x:
+    = (length x) 0
+
+fun is-any x:
+    not (= (length x) 0)
+
+fun first xs:
+    index xs 0
+
+fun min a b:
+    if (< a b):
+        a
+        b
+
+fun max a b:
+    if (< a b):
+        b
+        a

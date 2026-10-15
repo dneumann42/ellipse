@@ -1,0 +1,166 @@
+use base
+use math
+use strings
+
+
+esc = char 27
+csi = concat esc "["
+
+csi-finals = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+fun sgr code:
+    concat csi (to-string code) "m"
+
+fun wrap text on off:
+    concat (sgr on) (to-string text) (sgr off)
+
+
+fun bold text:
+    wrap text 1 22
+
+fun dim text:
+    wrap text 2 22
+
+fun italic text:
+    wrap text 3 23
+
+fun underline text:
+    wrap text 4 24
+
+fun blink text:
+    wrap text 5 25
+
+fun inverse text:
+    wrap text 7 27
+
+fun hidden text:
+    wrap text 8 28
+
+fun strike text:
+    wrap text 9 29
+
+
+color-codes = {} (black = 0) (red = 1) (green = 2) (yellow = 3) (blue = 4) (magenta = 5) (cyan = 6) (white = 7) (default = 9)
+
+fun color-offset name:
+    bright = starts-with name "bright-"
+    plain = if bright:
+        drop name 7
+        name
+    code = field color-codes (do plain)
+    when (or (= code nothing) (and bright (= plain "default"))):
+        error "unknown color:" name
+    if bright:
+        + code 60
+        code
+
+fun color-byte n:
+    when (or (< n 0) (> n 255)):
+        error "a color component must be from 0 to 255, got" n
+    n
+
+fun rgb-code r g b:
+    concat (to-string (color-byte r)) ";" (to-string (color-byte g)) ";" (to-string (color-byte b))
+
+fun fg color text:
+    wrap text (+ 30 (color-offset color)) 39
+
+fun bg color text:
+    wrap text (+ 40 (color-offset color)) 49
+
+fun fg-256 n text:
+    wrap text (concat "38;5;" (to-string (color-byte n))) 39
+
+fun bg-256 n text:
+    wrap text (concat "48;5;" (to-string (color-byte n))) 49
+
+fun fg-rgb r g b text:
+    wrap text (concat "38;2;" (rgb-code r g b)) 39
+
+fun bg-rgb r g b text:
+    wrap text (concat "48;2;" (rgb-code r g b)) 49
+
+
+fun cursor-up (n = 1):
+    concat csi (to-string n) "A"
+
+fun cursor-down (n = 1):
+    concat csi (to-string n) "B"
+
+fun cursor-forward (n = 1):
+    concat csi (to-string n) "C"
+
+fun cursor-back (n = 1):
+    concat csi (to-string n) "D"
+
+fun move-to row col:
+    concat csi (to-string row) ";" (to-string col) "H"
+
+reset = sgr 0
+home = concat csi "H"
+clear-screen = concat csi "2J"
+clear-line = concat csi "2K"
+hide-cursor = concat csi "?25l"
+show-cursor = concat csi "?25h"
+save-cursor = concat esc "7"
+restore-cursor = concat esc "8"
+
+
+fun strip text:
+    out = ""
+    i = 0
+    n = length text
+    while (< i n):
+        c = index text (+ i 0)
+        if (= c esc):
+            do:
+                set i (+ i 1)
+                if (and (< i n) (= (index text (+ i 0)) "[")):
+                    do:
+                        set i (+ i 1)
+                        while (and (< i n) (= (find-char csi-finals (index text (+ i 0))) nothing)):
+                            set i (+ i 1)
+                        set i (+ i 1)
+                    set i (+ i 1)
+            do:
+                set out (concat out c)
+                set i (+ i 1)
+    out
+
+fun visible-length text:
+    length (strip text)
+
+export:
+    esc = esc
+    csi = csi
+    sgr = sgr
+    wrap = wrap
+    bold = bold
+    dim = dim
+    italic = italic
+    underline = underline
+    blink = blink
+    inverse = inverse
+    hidden = hidden
+    strike = strike
+    fg = fg
+    bg = bg
+    fg-256 = fg-256
+    bg-256 = bg-256
+    fg-rgb = fg-rgb
+    bg-rgb = bg-rgb
+    cursor-up = cursor-up
+    cursor-down = cursor-down
+    cursor-forward = cursor-forward
+    cursor-back = cursor-back
+    move-to = move-to
+    reset = reset
+    home = home
+    clear-screen = clear-screen
+    clear-line = clear-line
+    hide-cursor = hide-cursor
+    show-cursor = show-cursor
+    save-cursor = save-cursor
+    restore-cursor = restore-cursor
+    strip = strip
+    visible-length = visible-length

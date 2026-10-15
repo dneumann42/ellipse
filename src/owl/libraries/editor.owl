@@ -1,0 +1,610 @@
+use base
+use math
+use io
+use strings
+use ansi
+use term
+use keys
+
+
+
+buf = ""
+point = 0
+mark = nothing
+goal-column = 0
+kills = ([])
+yank-start = 0
+yank-index = 0
+undo-stack = ([])
+history = ([])
+history-at = 0
+draft = ""
+last-command = ""
+this-command = ""
+done = false
+outcome = nothing
+prompt-text = "owl> "
+continuation-text = "...  "
+prompt-width = 5
+continuation-width = 5
+drawn-row = 0
+escape-keys = ([])
+
+cr = char 13
+word-chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+keyboard-on = concat csi ">1u" csi ">4;2m" csi "?2004h"
+keyboard-off = concat csi "<u" csi ">4m" csi "?2004l"
+undo-limit = 200
+
+
+fun nth xs i:
+    index xs (+ i 0)
+
+fun pick c a b:
+    if c:
+        a
+        b
+
+fun is-one-of key options:
+    found = false
+    while (and (not found) (is-any options)):
+        when (= (pop-front options) key):
+            set found true
+    found
+
+fun quotient a b:
+    q = 0
+    r = a
+    while (not (< r b)):
+        set r (- r b)
+        set q (+ q 1)
+    q
+
+fun remainder a b:
+    - a (* b (quotient a b))
+
+fun spaces n:
+    out = ""
+    while (> n 0):
+        set out (concat out " ")
+        set n (- n 1)
+    out
+
+fun trim-right s:
+    e = length s
+    while (and (> e 0) (= (nth s (- e 1)) " ")):
+        set e (- e 1)
+    slice s 0 e
+
+fun replace-all s from to:
+    out = ""
+    at = 0
+    next = find s from at
+    while (<> next nothing):
+        set out (concat out (slice s at next) to)
+        set at (+ next (length from))
+        set next (find s from at)
+    concat out (slice s at)
+
+fun is-blank-text s:
+    = (trim-right (replace-all s newline "")) ""
+
+
+fun is-cont-byte s i:
+    c = code s i
+    and (> c 127) (< c 192)
+
+fun next-pos s i:
+    n = length s
+    j = + i 1
+    while (and (< j n) (is-cont-byte s j)):
+        set j (+ j 1)
+    min j n
+
+fun prev-pos s i:
+    j = - i 1
+    while (and (> j 0) (is-cont-byte s j)):
+        set j (- j 1)
+    max j 0
+
+fun char-width s:
+    n = length s
+    i = 0
+    w = 0
+    while (< i n):
+        when (not (is-cont-byte s i)):
+            set w (+ w 1)
+        set i (+ i 1)
+    w
+
+fun is-word-char ch:
+    or (> (code ch) 127) (<> (find word-chars ch) nothing)
+
+fun is-word-at i:
+    is-word-char (nth buf i)
+
+fun char-up ch:
+    c = code ch
+    if (and (> c 96) (< c 123)):
+        char (- c 32)
+        ch
+
+fun char-down ch:
+    c = code ch
+    if (and (> c 64) (< c 91)):
+        char (+ c 32)
+        ch
+
+fun map-chars text f:
+    out = ""
+    i = 0
+    while (< i (length text)):
+        set out (concat out (f (nth text i)))
+        set i (+ i 1)
+    out
+
+fun upcase text:
+    map-chars text char-up
+
+fun downcase text:
+    map-chars text char-down
+
+fun capitalize text:
+    i = 0
+    n = length text
+    while (and (< i n) (not (is-word-char (nth text i)))):
+        set i (+ i 1)
+    if (< i n):
+        concat (slice text 0 i) (char-up (nth text i)) (downcase (slice text (+ i 1)))
+        text
+
+
+fun line-start p:
+    i = p
+    while (and (> i 0) (<> (nth buf (- i 1)) newline)):
+        set i (- i 1)
+    i
+
+fun line-end p:
+    at = find buf newline p
+    if (= at nothing):
+        length buf
+        at
+
+fun column-of p:
+    char-width (slice buf (line-start p) p)
+
+fun pos-at-column s col:
+    e = line-end s
+    i = s
+    w = 0
+    while (and (< i e) (< w col)):
+        set i (next-pos buf i)
+        set w (+ w 1)
+    i
+
+fun indent-end p:
+    i = line-start p
+    while (and (< i (length buf)) (= (nth buf i) " ")):
+        set i (+ i 1)
+    i
+
+fun word-end p:
+    n = length buf
+    i = p
+    while (and (< i n) (not (is-word-at i))):
+        set i (next-pos buf i)
+    while (and (< i n) (is-word-at i)):
+        set i (next-pos buf i)
+    i
+
+fun word-start p:
+    i = p
+    while (and (> i 0) (not (is-word-at (prev-pos buf i)))):
+        set i (prev-pos buf i)
+    while (and (> i 0) (is-word-at (prev-pos buf i))):
+        set i (prev-pos buf i)
+    i
+
+
+fun save-undo:
+    when (not (and (= this-command "insert") (= last-command "insert"))):
+        append undo-stack ({} (text = buf) (at = point))
+        when (> (length undo-stack) undo-limit):
+            pop-front undo-stack
+
+fun insert-text text:
+    set buf (concat (slice buf 0 point) text (slice buf point))
+    when (and (<> mark nothing) (> mark point)):
+        set mark (+ mark (length text))
+    set point (+ point (length text))
+
+fun delete-range a b:
+    lo = min a b
+    hi = max a b
+    gone = slice buf lo hi
+    set buf (concat (slice buf 0 lo) (slice buf hi))
+    when (> point lo):
+        set point (max lo (- point (- hi lo)))
+    when (and (<> mark nothing) (> mark lo)):
+        set mark (max lo (- mark (- hi lo)))
+    gone
+
+fun load-text text:
+    set buf text
+    set point (length text)
+    set mark nothing
+
+fun kill a b:
+    lo = min a b
+    hi = max a b
+    backward = not (> hi point)
+    when (> hi lo):
+        (save-undo)
+        text = delete-range lo hi
+        if (and (= last-command "kill") (is-any kills)):
+            do:
+                prev = pop kills
+                joined = if backward:
+                    concat text prev
+                    concat prev text
+                append kills joined
+            append kills text
+    set this-command "kill"
+
+
+fun self-insert text:
+    set this-command "insert"
+    (save-undo)
+    insert-text text
+
+fun newline-and-indent:
+    (save-undo)
+    s = line-start point
+    keep = min (- (indent-end point) s) (- point s)
+    deeper = ends-with (trim-right (slice buf s point)) ":"
+    insert-text (concat newline (spaces (+ keep (pick deeper 4 0))))
+
+fun open-line:
+    (save-undo)
+    insert-text newline
+    set point (- point 1)
+
+fun indent:
+    (save-undo)
+    insert-text (spaces (- 4 (remainder (column-of point) 4)))
+
+fun forward-char:
+    set point (next-pos buf point)
+
+fun backward-char:
+    set point (prev-pos buf point)
+
+fun forward-word:
+    set point (word-end point)
+
+fun backward-word:
+    set point (word-start point)
+
+fun beginning-of-line:
+    set point (line-start point)
+
+fun end-of-line:
+    set point (line-end point)
+
+fun back-to-indentation:
+    set point (indent-end point)
+
+fun beginning-of-buffer:
+    set point 0
+
+fun end-of-buffer:
+    set point (length buf)
+
+fun history-back:
+    when (> history-at 0):
+        when (= history-at (length history)):
+            set draft buf
+        set history-at (- history-at 1)
+        load-text (nth history history-at)
+
+fun history-forward:
+    when (< history-at (length history)):
+        set history-at (+ history-at 1)
+        if (= history-at (length history)):
+            load-text draft
+            load-text (nth history history-at)
+
+fun previous-line:
+    s = line-start point
+    if (= s 0):
+        (history-back)
+        do:
+            when (<> last-command "line"):
+                set goal-column (column-of point)
+            set point (pos-at-column (line-start (- s 1)) goal-column)
+            set this-command "line"
+
+fun next-line:
+    e = line-end point
+    if (= e (length buf)):
+        (history-forward)
+        do:
+            when (<> last-command "line"):
+                set goal-column (column-of point)
+            set point (pos-at-column (+ e 1) goal-column)
+            set this-command "line"
+
+fun delete-char:
+    when (< point (length buf)):
+        (save-undo)
+        delete-range point (next-pos buf point)
+
+fun backspace:
+    when (> point 0):
+        (save-undo)
+        before = slice buf (line-start point) point
+        if (and (> (length before) 0) (= (trim-right before) "")):
+            do:
+                r = remainder (length before) 4
+                delete-range (- point (pick (= r 0) 4 r)) point
+            delete-range (prev-pos buf point) point
+
+fun kill-line:
+    e = line-end point
+    if (and (= e point) (< point (length buf))):
+        kill point (+ point 1)
+        kill point e
+
+fun kill-to-line-start:
+    kill (line-start point) point
+
+fun kill-word:
+    kill point (word-end point)
+
+fun backward-kill-word:
+    kill (word-start point) point
+
+fun kill-region-or-word:
+    if (= mark nothing):
+        (backward-kill-word)
+        do:
+            kill mark point
+            set mark nothing
+
+fun copy-region:
+    when (<> mark nothing):
+        append kills (slice buf (min mark point) (max mark point))
+        set mark nothing
+
+fun yank:
+    when (is-any kills):
+        (save-undo)
+        set yank-start point
+        set yank-index (- (length kills) 1)
+        insert-text (nth kills yank-index)
+        set this-command "yank"
+
+fun yank-pop:
+    when (and (= last-command "yank") (> (length kills) 1)):
+        delete-range yank-start point
+        if (= yank-index 0):
+            set yank-index (- (length kills) 1)
+            set yank-index (- yank-index 1)
+        insert-text (nth kills yank-index)
+        set this-command "yank"
+
+fun transpose-chars:
+    at = pick (= point (line-end point)) (prev-pos buf point) point
+    when (and (> at 0) (< at (length buf))):
+        a = prev-pos buf at
+        b = next-pos buf at
+        left = slice buf a at
+        right = slice buf at b
+        when (and (<> left newline) (<> right newline)):
+            (save-undo)
+            set buf (concat (slice buf 0 a) right left (slice buf b))
+            set point b
+
+fun case-word f:
+    e = word-end point
+    when (> e point):
+        (save-undo)
+        set buf (concat (slice buf 0 point) (f (slice buf point e)) (slice buf e))
+        set point e
+
+fun set-mark:
+    set mark point
+
+fun exchange-point-and-mark:
+    when (<> mark nothing):
+        other = mark
+        set mark point
+        set point other
+
+fun keyboard-quit:
+    set mark nothing
+
+fun undo:
+    when (is-any undo-stack):
+        entry = pop undo-stack
+        set buf entry.text
+        set point entry.at
+        set mark nothing
+    set this-command "undo"
+
+fun paste:
+    (save-undo)
+    insert-text (replace-all (replace-all paste-text (concat cr newline) newline) cr newline)
+
+fun redraw-screen:
+    write home clear-screen
+    set drawn-row 0
+
+fun finish-display:
+    set point (length buf)
+    (render)
+    write cr newline
+
+fun submit:
+    (finish-display)
+    when (and (not (is-blank-text buf)) (or (is-empty history) (<> buf (nth history (- (length history) 1))))):
+        append history buf
+    set outcome buf
+    set done true
+
+fun escape key:
+    (finish-display)
+    set outcome ({} (key = key) (text = buf))
+    set done true
+
+fun cancel:
+    set point (length buf)
+    (render)
+    write (dim "^C") cr newline
+    set outcome ""
+    set done true
+
+fun end-of-input:
+    set outcome nothing
+    set done true
+
+fun delete-char-or-end:
+    if (= buf ""):
+        (end-of-input)
+        (delete-char)
+
+fun control-x:
+    key = (read-key)
+    cond:
+        (= key "<C-x>") = (exchange-point-and-mark)
+        (= key "u") = (undo)
+        true = nothing
+
+
+fun dispatch key:
+    cond:
+        (is-one-of key escape-keys) = (escape key)
+        (is-text key) = (self-insert key)
+        (= key "<paste>") = (paste)
+        (is-one-of key ([] "<C-RET>" "<M-RET>" "<C-j>")) = (submit)
+        (is-one-of key ([] "<RET>" "<S-RET>")) = (newline-and-indent)
+        (= key "<C-o>") = (open-line)
+        (= key "<TAB>") = (indent)
+        (is-one-of key ([] "<C-f>" "<right>")) = (forward-char)
+        (is-one-of key ([] "<C-b>" "<left>")) = (backward-char)
+        (is-one-of key ([] "<M-f>" "<C-right>" "<M-right>")) = (forward-word)
+        (is-one-of key ([] "<M-b>" "<C-left>" "<M-left>")) = (backward-word)
+        (is-one-of key ([] "<C-a>" "<home>")) = (beginning-of-line)
+        (is-one-of key ([] "<C-e>" "<end>")) = (end-of-line)
+        (= key "<M-m>") = (back-to-indentation)
+        (is-one-of key ([] "<M-<>" "<C-home>")) = (beginning-of-buffer)
+        (is-one-of key ([] "<M->>" "<C-end>")) = (end-of-buffer)
+        (is-one-of key ([] "<C-p>" "<up>")) = (previous-line)
+        (is-one-of key ([] "<C-n>" "<down>")) = (next-line)
+        (is-one-of key ([] "<M-p>" "<C-up>")) = (history-back)
+        (is-one-of key ([] "<M-n>" "<C-down>")) = (history-forward)
+        (= key "<C-d>") = (delete-char-or-end)
+        (= key "<delete>") = (delete-char)
+        (is-one-of key ([] "<DEL>" "<C-h>" "<S-DEL>")) = (backspace)
+        (= key "<C-k>") = (kill-line)
+        (= key "<C-u>") = (kill-to-line-start)
+        (is-one-of key ([] "<M-d>" "<C-delete>")) = (kill-word)
+        (is-one-of key ([] "<M-DEL>" "<C-DEL>")) = (backward-kill-word)
+        (= key "<C-w>") = (kill-region-or-word)
+        (= key "<M-w>") = (copy-region)
+        (= key "<C-y>") = (yank)
+        (= key "<M-y>") = (yank-pop)
+        (= key "<C-t>") = (transpose-chars)
+        (= key "<M-u>") = (case-word upcase)
+        (= key "<M-l>") = (case-word downcase)
+        (= key "<M-c>") = (case-word capitalize)
+        (is-one-of key ([] "<C-SPC>" "<C-@>")) = (set-mark)
+        (= key "<C-g>") = (keyboard-quit)
+        (= key "<C-x>") = (control-x)
+        (is-one-of key ([] "<C-/>" "<C-_>")) = (undo)
+        (= key "<C-l>") = (redraw-screen)
+        (= key "<C-c>") = (cancel)
+        (= key "<EOF>") = (end-of-input)
+        true = nothing
+
+
+fun move-up n:
+    if (> n 0):
+        cursor-up n
+        ""
+
+fun render:
+    width = max (terminal-size).cols 1
+    out = concat (move-up drawn-row) cr csi "J"
+    start = 0
+    row = 0
+    cursor-row = 0
+    cursor-col = 0
+    on-first = true
+    finished = false
+    total = 0
+    while (not finished):
+        e = line-end start
+        line = slice buf start e
+        lead = pick on-first prompt-width continuation-width
+        set out (concat out (pick on-first prompt-text continuation-text) line)
+        set total (+ lead (char-width line))
+        when (and (not (< point start)) (not (> point e))):
+            offset = + lead (char-width (slice buf start point))
+            set cursor-row (+ row (quotient offset width))
+            set cursor-col (remainder offset width)
+        when (= (remainder total width) 0):
+            set out (concat out cr newline)
+        if (= e (length buf)):
+            set finished true
+            do:
+                set out (concat out cr newline)
+                set row (+ row (+ (quotient total width) 1))
+                set start (+ e 1)
+                set on-first false
+    end-row = + row (quotient total width)
+    set out (concat out (move-up (- end-row cursor-row)) cr)
+    when (> cursor-col 0):
+        set out (concat out (cursor-forward cursor-col))
+    write out
+    set drawn-row cursor-row
+
+
+fun edit-loop:
+    while (not done):
+        key = (read-key)
+        set this-command ""
+        dispatch key
+        set last-command this-command
+        when (not done):
+            (render)
+
+fun read-code (prompt = "owl> ") (continuation = "...  ") (initial = ""):
+    set prompt-text prompt
+    set continuation-text continuation
+    set prompt-width (visible-length prompt)
+    set continuation-width (visible-length continuation)
+    set buf initial
+    set point (length initial)
+    set mark nothing
+    set undo-stack ([])
+    set last-command ""
+    set history-at (length history)
+    set draft ""
+    set drawn-row 0
+    set outcome nothing
+    set done false
+    raw-mode true
+    write keyboard-on
+    try (render) (edit-loop):
+        write keyboard-off
+        raw-mode false
+        error failure
+    write keyboard-off
+    raw-mode false
+    outcome
+
+export:
+    read-code = read-code
+    escape-keys = escape-keys

@@ -1,0 +1,34 @@
+use base
+use math
+use strings
+
+fun flag-name part:
+    if (= (length part) 0):
+        error "a flag needs a name"
+        part
+
+fun parse-arg s:
+    if (starts-with s "--"):
+        do:
+            at = find-char s "="
+            if (= at nothing):
+                {} (type = "long-flag") (flag = (flag-name (drop s 2)))
+                do:
+                    name = flag-name (take (drop s 2) (- at 2))
+                    {} (type = "flag-value") (flag = name) (value = (drop s (+ at 1)))
+        if (starts-with s "-"):
+            {} (type = "short-flag") (flag = (flag-name (drop s 1)))
+            if (= (length s) 0):
+                error "empty argument"
+                {} (type = "cmd") (name = s)
+
+fun cli-parser:
+    args = argv
+    lambda:
+        if (= (length args) 0):
+            nothing
+            parse-arg (pop-front args)
+
+export:
+    parse-arg = parse-arg
+    cli-parser = cli-parser

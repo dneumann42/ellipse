@@ -1,0 +1,89 @@
+use base
+use math
+use strings
+use io
+use fs
+use net
+
+
+fun runtime-dir:
+    dir = env-var "XDG_RUNTIME_DIR"
+    if (or (= dir nothing) (= dir "")):
+        concat "/tmp/owl-" (to-string (env-var "USER"))
+        dir
+
+fun socket-dir:
+    concat (runtime-dir) "/owl"
+
+fun socket-path pid:
+    concat (socket-dir) "/" (to-string pid) ".sock"
+
+fun frame-message text:
+    concat (to-string (length text)) newline text
+
+fun take-message buf:
+    nl = find buf newline
+    if (= nl nothing):
+        nothing
+        do:
+            n = index (parse (slice buf 0 nl)) 0
+            stop = + nl 1 n
+            if (< (length buf) stop):
+                nothing
+                {} (message = (slice buf (+ nl 1) stop)) (rest = (slice buf stop))
+
+fun request kind body:
+    concat kind newline body
+
+fun parse-request text:
+    nl = find text newline
+    if (= nl nothing):
+        {} (kind = text) (body = "")
+        {} (kind = (slice text 0 nl)) (body = (slice text (+ nl 1)))
+
+fun live-pids:
+    out = ([])
+    dir = (socket-dir)
+    when (dir-exists dir):
+        entries = list-dir dir
+        while (is-any entries):
+            e = pop-front entries
+            when (ends-with e.name ".sock"):
+                pid = index (parse (slice e.name 0 (- (length e.name) 5))) 0
+                if (and (= (type-of pid) "number") (process-alive pid)):
+                    append out pid
+                    remove-file (concat dir "/" e.name)
+    out
+
+fun connect pid:
+    fd = unix-connect (socket-path pid)
+    if (= fd nothing):
+        nothing
+        {} (fd = fd) (pid = pid) (buf = "")
+
+fun exchange conn kind body:
+    sock-write conn.fd (frame-message (request kind body))
+    buf = conn.buf
+    m = take-message buf
+    gone = false
+    while (and (= m nothing) (not gone)):
+        data = sock-read conn.fd
+        if (= data nothing):
+            set gone true
+            do:
+                set buf (concat buf data)
+                set m (take-message buf)
+    if gone:
+        {} (answer = nothing) (conn = conn)
+        {} (answer = m.message) (conn = (with conn (buf = m.rest)))
+
+export:
+    runtime-dir = runtime-dir
+    socket-dir = socket-dir
+    socket-path = socket-path
+    frame-message = frame-message
+    take-message = take-message
+    parse-request = parse-request
+    live-pids = live-pids
+    connect = connect
+    exchange = exchange

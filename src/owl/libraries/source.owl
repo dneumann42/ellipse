@@ -1,0 +1,340 @@
+use base
+use math
+use strings
+
+
+nl = char 10
+
+fun at xs i:
+    index xs (+ i 0)
+
+fun split-lines text:
+    lines = ([])
+    from = 0
+    done = false
+    while (not done):
+        found = find text nl from
+        if (= found nothing):
+            do:
+                append lines (slice text from)
+                set done true
+            do:
+                append lines (slice text from found)
+                set from (+ found 1)
+    lines
+
+fun join-lines lines:
+    if (is-empty lines):
+        ""
+        do:
+            out = at lines 0
+            i = 1
+            while (< i (length lines)):
+                set out (concat out nl (at lines i))
+                set i (+ i 1)
+            out
+
+fun is-space-byte b:
+    or (= b 32) (and (> b 8) (< b 14))
+
+fun content-start line:
+    i = 0
+    n = length line
+    while (and (< i n) (is-space-byte (code line i))):
+        set i (+ i 1)
+    i
+
+fun indent-of line:
+    i = 0
+    n = length line
+    while (and (< i n) (or (= (code line i) 32) (= (code line i) 9))):
+        set i (+ i 1)
+    i
+
+fun is-blank line:
+    = (content-start line) (length line)
+
+fun is-comment line:
+    p = content-start line
+    and (< p (length line)) (= (code line p) 59)
+
+fun line-kind line:
+    cond:
+        (is-blank line) = "blank"
+        (> (indent-of line) 0) = "body"
+        (is-comment line) = "top-comment"
+        true = "head"
+
+fun ordinal-name n:
+    concat "#" (to-string n)
+
+fun symbol-text x:
+    if (= (type-of x) "symbol"):
+        to-string x
+        nothing
+
+fun widget-name form:
+    n = length form
+    first = if (> n 1):
+        symbol-text (at form 1)
+        nothing
+    if (and (= first "focusable") (> n 2)):
+        symbol-text (at form 2)
+        first
+
+fun list-info form:
+    head = symbol-text (at form 0)
+    n = length form
+    defines = and (or (= head "fun") (or (= head "command") (= head "dynamic-command"))) (and (> n 2) (<> (symbol-text (at form 1)) nothing))
+    cond:
+        (and defines (<> (body-start form) nothing)) = ({} (kind = head) (name = (symbol-text (at form 1))))
+        (and (= head "widget") (and (<> (body-start form) nothing) (<> (widget-name form) nothing))) = ({} (kind = "widget") (name = (widget-name form)))
+        (= head "use") = ({} (kind = "use") (name = nothing))
+        (= head "export") = ({} (kind = "export") (name = nothing))
+        true = ({} (kind = "statement") (name = nothing))
+
+fun classify text:
+    forms = parse text
+    when (<> (length forms) 1):
+        error "an item must hold exactly one form"
+    form = at forms 0
+    t = type-of form
+    cond:
+        (and (= t "pair") (<> (symbol-text (at form 0)) nothing)) = ({} (kind = "binding") (name = (symbol-text (at form 0))))
+        (= t "list") = (list-info form)
+        true = ({} (kind = "statement") (name = nothing))
+
+fun make-item ordinal start head end lines:
+    src = join-lines (slice lines head end)
+    info = classify src
+    {}:
+        kind = info.kind
+        name = info.name
+        ordinal = ordinal
+        line = (+ head 1)
+        start = start
+        head = head
+        end = end
+        header = (at lines head)
+        text = (join-lines (slice lines start end))
+        code = src
+
+fun line-kinds lines:
+    kinds = ([])
+    i = 0
+    while (< i (length lines)):
+        append kinds (line-kind (at lines i))
+        set i (+ i 1)
+    kinds
+
+fun source-items text:
+    parse text
+    lines = split-lines text
+    kinds = line-kinds lines
+    n = length lines
+    items = ([])
+    prev-end = 0
+    i = 0
+    while (< i n):
+        if (= (at kinds i) "head"):
+            do:
+                last = i
+                j = (+ i 1)
+                scanning = true
+                while (and scanning (< j n)):
+                    k = at kinds j
+                    if (= k "head"):
+                        set scanning false
+                        do:
+                            when (= k "body"):
+                                set last j
+                            set j (+ j 1)
+                start = i
+                while (and (> start prev-end) (= (at kinds (- start 1)) "top-comment")):
+                    set start (- start 1)
+                end = (+ last 1)
+                append items (make-item (+ (length items) 1) start i end lines)
+                set prev-end end
+                set i end
+            set i (+ i 1)
+    items
+
+fun item-label item:
+    if (= item.name nothing):
+        ordinal-name item.ordinal
+        item.name
+
+fun parse-ordinal key:
+    forms = parse (slice key 1)
+    when (or (<> (length forms) 1) (<> (type-of (at forms 0)) "number")):
+        error (concat "not an item position: " key)
+    at forms 0
+
+fun select-item items key:
+    if (starts-with key "#"):
+        do:
+            n = parse-ordinal key
+            when (or (< n 1) (> n (length items))):
+                error (concat "no item " key ", the module has " (to-string (length items)))
+            at items (- n 1)
+        do:
+            found = ([])
+            i = 0
+            while (< i (length items)):
+                when (= (index items (+ i 0) "name") key):
+                    append found (at items i)
+                set i (+ i 1)
+            when (is-empty found):
+                error (concat "no item named " key)
+            when (> (length found) 1):
+                error (concat key " is defined " (to-string (length found)) " times, name it by position: " (positions found))
+            at found 0
+
+fun positions found:
+    out = ""
+    i = 0
+    while (< i (length found)):
+        item = at found i
+        when (> i 0):
+            set out (concat out ", ")
+        set out (concat out (ordinal-name item.ordinal) " (line " (to-string item.line) ")")
+        set i (+ i 1)
+    out
+
+fun has-item items key:
+    if (starts-with key "#"):
+        do:
+            n = parse-ordinal key
+            and (> n 0) (not (> n (length items)))
+        do:
+            found = false
+            i = 0
+            while (< i (length items)):
+                when (= (index items (+ i 0) "name") key):
+                    set found true
+                set i (+ i 1)
+            found
+
+fun trim-blank-lines text:
+    lines = split-lines text
+    a = 0
+    b = length lines
+    while (and (< a b) (is-blank (at lines a))):
+        set a (+ a 1)
+    while (and (> b a) (is-blank (at lines (- b 1)))):
+        set b (- b 1)
+    join-lines (slice lines a b)
+
+fun input-items text:
+    src = trim-blank-lines text
+    when (is-blank src):
+        error "no code given"
+    lines = split-lines src
+    items = source-items src
+    pos = 0
+    i = 0
+    while (< i (length items)):
+        item = at items i
+        check-gap lines pos item.start
+        set pos item.end
+        set i (+ i 1)
+    check-gap lines pos (length lines)
+    items
+
+fun check-gap lines from to:
+    i = from
+    while (< i to):
+        when (not (is-blank (at lines i))):
+            error (concat "line " (to-string (+ i 1)) " is outside of any item: " (at lines i))
+        set i (+ i 1)
+
+fun single-item text:
+    items = input-items text
+    when (<> (length items) 1):
+        error (concat "expected one item, got " (to-string (length items)))
+    at items 0
+
+fun splice text from to new-lines:
+    lines = split-lines text
+    join-lines (concat (slice lines 0 from) new-lines (slice lines to))
+
+fun checked text:
+    source-items text
+    text
+
+fun has-comment item:
+    < item.start item.head
+
+fun update-item text key new:
+    target = select-item (source-items text) key
+    item = single-item new
+    when (<> item.kind target.kind):
+        error (concat (item-label target) " is a " target.kind ", not a " item.kind)
+    when (<> item.name target.name):
+        error (concat "the new code defines " (item-label item) ", not " (item-label target))
+    from = if (has-comment item):
+        target.start
+        target.head
+    checked (splice text from target.end (split-lines item.text))
+
+fun add-item text new:
+    items = source-items text
+    added = input-items new
+    out = text
+    i = 0
+    while (< i (length added)):
+        item = at added i
+        when (and (<> item.name nothing) (has-item (source-items out) item.name)):
+            error (concat item.name " is already defined, update it instead")
+        set out (append-item out item)
+        set i (+ i 1)
+    checked out
+
+fun append-item text item:
+    lines = split-lines text
+    p = length lines
+    while (and (> p 0) (is-blank (at lines (- p 1)))):
+        set p (- p 1)
+    new-lines = split-lines item.text
+    when (> p 0):
+        prepend new-lines ""
+    join-lines (concat (slice lines 0 p) new-lines (slice lines p))
+
+fun put-item text new:
+    added = input-items new
+    out = text
+    i = 0
+    while (< i (length added)):
+        item = at added i
+        if (and (<> item.name nothing) (has-item (source-items out) item.name)):
+            set out (update-item out item.name item.text)
+            set out (append-item out item)
+        set i (+ i 1)
+    checked out
+
+fun remove-item text key:
+    target = select-item (source-items text) key
+    lines = split-lines text
+    from = target.start
+    to = target.end
+    before-blank = or (= from 0) (is-blank (at lines (- from 1)))
+    when (and before-blank (and (< to (length lines)) (is-blank (at lines to)))):
+        if (< (+ to 1) (length lines)):
+            set to (+ to 1)
+            when (> from 0):
+                set from (- from 1)
+    checked (splice text from to ([]))
+
+export:
+    split-lines = split-lines
+    join-lines = join-lines
+    source-items = source-items
+    input-items = input-items
+    single-item = single-item
+    select-item = select-item
+    has-item = has-item
+    item-label = item-label
+    update-item = update-item
+    add-item = add-item
+    put-item = put-item
+    remove-item = remove-item

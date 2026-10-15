@@ -1,0 +1,4 @@
+#+TITLE: Platform
+
+Everything that touches SDL3 goes in the platform folder, this quarantines SDL3 as a dependency and allows the engine to have a small and 
+curated interface to SDL3.

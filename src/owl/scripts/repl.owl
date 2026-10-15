@@ -1,0 +1,1514 @@
+use io
+use base
+use math
+use strings
+use iterators
+use term
+use program
+use fs
+use modules
+use source
+use live
+use projects
+use net
+use wire
+
+
+in-app = false
+served = false
+session-over = false
+
+prelude = join-lines:
+    []:
+        "use io"
+        "use base"
+        "use math"
+        "use strings"
+        "use iterators"
+        ""
+
+fun doc-prelude:
+    cond:
+        (= project nothing) = prelude
+        (= project.kind "gui") = (concat prelude "use gui" newline "export all" newline)
+        true = (concat prelude "export-all" newline)
+
+project = nothing
+no-project = "no project; new-project <dir> creates one, open-project switches to one"
+docs = ([])
+active = nothing
+fresh-docs = ([])
+
+remote = nothing
+
+results = ([])
+results-limit = 100
+last-input = ""
+
+record-statements = true
+show-changes = true
+confirm-exit = true
+
+transcript = ([])
+transcript-limit = 400
+
+columns = 77
+
+front = nothing
+
+pending = nothing
+
+fun at xs i:
+    index xs (+ i 0)
+
+fun pick-text c a b:
+    if c:
+        a
+        b
+
+fun contains xs x:
+    found = false
+    for y (items xs):
+        when (= y x):
+            set found true
+    found
+
+fun pad s n:
+    out = s
+    while (< (length out) n):
+        set out (concat out " ")
+    out
+
+fun join-with xs sep:
+    out = ""
+    for i (range (length xs)):
+        when (> i 0):
+            set out (concat out sep)
+        set out (concat out (at xs i))
+    out
+
+fun join-words xs:
+    join-with xs ", "
+
+fun trim s:
+    a = 0
+    b = length s
+    while (and (< a b) (is-space (at s a))):
+        set a (+ a 1)
+    while (and (> b a) (is-space (index s (- b 1)))):
+        set b (- b 1)
+    slice s a b
+
+fun is-space c:
+    or (= c " ") (or (= c (char 9)) (= c newline))
+
+fun is-blank s:
+    = (trim s) ""
+
+fun words s:
+    out = ([])
+    i = 0
+    n = length s
+    while (< i n):
+        c = at s i
+        if (is-space c):
+            set i (+ i 1)
+            do:
+                quoted = = c (char 34)
+                from = pick-text quoted (+ i 1) i
+                stop = word-end s from quoted
+                append out (slice s from stop)
+                set i (+ stop 1)
+    out
+
+fun word-end s from quoted:
+    stop = from
+    while (and (< stop (length s)) (not (ends-word (at s stop) quoted))):
+        set stop (+ stop 1)
+    stop
+
+fun ends-word c quoted:
+    if quoted:
+        = c (char 34)
+        is-space c
+
+
+fun add-entry kind text (prompt = nothing):
+    append transcript ({} (kind = kind) (text = text) (prompt = prompt))
+    when (> (length transcript) transcript-limit):
+        pop-front transcript
+
+fun flush-output:
+    out = (take-captured)
+    when (<> out ""):
+        when (ends-with out newline):
+            set out (slice out 0 (- (length out) 1))
+        add-entry "out" out
+
+fun log-entry kind text:
+    if in-app:
+        do:
+            (flush-output)
+            add-entry kind text
+        echo text
+
+fun note text:
+    log-entry "note" text
+
+fun show-error message:
+    log-entry "error" message
+
+
+refused = nothing
+last-failure = nothing
+
+fun refuse message:
+    set refused message
+    error message
+
+fun command-failed message:
+    set last-failure (error-report)
+    if (= message refused):
+        log-entry "error" message
+        log-entry "error" (concat message " · details shows where")
+    set refused nothing
+
+fun show value:
+    when (<> value nothing):
+        append results ({} (input = last-input) (value = value))
+        when (> (length results) results-limit):
+            pop-front results
+        if in-app:
+            log-entry "value" (to-code value (max (- columns 3) 40))
+            do:
+                text = to-code value 77
+                if (= (find text newline) nothing):
+                    echo "=>" text
+                    echo (concat "=>" newline text)
+
+
+screen = nothing
+screen-serial = 0
+
+fun open-screen s:
+    when (not in-app):
+        refuse "this needs the repl app (owl repl), not an attached session"
+    set screen-serial (+ screen-serial 1)
+    set screen (with s (serial = screen-serial))
+
+fun entry label (value = nothing) (hint = ""):
+    {} (label = label) (value = (pick-text (= value nothing) label value)) (hint = hint)
+
+fun choose title entries done:
+    s = {}:
+        kind = "choose"
+        title = title
+        entries = entries
+        done = done
+    open-screen s
+
+fun ask title label initial done:
+    s = {}:
+        kind = "ask"
+        title = title
+        label = label
+        initial = initial
+        done = done
+    open-screen s
+
+fun confirm title lines buttons done:
+    s = {}:
+        kind = "confirm"
+        title = title
+        lines = lines
+        buttons = buttons
+        done = done
+    open-screen s
+
+fun text-field name label (value = "") (hint = ""):
+    {} (kind = "text") (name = name) (label = label) (value = value) (hint = hint)
+
+fun check-field name label (value = false):
+    {} (kind = "check") (name = name) (label = label) (value = value)
+
+fun form title fields buttons done:
+    s = {}:
+        kind = "form"
+        title = title
+        fields = fields
+        buttons = buttons
+        done = done
+    open-screen s
+
+fun section title text (value = nothing):
+    {} (title = title) (text = text) (value = value)
+
+fun action key what:
+    {} (key = key) (what = what)
+
+fun code-view title sections actions hint done (at-end = false):
+    s = {}:
+        kind = "view"
+        title = title
+        sections = sections
+        actions = actions
+        hint = hint
+        at-end = at-end
+        done = done
+    open-screen s
+
+fun answer-screen value:
+    s = screen
+    set screen nothing
+    when (<> s nothing):
+        fun run-it:
+            (s.done value)
+        step run-it
+
+fun step f:
+    fun run-it:
+        try (f):
+            command-failed failure
+        (flush-output)
+    capture-output run-it
+    nothing
+
+
+fun activate name:
+    when (not (contains docs name)):
+        append docs name
+    set active name
+
+fun fresh-name base:
+    name = base
+    n = 1
+    while (has-module name):
+        set n (+ n 1)
+        set name (concat base (to-string n))
+    name
+
+fun new-doc (name = "scratch"):
+    doc = fresh-name name
+    new-module doc
+    patch-module doc (doc-prelude)
+    append fresh-docs ({} (name = doc) (source = (module-source doc)))
+    activate doc
+    doc
+
+fun fresh-source name:
+    found = prelude
+    for d (items fresh-docs):
+        when (= d.name name):
+            set found d.source
+    found
+
+fun is-dirty name:
+    path = module-path name
+    cond:
+        (= path nothing) = (<> (module-source name) (fresh-source name))
+        (not (file-exists path)) = true
+        true = (<> (read-file path) (module-source name))
+
+fun filter-dirty names:
+    out = ([])
+    for name (items names):
+        when (is-dirty name):
+            append out name
+    out
+
+fun dirty-docs:
+    filter-dirty docs
+
+fun doc-line name:
+    path = module-path name
+    concat (pick-text (= name active) "*" " ") " " name "  ":
+        pick-text (= path nothing) "(no file)" path
+        pick-text (is-dirty name) " modified" ""
+
+fun open-doc target:
+    name = target
+    when (ends-with target ".owl"):
+        file = absolute-path target
+        when (not (file-exists file)):
+            refuse (concat "no file " file " to open")
+        add-module-path (parent-dir file)
+        set name (slice (base-name file) 0 (- (length (base-name file)) 4))
+    need-module name
+    activate name
+    name
+
+fun need-module name:
+    when (not (has-module name)):
+        when (= (module-file name) nothing):
+            refuse (concat "no module " name " here; modules lists them, or open a path to an .owl file")
+        load-module name
+    name
+
+fun switch-doc name:
+    when (not (contains docs name)):
+        refuse (concat "no open document " name "; docs lists the open ones")
+    activate name
+
+fun default-path name:
+    if (= project nothing):
+        concat name ".owl"
+        join-path project.source (concat name ".owl")
+
+fun current-save-path:
+    path = module-path active
+    pick-text (= path nothing) (default-path active) path
+
+fun save-doc (path = nothing):
+    target = pick-text (= path nothing) (current-save-path) path
+    set target (absolute-path target)
+    dir = parent-dir target
+    when (and (<> dir "") (not (dir-exists dir))):
+        make-dir dir
+    first-save = = (module-path active) nothing
+    write-file target (module-source active)
+    set-module-path active target
+    note (concat "wrote " target)
+    when first-save:
+        use-from-main active target
+
+fun save-all names:
+    keep = active
+    for name (items names):
+        set active name
+        (save-doc)
+    set active keep
+
+fun use-from-main name path:
+    in-it = and (<> project nothing) (in-project project path)
+    when (and in-it (<> name project.main)):
+        line = concat "use " name
+        if (has-module project.main):
+            when (not (contains (module-uses project.main) name)):
+                main-path = module-path project.main
+                clean = and (<> main-path nothing) (not (is-dirty project.main))
+                patch-module project.main line
+                when clean:
+                    write-file main-path (module-source project.main)
+                note (concat "main now uses " name)
+            do:
+                main-file = module-file project.main
+                when (<> main-file nothing):
+                    text = read-file main-file
+                    when (= (find text line) nothing):
+                        write-file main-file (record-item text (single-item line))
+                        note (concat "main now uses " name)
+
+fun close-docs names:
+    kept = ([])
+    for name (items docs):
+        when (not (contains names name)):
+            append kept name
+    set docs kept
+    when (not (contains docs active)):
+        if (is-any docs):
+            set active (at docs 0)
+            (new-doc)
+
+fun doc-panel:
+    {}:
+        docs = docs
+        dirty = (dirty-docs)
+        active = active
+        sections = (item-sections (module-source active))
+        actions = item-actions
+        hint = item-hint
+
+
+fun run-code input:
+    value = nothing
+    if record-statements:
+        set value (patch-module active input)
+        for item (items (input-items input)):
+            if (= item.kind "statement"):
+                set value (eval-in (module-scope active) (at (parse item.code) 0))
+                set value (patch-module active item.text)
+    when show-changes:
+        report-changes (input-items input)
+    show value
+
+fun report-changes xs:
+    made = ([])
+    for item (items xs):
+        when (and (<> item.name nothing) (<> item.kind "binding")):
+            append made item.name
+    when (is-any made):
+        note (concat "defined " (join-words made) " in " active)
+
+fun show-summary s:
+    parts = ([])
+    when (is-any s.defined):
+        append parts (concat "defined " (to-string s.defined))
+    when (is-any s.bound):
+        append parts (concat "bound " (to-string s.bound))
+    when (is-any s.kept):
+        append parts (concat "kept old value of " (to-string s.kept) " (rerun to apply)")
+    when (is-any s.removed):
+        append parts (concat "removed " (to-string s.removed))
+    when (> s.ran 0):
+        append parts (concat "ran " (to-string s.ran) " statements")
+    when (is-empty parts):
+        append parts "no changes"
+    for p (items parts):
+        note p
+
+
+commands = ([])
+current-menu = nothing
+
+fun menu-section name:
+    set current-menu name
+
+command interactive head+ &body:
+    where = syntax-scope (at head 0)
+    words = ([])
+    for h (items head):
+        append words (syntax-form h)
+    name = to-string (pop-front words)
+    params = ([])
+    for w (items words):
+        append params (param-spec w)
+    forms = ([])
+    for b (items body):
+        append forms (syntax-form b)
+    help = ""
+    when (and (is-any forms) (= (type-of (at forms 0)) "string")):
+        set help (pop-front forms)
+    runs = "there"
+    when (and (is-any forms) (contains ([] "local" "screens") (to-string (at forms 0)))):
+        set runs (to-string (pop-front forms))
+    make-definition where (at (parse (command-code name params forms)) 0)
+    cmd = {}:
+        name = name
+        params = params
+        help = help
+        runs = runs
+        menu = current-menu
+        scope = where
+        run = (eval-in where (at (parse (concat "command-" name)) 0))
+    add-command cmd
+    nothing
+
+fun param-spec w:
+    word = w
+    reader = nothing
+    when (= (type-of w) "pair"):
+        set word (index w 0)
+        set reader (index w 1)
+    name = to-string word
+    optional = ends-with name "?"
+    when optional:
+        set name (slice name 0 (- (length name) 1))
+    {} (name = name) (optional = optional) (reader = reader)
+
+fun command-code name params forms:
+    code = concat "fun command-" name " words:" newline
+    for i (range (length params)):
+        p = index (at params i) "name"
+        set code (concat code "    " p " = at-or words " (to-string i) newline)
+    for f (items forms):
+        for line (items (split-lines (to-code f 96))):
+            set code (concat code "    " line newline)
+    concat code "    nothing" newline
+
+fun add-command cmd:
+    out = ([])
+    found = false
+    for c (items commands):
+        if (= c.name cmd.name):
+            do:
+                set found true
+                append out cmd
+            append out c
+    when (not found):
+        append out cmd
+    set commands out
+
+fun command-named name:
+    found = nothing
+    for c (items commands):
+        when (= c.name name):
+            set found c
+    found
+
+fun is-command ws:
+    cond:
+        (is-empty ws) = false
+        (= (command-named (at ws 0)) nothing) = false
+        true = (<> (at-or ws 1) "=")
+
+fun at-or ws i:
+    if (> (length ws) i):
+        at ws i
+        nothing
+
+fun usage cmd:
+    concat cmd.name (params-text cmd)
+
+fun params-text cmd:
+    out = ""
+    for p (items cmd.params):
+        if p.optional:
+            set out (concat out " [" p.name "]")
+            set out (concat out " <" p.name ">")
+    out
+
+fun command-menus:
+    out = ([])
+    for c (items commands):
+        when (<> c.menu nothing):
+            item = {} (name = c.name) (params = (params-text c)) (help = c.help)
+            set out (add-to-menu out c.menu item)
+    out
+
+fun add-to-menu menus label item:
+    out = ([])
+    found = false
+    for m (items menus):
+        if (= m.label label):
+            do:
+                set found true
+                append out (with m (items = (concat m.items ([] item))))
+            append out m
+    when (not found):
+        append out ({} (label = label) (items = ([] item)))
+    out
+
+fun command-line cmd args:
+    out = cmd.name
+    for a (items args):
+        set out (concat out " " (to-string a))
+    out
+
+fun run-command ws (from-menu = false):
+    cmd = command-named (at ws 0)
+    typed = slice ws 1
+    here = cond:
+        (= remote nothing) = true
+        (= cmd.runs "local") = true
+        true = (and in-app (= cmd.runs "screens"))
+    fun got args:
+        cond:
+            (= args nothing) = (note "cancelled")
+            here = (run-here cmd typed args)
+            true = (remote-input (command-line cmd args))
+    read-args cmd typed from-menu got
+
+fun run-here cmd typed args:
+    when (> (length args) (length typed)):
+        log-entry "command" (command-line cmd args)
+    (cmd.run args)
+
+fun read-args cmd args from-menu done:
+    if (< (length args) (length cmd.params)):
+        read-param cmd (at cmd.params (length args)) args from-menu done
+        done args
+
+fun read-param cmd p args from-menu done:
+    fun got v:
+        cond:
+            (<> v nothing) = (read-args cmd (concat args (as-list v)) from-menu done)
+            p.optional = (done args)
+            true = (done nothing)
+    readable = and in-app (and (<> p.reader nothing) (or (not p.optional) from-menu))
+    cond:
+        readable = (call-reader cmd p got)
+        p.optional = (done args)
+        true = (refuse (concat cmd.name " needs its " p.name ": " (usage cmd)))
+
+fun call-reader cmd p done:
+    reader = eval-in cmd.scope p.reader
+    reader cmd done
+
+fun as-list v:
+    if (= (type-of v) "list"):
+        v
+        [] v
+
+fun help:
+    lines = []:
+        "Code you type runs in the active document and is written into it."
+        "Commands (not written to the document):"
+    for c (items commands):
+        append lines (concat "  " (pad (usage c) 30) c.help)
+    append lines "Keys: Ctrl+Enter (or Alt+Enter, Ctrl+J) runs, Enter adds a line."
+    append lines "F1 or M-x the command menu, F2 the results, F3 the document panel,"
+    append lines "Alt+O its items. A command missing what it needs asks for it."
+    echo (join-lines lines)
+
+fun open-menu:
+    out = ([])
+    for c (items commands):
+        when (<> c.name "menu"):
+            append out (entry (usage c) c.name c.help)
+    fun picked name:
+        when (<> name nothing):
+            run-command ([] name) true
+    choose (concat "Commands · " (current-doc)) out picked
+
+fun module-or-active (name = nothing):
+    if (= name nothing):
+        active
+        need-module name
+
+fun leave:
+    when (<> remote nothing):
+        (detach)
+    fun settled ok:
+        when ok:
+            set session-over true
+    ready-to-leave settled
+
+fun ready-to-leave done:
+    dirty = (dirty-docs)
+    fun chosen choice:
+        cond:
+            (= choice "Save all") = (do (save-all dirty) (done true))
+            (= choice "Leave") = (done true)
+            true = (done false)
+    lines = []:
+        concat "Not saved: " (join-words dirty)
+        "Save all writes each to its file."
+    if (and in-app (and confirm-exit (is-any dirty))):
+        confirm "Leave the repl?" lines ([] "Save all" "Leave" "Stay") chosen
+        done true
+
+fun settings:
+    now = query "(current-settings)"
+    fun answered r:
+        if (and (<> r nothing) (= r.button "Done")):
+            do:
+                changed = {}:
+                    record-statements = r.record
+                    show-changes = r.changes
+                    confirm-exit = r.confirm
+                query (call-code "change-settings" changed)
+                note "settings changed"
+            note "settings unchanged"
+    fields = []:
+        check-field "record" "Record statements in the document" now.record-statements
+        check-field "changes" "Show what each input defined" now.show-changes
+        check-field "confirm" "Ask before leaving with unsaved documents" now.confirm-exit
+    form "Settings" fields ([] "Done" "Cancel") answered
+
+fun current-settings:
+    {}:
+        record-statements = record-statements
+        show-changes = show-changes
+        confirm-exit = confirm-exit
+
+fun change-settings x:
+    set record-statements x.record-statements
+    set show-changes x.show-changes
+    set confirm-exit x.confirm-exit
+
+fun try-command input:
+    try (run-command (words (trim input))):
+        command-failed failure
+
+fun try-code input:
+    set last-input input
+    if (= remote nothing):
+        try (run-code input):
+            show-error (error-report)
+        remote-input input
+
+fun handle-input input:
+    cond:
+        (is-blank input) = nothing
+        (is-command (words (trim input))) = (try-command input)
+        true = (try-code input)
+
+
+fun query code:
+    if (= remote nothing):
+        eval-in (module-scope "repl") (at (parse code) 0)
+        remote-query code
+
+fun call-code f (a = nothing) (b = nothing):
+    out = concat "(" f
+    for v (items ([] a b)):
+        when (<> v nothing):
+            set out (concat out " (" (to-code v 1000000) ")")
+    concat out ")"
+
+fun current-doc:
+    if (= remote nothing):
+        active
+        remote.prompt
+
+
+fun item-key item:
+    pick-text (= item.name nothing) (concat "#" (to-string item.ordinal)) item.name
+
+item-actions = []:
+    action "enter" "edit"
+    action "e" "edit"
+    action "c" "copy"
+    action "d" "drop"
+    action "r" "rerun"
+
+item-hint = "↑↓ C-n C-p item · C-v M-v page · enter/e edit · c copy · d drop · r rerun · esc"
+
+fun item-sections text:
+    out = ([])
+    for item (items (source-items text)):
+        append out (section (concat "#" (to-string item.ordinal)) item.text item)
+    out
+
+fun view-items name:
+    sections = item-sections (query (call-code "module-source" name))
+    fun picked p:
+        when (<> p nothing):
+            item-action name p.action p.value
+    title = concat name " · " (to-string (length sections)) " items"
+    code-view title sections item-actions item-hint picked
+
+fun item-action name what item:
+    cond:
+        (= what "edit") = (edit-in name item.text)
+        (= what "copy") = (copied item.text)
+        (= what "drop") = (query (call-code "drop-and-note" name (item-key item)))
+        (= what "rerun") = (query (call-code "rerun-and-show" name (item-key item)))
+        true = nothing
+
+fun show-item key name:
+    echo (index (select-item (need-item name key) key) "text")
+
+fun drop-and-note name key:
+    need-item name key
+    note (concat "dropped " (index (drop-item name key) "header"))
+
+fun rerun-and-show name key:
+    need-item name key
+    show (rerun-item name key)
+
+fun need-item name key:
+    xs = source-items (module-source name)
+    when (not (has-item xs key)):
+        refuse (concat "no item " key " in " name "; items lists them")
+    xs
+
+fun edit-in name text:
+    when (<> name (current-doc)):
+        query (call-code "open-doc" name)
+    set pending text
+    note (concat "editing in " name ": change it and run it to replace it")
+
+fun copied text:
+    when (and (<> front nothing) (<> front.copy nothing)):
+        (front.copy text)
+    n = length (split-lines text)
+    lines = pick-text (= n 1) "line" "lines"
+    note (concat "copied " (to-string n) " " lines " to the clipboard")
+
+result-actions = [] (action "enter" "edit") (action "e" "edit") (action "c" "copy")
+
+fun result-code r:
+    name = trim r.input
+    bound = and (= (length (words name)) 1) (has-own (module-scope active) name)
+    if (and (<> name "") bound):
+        to-code (pair (at (parse name) 0) r.value) 100
+        to-code r.value 100
+
+fun first-line text:
+    at-nl = find text newline
+    if (= at-nl nothing):
+        text
+        concat (slice text 0 at-nl) " …"
+
+fun result-views width:
+    out = ([])
+    for i (range (length results)):
+        r = at results i
+        view = {}:
+            title = (concat "#" (to-string (+ i 1)))
+            text = (concat "; " (first-line r.input) newline (to-code r.value width))
+            edit = (result-code r)
+            copy = (to-code r.value 80)
+        append out view
+    out
+
+fun results-command:
+    views = query (call-code "result-views" (max (- columns 8) 40))
+    when (is-empty views):
+        refuse "no results yet: values your code gives back are kept here"
+    sections = ([])
+    for v (items views):
+        append sections (section v.title v.text v)
+    fun picked p:
+        when (<> p nothing):
+            if (= p.action "copy"):
+                copied p.value.copy
+                do:
+                    set pending p.value.edit
+                    note "editing the result: change it and run it"
+    code-view (concat "results · " (to-string (length views))):
+        sections
+        result-actions
+        "↑↓ result · PgUp PgDn scroll · enter/e edit · c copy · esc close"
+        picked
+        true
+
+
+fun module-entries:
+    out = ([])
+    seen = ([])
+    for m (items docs):
+        append out (entry m m "open document")
+        append seen m
+    when (<> project nothing):
+        for m (items (project-modules project)):
+            when (not (contains seen m)):
+                append out (entry m m (concat "project " project.name))
+                append seen m
+    for m (items (module-names)):
+        when (not (contains seen m)):
+            where = module-path m
+            append out (entry m m (pick-text (= where nothing) "loaded, in memory" where))
+    out
+
+fun doc-entries:
+    out = ([])
+    for name (items docs):
+        append out (entry name name (doc-line name))
+    out
+
+fun trim-colon s:
+    if (ends-with s ":"):
+        slice s 0 (- (length s) 1)
+        s
+
+fun item-entries:
+    out = ([])
+    for item (items (source-items (module-source active))):
+        hint = concat "#" (to-string item.ordinal):
+            concat "  line " (to-string item.line) "  " item.kind
+        append out (entry (trim-colon item.header) (item-key item) hint)
+    out
+
+
+fun read-module cmd done:
+    choose (concat cmd.name ": which module?") (query "(module-entries)") done
+
+fun read-doc cmd done:
+    choose (concat cmd.name ": which document?") (query "(doc-entries)") done
+
+fun read-item cmd done:
+    choose (concat cmd.name ": which item of " (current-doc) "?") (query "(item-entries)") done
+
+fun read-new-name cmd done:
+    ask "New document" "name" (query (call-code "fresh-name" "scratch")) done
+
+fun read-save-path cmd done:
+    ask "Save the document" "file" (query "(current-save-path)") done
+
+fun read-directory cmd done:
+    ask cmd.name "directory" "" done
+
+fun read-new-project cmd done:
+    fun answered r:
+        cond:
+            (= r nothing) = (done nothing)
+            (= r.button "Cancel") = (done nothing)
+            (= r.directory "") = (done nothing)
+            r.gui = (done ([] r.directory "gui"))
+            true = (done ([] r.directory))
+    fields = []:
+        text-field "directory" "Directory" "" "where the project goes, e.g. ../tasks"
+        check-field "gui" "A GUI app (a window on ellipse_ui)" false
+    form "New project" fields ([] "OK" "Cancel") answered
+
+fun read-project cmd done:
+    out = (known-entries)
+    seen = ([])
+    for e (items out):
+        append seen e.value
+    near = projects-under (current-dir)
+    when (<> project nothing):
+        set near (concat near (projects-under (parent-dir project.root)))
+    for r (items near):
+        root = absolute-path r
+        when (not (contains seen root)):
+            append seen root
+            append out (entry (base-name root) root (short-path root))
+    append out (entry "another directory…" "<other>" "type a path")
+    fun picked choice:
+        if (= choice "<other>"):
+            read-directory cmd done
+            done choice
+    choose "Open which project?" out picked
+
+fun read-known-project cmd done:
+    known = (known-entries)
+    when (is-empty known):
+        refuse "owl knows no projects yet; open-project or new-project adds one"
+    choose (concat cmd.name ": which project?") known done
+
+fun read-app cmd done:
+    pids = (live-pids)
+    cond:
+        (is-empty pids) = (refuse "no running owl programs; run starts the project's app")
+        (= (length pids) 1) = (done (at pids 0))
+        true = (choose "Attach to which program?" (app-entries pids) done)
+
+
+fun known-entries:
+    out = ([])
+    for p (items (known-projects)):
+        hint = cond:
+            (not p.present) = "moved or gone: move-project, forget-project"
+            (and (<> project nothing) (= p.root project.root)) = "current project"
+            true = (short-path p.root)
+        append out (entry p.name p.root hint)
+    out
+
+fun is-known root:
+    found = false
+    for p (items (known-projects)):
+        when (= p.root root):
+            set found true
+    found
+
+fun known-root x:
+    found = absolute-path x
+    for p (items (known-projects)):
+        when (= p.name x):
+            set found p.root
+    found
+
+fun show-project:
+    if (= project nothing):
+        note no-project
+        do:
+            echo (concat "project " project.name " at " project.root)
+            echo (concat "  modules in " project.source ", main module " project.main)
+            echo "  modules:" (project-modules project)
+            echo (concat "  current directory " (current-dir))
+
+fun list-projects:
+    known = (known-projects)
+    when (is-empty known):
+        note "owl knows no projects yet; open-project or new-project adds one"
+    for p (items known):
+        current = and (<> project nothing) (= p.root project.root)
+        gone = pick-text p.present "" "  (moved or gone)"
+        echo (concat (pick-text current "* " "  ") (pad p.name 16) p.root gone)
+
+fun short-path path:
+    here = (current-dir)
+    cond:
+        (starts-with path (concat here "/")) = (concat "." (slice path (length here)))
+        (= (parent-dir path) (parent-dir here)) = (concat "../" (base-name path))
+        true = path
+
+fun docs-in project:
+    out = ([])
+    when (<> project nothing):
+        for name (items docs):
+            when (in-project project (module-path name)):
+                append out name
+    out
+
+fun settle-dirty dirty name done:
+    fun chosen choice:
+        cond:
+            (= choice "Save all") = (do (save-all dirty) (done))
+            (= choice "Discard") = (done)
+            true = (note "stayed")
+    unsaved = concat "Not saved: " (join-words dirty)
+    buttons = [] "Save all" "Discard" "Stay"
+    cond:
+        (is-empty dirty) = (done)
+        (not in-app) = (refuse (concat unsaved "; save or drop them first"))
+        true = (confirm (concat "Switch to " name "?") ([] unsaved) buttons chosen)
+
+fun switch-project dir:
+    next = project-at dir
+    if (and (<> project nothing) (= project.root next.root)):
+        note (concat "already in project " next.name)
+        do:
+            leaving = docs-in project
+            fun settled:
+                when (<> project nothing):
+                    close-project project
+                    close-docs leaving
+                change-dir next.root
+                set project (remember-project (use-project next))
+                modules = to-string (project-modules next)
+                note (concat "project " next.name " (" next.root "), modules: " modules)
+            settle-dirty (filter-dirty leaving) next.name settled
+
+fun new-project-command dir kind:
+    root = absolute-path dir
+    new-project root (pick-text (= kind nothing) "cli" kind)
+    note (concat "created " root "/project.owl and its src/ modules")
+    when (and (<> project nothing) (starts-with root (concat project.root "/"))):
+        note:
+            concat "note: it is inside project " project.name:
+                "; use ../" (base-name root) " for a sibling"
+    switch-project root
+
+
+fun app-name conn:
+    r = exchange conn "hello" ""
+    if (= r.answer nothing):
+        "?"
+        at (split-lines r.answer) 0
+
+fun list-apps:
+    pids = (live-pids)
+    when (is-empty pids):
+        note "no running owl programs; run starts the project's app"
+    for pid (items pids):
+        conn = connect pid
+        when (<> conn nothing):
+            r = exchange conn "hello" ""
+            sock-close conn.fd
+            when (<> r.answer nothing):
+                lines = split-lines r.answer
+                echo (concat (pad (to-string pid) 8) (pad (at lines 0) 16) (at lines 1))
+
+fun app-entries pids:
+    out = ([])
+    for pid (items pids):
+        conn = connect pid
+        name = "?"
+        when (<> conn nothing):
+            set name (app-name conn)
+            sock-close conn.fd
+        append out (entry (concat name " " (to-string pid)) pid "running owl program")
+    out
+
+fun attach-to pid:
+    when (<> remote nothing):
+        (detach)
+    conn = connect pid
+    when (= conn nothing):
+        refuse (concat "program " (to-string pid) " does not answer; apps lists the running ones")
+    name = app-name conn
+    set remote ({} (conn = conn) (name = name) (prompt = "?"))
+    remote-input ""
+    note:
+        concat "attached to " name " (pid " (to-string pid) "): ":
+            "input runs there now; detach comes back"
+
+fun detach:
+    when (= remote nothing):
+        refuse "not attached to a program; attach <pid> first"
+    sock-close remote.conn.fd
+    note (concat "detached from " remote.name "; it keeps running")
+    set remote nothing
+    (refresh-docs)
+
+fun refresh-docs:
+    for name (items docs):
+        path = module-path name
+        when (and (<> path nothing) (file-exists path)):
+            when (<> (read-file path) (module-source name)):
+                try (reload-module name):
+                    show-error (error-report)
+                note (concat "reloaded " name " from " path)
+
+fun gone:
+    note (concat remote.name " has exited")
+    set remote nothing
+
+fun remote-input input:
+    r = exchange remote.conn "input" input
+    if (= r.answer nothing):
+        (gone)
+        do:
+            nl = find r.answer newline
+            set remote (with remote (conn = r.conn) (prompt = (slice r.answer 0 nl)))
+            write (slice r.answer (+ nl 1))
+
+fun remote-query code:
+    r = exchange remote.conn "query" code
+    when (= r.answer nothing):
+        (gone)
+        refuse "the program went away"
+    set remote (with remote (conn = r.conn))
+    text = r.answer
+    nl1 = find text newline
+    when (= (slice text 0 nl1) "error"):
+        refuse (slice text (+ nl1 1))
+    nl2 = find text newline (+ nl1 1)
+    nl3 = find text newline (+ nl2 1)
+    set remote (with remote (prompt = (slice text (+ nl1 1) nl2)))
+    n = at (parse (slice text (+ nl2 1) nl3)) 0
+    output = slice text (+ nl3 1 n)
+    when (<> output ""):
+        write output
+    eval (at (parse (slice text (+ nl3 1) (+ nl3 1 n))) 0)
+
+fun stop-remote:
+    when (= remote nothing):
+        refuse "not attached to a program; attach <pid> first"
+    exchange remote.conn "stop" ""
+    name = remote.name
+    sock-close remote.conn.fd
+    set remote nothing
+    note (concat "stopped " name)
+
+fun run-project:
+    when (= project nothing):
+        refuse "run needs a project: open-project, or new-project <dir> gui"
+    save-all (filter-dirty (docs-in project))
+    dir = (socket-dir)
+    when (not (dir-exists dir)):
+        make-dir dir
+    log = concat dir "/" project.name ".log"
+    write-file log ""
+    pid = spawn-process ([] (exe-path) "run") project.root log
+    note (concat "started " project.name " (pid " (to-string pid) "), output in " log)
+    when (and (<> front nothing) (not front.windows)):
+        note:
+            concat "this owl has no windows (make build_owl_sdl adds them), so the app":
+                " runs unseen; to watch it, start it with owl run in another terminal"
+                " and attach to that one"
+    tries = 0
+    conn = connect pid
+    while (= conn nothing):
+        when (not (process-alive pid)):
+            refuse (concat project.name " exited: " (last-lines (read-file log) 12))
+        when (> tries 100):
+            refuse (concat project.name " did not start listening; see " log)
+        sleep-ms 100
+        set tries (+ tries 1)
+        set conn (connect pid)
+    sock-close conn.fd
+    attach-to pid
+
+fun last-lines text n:
+    lines = split-lines text
+    join-lines (slice lines (max 0 (- (length lines) n)))
+
+
+menu-section nothing
+
+interactive menu:
+    "open this menu (also F1 or M-x)"
+    local
+    (open-menu)
+
+menu-section "File"
+
+interactive docs:
+    "list open documents (* is active)"
+    for name (items docs):
+        echo (doc-line name)
+
+interactive new (name? = read-new-name):
+    "start a new document"
+    new-doc (pick-text (= name nothing) "scratch" name)
+
+interactive open (module = read-module):
+    "open a module, or an .owl file, as a document"
+    open-doc module
+
+interactive switch (doc = read-doc):
+    "make an open document active (or Ctrl+PgUp/PgDn)"
+    switch-doc doc
+
+interactive save (file? = read-save-path):
+    "write the active document"
+    save-doc file
+
+interactive text:
+    "print the active document"
+    write (module-source active)
+
+menu-section "Items"
+
+interactive items (module? = read-module):
+    "view a module's items: select, edit, copy (Alt+O: the panel's)"
+    screens
+    view-items (query (call-code "module-or-active" module))
+
+interactive results:
+    "view printed results: select, edit, copy (also F2)"
+    screens
+    (results-command)
+
+interactive show (item = read-item) module?:
+    "print one item"
+    show-item item (module-or-active module)
+
+interactive drop (item = read-item):
+    "remove an item from the active document"
+    drop-and-note active item
+
+interactive rerun (item = read-item):
+    "evaluate an item of the active document again"
+    rerun-and-show active item
+
+interactive reload (module? = read-module):
+    "re-read a module's file, keeping state"
+    name = module-or-active module
+    when (= (module-path name) nothing):
+        refuse (concat name " has no file to reload from; save writes one")
+    show-summary (reload-module name)
+
+interactive modules:
+    "list loaded modules and the project's modules"
+    echo "loaded:" (module-names)
+    when (<> project nothing):
+        echo (concat "project " project.name ":") (project-modules project)
+
+menu-section "Project"
+
+interactive project:
+    "show the current project"
+    (show-project)
+
+interactive projects:
+    "list the projects owl knows (* is current)"
+    local
+    (list-projects)
+
+interactive open-project (dir = read-project):
+    "switch to a project: a known one, or the one in dir"
+    root = known-root dir
+    when (not (file-exists (join-path root "project.owl"))):
+        if (is-known root):
+            refuse (concat "no project at " root " any more: move-project or forget-project it")
+            refuse (concat "no project in " root " (no project.owl); new-project <dir> makes one")
+    switch-project root
+
+interactive new-project (dir = read-new-project) kind?:
+    "create a project in dir (kind gui: a windowed app) and switch to it"
+    new-project-command dir kind
+
+interactive move-project (name = read-known-project) (dir = read-directory):
+    "tell owl a known project now lives in dir"
+    local
+    when (not (file-exists (join-path (absolute-path dir) "project.owl"))):
+        refuse (concat "no project.owl in " (absolute-path dir) "; give the directory the project moved to")
+    moved = move-project (known-root name) dir
+    note (concat "project " moved.name " is now at " moved.root)
+
+interactive forget-project (name = read-known-project):
+    "stop listing a known project (its files stay)"
+    local
+    root = known-root name
+    forget-project root
+    note (concat "owl forgot the project at " root)
+
+interactive run:
+    "start the project's app and attach to it"
+    local
+    (run-project)
+
+menu-section "Program"
+
+interactive apps:
+    "list running owl programs a repl can attach to"
+    local
+    (list-apps)
+
+interactive attach (pid = read-app):
+    "send input to a running program instead (see apps)"
+    local
+    if (= (type-of pid) "string"):
+        attach-to (at (parse pid) 0)
+        attach-to pid
+
+interactive detach:
+    "leave the attached program running and work here again"
+    local
+    (detach)
+
+interactive stop:
+    "close the attached program"
+    local
+    (stop-remote)
+
+menu-section "Repl"
+
+interactive settings:
+    "change repl settings"
+    screens
+    (settings)
+
+interactive clear:
+    "clear the transcript"
+    local
+    set transcript ([])
+
+interactive details:
+    "show where the last command failed, with the calls that led there"
+    if (= last-failure nothing):
+        note "no command has failed"
+        show-error last-failure
+
+interactive help:
+    "show the commands"
+    (help)
+
+interactive exit:
+    "leave (also quit, or C-d)"
+    local
+    (leave)
+
+menu-section nothing
+
+interactive quit:
+    "leave"
+    local
+    (leave)
+
+
+fun serve-start:
+    when (not served):
+        set served true
+        set project (open-project (current-dir))
+        if (and (<> project nothing) (has-module project.main)):
+            activate project.main
+            (new-doc)
+
+fun serve-input input:
+    (serve-start)
+    fun run-it:
+        handle-input input
+    output = capture-output run-it
+    going = not session-over
+    set session-over false
+    {} (prompt = active) (output = output) (going = going)
+
+fun serve-query code:
+    (serve-start)
+    value = nothing
+    failed = nothing
+    fun run-it:
+        try (set value (eval-in (module-scope "repl") (at (parse code) 0))):
+            set failed failure
+    output = capture-output run-it
+    if (<> failed nothing):
+        concat "error" newline failed
+        do:
+            data = pick-text (is-data value) (to-code value 1000000) "nothing"
+            join-lines:
+                [] "ok" active (to-string (length data)) (concat data output)
+
+fun serve-hello:
+    (serve-start)
+    if (= project nothing):
+        concat "owl" newline (current-dir)
+        concat project.name newline project.root
+
+
+fun repl-start the-front:
+    set in-app true
+    set front the-front
+    set project (open-project (current-dir))
+    if (= project nothing):
+        note no-project
+        do:
+            remember-project project
+            note (concat "project " project.name " (" project.root ")")
+    (new-doc)
+
+fun repl-submit input:
+    when (not (is-blank input)):
+        add-entry "input" input (prompt-label)
+    fun run-it:
+        handle-input input
+    step run-it
+
+fun repl-key key:
+    fun run-it:
+        cond:
+            (= key "menu") = (open-menu)
+            (= key "results") = (results-command)
+            true = nothing
+    step run-it
+
+fun repl-switch name:
+    fun run-it:
+        log-entry "command" (concat "switch " name)
+        run-command ([] "switch" name)
+    step run-it
+
+fun repl-item-action name what item:
+    fun run-it:
+        item-action name what item
+    step run-it
+
+fun repl-run name:
+    fun run-it:
+        run-command ([] name) true
+    step run-it
+
+fun repl-leave:
+    step leave
+
+fun prompt-label:
+    if (= remote nothing):
+        active
+        concat remote.name " " (to-string remote.conn.pid) " · " remote.prompt
+
+fun repl-output text:
+    if (ends-with text newline):
+        add-entry "out" (slice text 0 (- (length text) 1))
+        add-entry "out" text
+
+fun repl-error message:
+    add-entry "error" message
+
+fun repl-take-pending:
+    p = pending
+    set pending nothing
+    p
+
+fun repl-status:
+    panel = nothing
+    try (set panel (query "(doc-panel)")):
+        set panel nothing
+    name = nothing
+    when (<> project nothing):
+        set name project.name
+    {}:
+        project = name
+        doc = (prompt-label)
+        attached = (<> remote nothing)
+        dirty = (length (dirty-docs))
+        panel = panel
+
+fun repl-transcript:
+    transcript
+
+fun repl-screen:
+    screen
+
+fun repl-over:
+    session-over
+
+fun repl-set-columns n:
+    set columns n
+
+export:
+    serve-input = serve-input
+    serve-query = serve-query
+    serve-hello = serve-hello
+    repl-start = repl-start
+    repl-submit = repl-submit
+    repl-key = repl-key
+    repl-switch = repl-switch
+    repl-item-action = repl-item-action
+    repl-run = repl-run
+    repl-menus = command-menus
+    repl-leave = repl-leave
+    repl-answer = answer-screen
+    repl-take-pending = repl-take-pending
+    repl-output = repl-output
+    repl-error = repl-error
+    repl-status = repl-status
+    repl-transcript = repl-transcript
+    repl-screen = repl-screen
+    repl-over = repl-over
+    repl-set-columns = repl-set-columns

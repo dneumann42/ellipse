@@ -1,0 +1,353 @@
+use base
+use math
+use strings
+use fs
+use modules
+use source
+
+
+fun at xs i:
+    index xs (+ i 0)
+
+hooks = ([])
+
+fun on-module name event f:
+    append hooks ({} (module = name) (event = event) (fn = f))
+    nothing
+
+fun run-hooks name event summary:
+    scope = module-scope name
+    when (and (= event "reload") (has-own scope "on-reload")):
+        (eval-in scope (quote on-reload)) summary
+    i = 0
+    while (< i (length hooks)):
+        h = at hooks i
+        when (and (= h.module name) (= h.event event)):
+            h.fn summary
+        set i (+ i 1)
+
+fun is-definition item:
+    or (= item.kind "fun") (or (= item.kind "command") (or (= item.kind "dynamic-command") (= item.kind "widget")))
+
+fun form-of item:
+    at (parse item.code) 0
+
+fun named-item items name:
+    found = nothing
+    i = 0
+    while (< i (length items)):
+        when (= (index items (+ i 0) "name") name):
+            set found (at items i)
+        set i (+ i 1)
+    found
+
+fun use-names item:
+    form = form-of item
+    names = ([])
+    i = 1
+    while (< i (length form)):
+        append names (to-string (at form i))
+        set i (+ i 1)
+    names
+
+fun apply-use name item:
+    deps = use-names item
+    while (is-any deps):
+        module-use name (pop-front deps)
+
+fun apply-export name item:
+    scope = module-scope name
+    form = form-of item
+    if (and (= (length form) 2) (= (to-string (at form 1)) "all")):
+        module-export-all name
+        apply-export-entries name scope form
+
+fun apply-export-entries name scope form:
+    i = 1
+    while (< i (length form)):
+        entry = at form i
+        when (<> (type-of entry) "pair"):
+            error (concat "module " name ": export needs (name = value) forms")
+        public = to-string (at entry 0)
+        value = at entry 1
+        if (= (type-of value) "symbol"):
+            module-export name public (to-string value)
+            do:
+                eval-in scope entry
+                module-export name public public
+        set i (+ i 1)
+
+fun apply-item name item:
+    cond:
+        (= item.kind "use") = (apply-use name item)
+        (= item.kind "export") = (apply-export name item)
+        (= item.kind "widget") = (eval-in (module-scope name) (form-of item))
+        (is-definition item) = (make-definition (module-scope name) (form-of item))
+        true = (eval-in (module-scope name) (form-of item))
+
+fun summary-record defined bound kept removed ran:
+    {} (defined = defined) (bound = bound) (kept = kept) (removed = removed) (ran = ran)
+
+fun apply-source name text:
+    scope = module-scope name
+    old = source-items (module-source name)
+    new = source-items text
+    defined = ([])
+    bound = ([])
+    kept = ([])
+    removed = ([])
+    ran = 0
+    i = 0
+    while (< i (length old)):
+        o = at old i
+        when (and (<> o.name nothing) (= (named-item new o.name) nothing)):
+            do:
+                unbind scope o.name
+                append removed o.name
+        set i (+ i 1)
+    module-clear-uses name
+    module-clear-exports name
+    set i 0
+    while (< i (length new)):
+        n = at new i
+        when (is-definition n):
+            do:
+                apply-item name n
+                before = named-item old n.name
+                when (or (= before nothing) (<> before.code n.code)):
+                    append defined n.name
+        when (= n.kind "use"):
+            apply-item name n
+        set i (+ i 1)
+    old-statements = ([])
+    set i 0
+    while (< i (length old)):
+        when (= (index old (+ i 0) "kind") "statement"):
+            append old-statements (index old (+ i 0) "code")
+        set i (+ i 1)
+    set i 0
+    while (< i (length new)):
+        n = at new i
+        when (= n.kind "binding"):
+            if (has-own scope n.name):
+                do:
+                    before = named-item old n.name
+                    when (and (<> before nothing) (<> before.code n.code)):
+                        append kept n.name
+                do:
+                    apply-item name n
+                    append bound n.name
+        when (= n.kind "export"):
+            apply-item name n
+        when (= n.kind "statement"):
+            at-old = position old-statements n.code
+            if (= at-old nothing):
+                do:
+                    apply-item name n
+                    set ran (+ ran 1)
+                set old-statements (remove-at old-statements at-old)
+        set i (+ i 1)
+    set-module-source name text
+    summary = summary-record defined bound kept removed ran
+    run-hooks name "reload" summary
+    summary
+
+fun position xs x:
+    found = nothing
+    i = 0
+    while (< i (length xs)):
+        when (and (= found nothing) (= (at xs i) x)):
+            set found i
+        set i (+ i 1)
+    found
+
+fun remove-at xs i:
+    concat (slice xs 0 i) (slice xs (+ i 1))
+
+fun reload-module name:
+    path = module-path name
+    when (= path nothing):
+        error (concat "module " name " has no file to reload from")
+    apply-source name (read-file path)
+
+fun record-item text item:
+    items = source-items text
+    cond:
+        (and (<> item.name nothing) (has-item items item.name)) = (replace-named text items item)
+        (= item.kind "use") = (record-use text items item)
+        true = (add-item text item.text)
+
+fun replace-named text items item:
+    old = select-item items item.name
+    if (= old.kind item.kind):
+        update-item text item.name item.text
+        add-item (remove-item text item.name) item.text
+
+fun record-use text items item:
+    last = nothing
+    i = 0
+    while (< i (length items)):
+        x = at items i
+        when (= x.kind "use"):
+            do:
+                when (= x.code item.code):
+                    set last "same"
+                when (<> last "same"):
+                    set last x
+        set i (+ i 1)
+    cond:
+        (= last "same") = text
+        (= last nothing) = (prepend-item text items item)
+        true = (insert-lines text last.end (split-lines item.text))
+
+fun prepend-item text items item:
+    if (is-empty items):
+        add-item text item.text
+        insert-lines text (index items 0 "start") (concat (split-lines item.text) ([] ""))
+
+fun insert-lines text at-line new-lines:
+    lines = split-lines text
+    join-lines (concat (slice lines 0 at-line) new-lines (slice lines at-line))
+
+fun patch-module name code:
+    items = input-items code
+    value = nothing
+    defined = ([])
+    bound = ([])
+    ran = 0
+    while (is-any items):
+        item = pop-front items
+        if (= item.kind "statement"):
+            do:
+                outcome = run-statement name item
+                set value outcome.value
+                set bound (concat bound outcome.bound)
+                set ran (+ ran 1)
+            do:
+                text = record-item (module-source name) item
+                set value (apply-item name item)
+                set-module-source name text
+                cond:
+                    (is-definition item) = (append defined item.name)
+                    (= item.kind "binding") = (append bound item.name)
+                    true = nothing
+    run-hooks name "reload" (summary-record defined bound ([]) ([]) ran)
+    value
+
+
+fun is-data v:
+    t = type-of v
+    cond:
+        (or (= t "number") (or (= t "string") (or (= t "boolean") (= t "nothing")))) = true
+        (= t "list") = (all-data v)
+        (= t "record") = (all-fields-data v)
+        true = false
+
+fun all-data xs:
+    ok = true
+    i = 0
+    while (and ok (< i (length xs))):
+        set ok (is-data (at xs i))
+        set i (+ i 1)
+    ok
+
+fun all-fields-data r:
+    ok = true
+    i = 0
+    while (and ok (< i (length r))):
+        set ok (is-data (index (index r (+ i 0)) 1))
+        set i (+ i 1)
+    ok
+
+fun name-symbol name:
+    at (parse name) 0
+
+fun snapshot scope:
+    names = scope-names scope
+    out = ([])
+    while (is-any names):
+        n = pop-front names
+        append out ({} (name = n) (value = (eval-in scope (name-symbol n))))
+    out
+
+fun changed-bindings before after:
+    out = ([])
+    i = 0
+    while (< i (length after)):
+        b = at after i
+        old = named-binding before b.name
+        when (or (= old nothing) (<> old.value b.value)):
+            append out b
+        set i (+ i 1)
+    out
+
+fun named-binding xs name:
+    found = nothing
+    i = 0
+    while (< i (length xs)):
+        when (= (index xs (+ i 0) "name") name):
+            set found (at xs i)
+        set i (+ i 1)
+    found
+
+fun has-statement text code:
+    found = false
+    xs = source-items text
+    while (is-any xs):
+        x = pop-front xs
+        when (and (= x.kind "statement") (= x.code code)):
+            set found true
+    found
+
+fun run-statement name item:
+    scope = module-scope name
+    before = snapshot scope
+    value = apply-item name item
+    changed = changed-bindings before (snapshot scope)
+    bound = ([])
+    replay = false
+    text = module-source name
+    while (is-any changed):
+        b = pop-front changed
+        if (is-data b.value):
+            do:
+                code = to-code (pair (name-symbol b.name) b.value)
+                set text (record-item text (single-item code))
+                append bound b.name
+            set replay true
+    when (and replay (not (has-statement text item.code))):
+        set text (record-item text item)
+    set-module-source name text
+    {} (value = value) (bound = bound) (kept = replay)
+
+fun rerun-item name key:
+    item = select-item (source-items (module-source name)) key
+    apply-item name item
+
+fun drop-item name key:
+    text = module-source name
+    item = select-item (source-items text) key
+    new-text = remove-item text key
+    when (<> item.name nothing):
+        unbind (module-scope name) item.name
+    when (= item.kind "use"):
+        do:
+            module-clear-uses name
+            uses = source-items new-text
+            while (is-any uses):
+                u = pop-front uses
+                when (= u.kind "use"):
+                    apply-use name u
+    set-module-source name new-text
+    item
+
+export:
+    on-module = on-module
+    apply-source = apply-source
+    reload-module = reload-module
+    patch-module = patch-module
+    rerun-item = rerun-item
+    drop-item = drop-item
+    record-item = record-item
+    run-statement = run-statement
+    is-data = is-data

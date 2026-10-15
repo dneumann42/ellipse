@@ -1,0 +1,40 @@
+use base
+use math
+
+command for name iter body+:
+    it = eval iter
+    v = (it)
+    while (not (= v nothing)):
+        do:
+            bind name v
+            forms = body
+            while (not (= (length forms) 0)):
+                eval (pop-front forms)
+            set v (it)
+
+fun range from (to = nothing):
+    i = if (= to nothing):
+        0
+        from
+    stop = if (= to nothing):
+        from
+        to
+    lambda:
+        if (< i stop):
+            do:
+                out = i
+                set i (+ i 1)
+                out
+            nothing
+
+fun items xs:
+    cell = xs
+    lambda:
+        if (= (length cell) 0):
+            nothing
+            pop-front cell
+
+export:
+    for = for
+    range = range
+    items = items

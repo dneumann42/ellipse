@@ -1,0 +1,59 @@
+use base
+use math
+
+
+fun starts-with s prefix:
+    if (< (length s) (length prefix)):
+        false
+        do:
+            i = 0
+            ok = true
+            while (< i (length prefix)):
+                if (<> (index s (+ i 0)) (index prefix (+ i 0))):
+                    do:
+                        set ok false
+                        set i (length prefix)
+                    set i (+ i 1)
+            ok
+
+fun find-char s c:
+    n = length s
+    i = 0
+    at = nothing
+    while (< i n):
+        if (= (index s (+ i 0)) c):
+            do:
+                set at i
+                set i n
+            set i (+ i 1)
+    at
+
+fun take s count:
+    out = ""
+    i = 0
+    while (< i count):
+        do:
+            set out (concat out (index s (+ i 0)))
+            set i (+ i 1)
+    out
+
+fun drop s count:
+    out = ""
+    i = count
+    while (< i (length s)):
+        do:
+            set out (concat out (index s (+ i 0)))
+            set i (+ i 1)
+    out
+
+fun ends-with s suffix:
+    if (< (length s) (length suffix)):
+        false
+        = (drop s (- (length s) (length suffix))) suffix
+
+export:
+    starts-with = starts-with
+    ends-with = ends-with
+    find-char = find-char
+    take = take
+    drop = drop
