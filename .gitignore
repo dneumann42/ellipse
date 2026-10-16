@@ -4,3 +4,4 @@ nimcache*/
 nimble.develop
 nimble.paths
 nimbledeps
+*.spv

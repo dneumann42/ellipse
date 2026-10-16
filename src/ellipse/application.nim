@@ -21,8 +21,8 @@ template update*(
     generatePluginFunctionCalls(update)
     generatePluginFunctionCalls(lateUpdate)
 
-template draw*(app: App) =
-  app.renderClear(color(0.0, 0.0, 0.0))
+template draw*(app {.inject.}: var App) =
+  generatePluginFunctionCalls(draw)
 
 template start*(cfg: AppConfig) =
   generatePluginContext()
@@ -31,7 +31,7 @@ template start*(cfg: AppConfig) =
   sdl.initialize()
 
   var 
-    app = cfg.createApplication()
+    app {.inject.} = cfg.createApplication()
     engine = initEngine()
     sceneStack {.inject.} = initSceneStack()
     running {.inject.} = true
@@ -47,5 +47,4 @@ template start*(cfg: AppConfig) =
     update(frame.dt, sceneStack, paused)
     sceneStack.handleUnloads()
     app.draw()
-    app.render()
     engine.endFrame(running)

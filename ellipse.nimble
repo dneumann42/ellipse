@@ -11,5 +11,5 @@ srcDir        = "src"
 
 requires "nim >= 2.3.1"
 requires "chroma >= 1.0.0"
-requires "https://github.com/nim-lang/sdl3#e5f87eb992f828419aad83075ea1c41147fbb088"
+requires "https://github.com/nim-lang/sdl3#bb137829ff619b0a27a473628cb28fc1c86f3fe5"
 requires "https://github.com/dneumann42/plugnim#fb9605750fff720873c501ff4710ab4322f0f6a4"

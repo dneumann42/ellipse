@@ -1,0 +1,82 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+// Returns the determinant of a 2x2 matrix.
+static inline __attribute__((always_inline))
+float spvDet2x2(float a1, float a2, float b1, float b2)
+{
+    return a1 * b2 - b1 * a2;
+}
+
+// Returns the inverse of a matrix, by using the algorithm of calculating the classical
+// adjoint and dividing by the determinant. The contents of the matrix are changed.
+static inline __attribute__((always_inline))
+float3x3 spvInverse3x3(float3x3 m)
+{
+    float3x3 adj;	// The adjoint matrix (inverse after dividing by determinant)
+
+    // Create the transpose of the cofactors, as the classical adjoint of the matrix.
+    adj[0][0] =  spvDet2x2(m[1][1], m[1][2], m[2][1], m[2][2]);
+    adj[0][1] = -spvDet2x2(m[0][1], m[0][2], m[2][1], m[2][2]);
+    adj[0][2] =  spvDet2x2(m[0][1], m[0][2], m[1][1], m[1][2]);
+
+    adj[1][0] = -spvDet2x2(m[1][0], m[1][2], m[2][0], m[2][2]);
+    adj[1][1] =  spvDet2x2(m[0][0], m[0][2], m[2][0], m[2][2]);
+    adj[1][2] = -spvDet2x2(m[0][0], m[0][2], m[1][0], m[1][2]);
+
+    adj[2][0] =  spvDet2x2(m[1][0], m[1][1], m[2][0], m[2][1]);
+    adj[2][1] = -spvDet2x2(m[0][0], m[0][1], m[2][0], m[2][1]);
+    adj[2][2] =  spvDet2x2(m[0][0], m[0][1], m[1][0], m[1][1]);
+
+    // Calculate the determinant as a combination of the cofactors of the first row.
+    float det = (adj[0][0] * m[0][0]) + (adj[0][1] * m[1][0]) + (adj[0][2] * m[2][0]);
+
+    // Divide the classical adjoint matrix by the determinant.
+    // If determinant is zero, matrix is not invertable, so leave it unchanged.
+    return (det != 0.0f) ? (adj * (1.0f / det)) : m;
+}
+
+struct Uniforms
+{
+    float4x4 model;
+    float4x4 viewProj;
+    float4 color;
+    float4 light;
+    float4 params;
+};
+
+struct main0_out
+{
+    float4 vertexColor [[user(locn0)]];
+    float2 fragmentUv [[user(locn1)]];
+    float4 gl_Position [[position]];
+};
+
+struct main0_in
+{
+    float3 position [[attribute(0)]];
+    float3 normal [[attribute(1)]];
+    float4 color [[attribute(2)]];
+    float2 uv [[attribute(3)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant Uniforms& u [[buffer(0)]])
+{
+    main0_out out = {};
+    float4 world = u.model * float4(in.position, 1.0);
+    out.gl_Position = u.viewProj * world;
+    out.gl_Position.y = -out.gl_Position.y;
+    float3x3 normalMatrix = transpose(spvInverse3x3(float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz)));
+    float3 n = fast::normalize(normalMatrix * in.normal);
+    float3 l = fast::normalize(-u.light.xyz);
+    float diffuse = fast::max(dot(n, l), 0.0) * u.light.w;
+    float specular = powr(fast::max(dot(reflect(-l, n), fast::normalize(-world.xyz)), 0.0), u.params.y) * u.params.z;
+    out.vertexColor = float4(((u.color.xyz * in.color.xyz) * (u.params.x + diffuse)) + float3(specular), u.color.w * in.color.w);
+    out.fragmentUv = in.uv;
+    return out;
+}
+

@@ -1,7 +1,8 @@
 import std/[os]
 
-import sdl3, sdl3_ttf, chroma, errors
+import sdl3, sdl3_ttf, sdl3_image, chroma, errors, gpu
 export chroma
+export gpu except Texture
 
 # Interface over sdl3, allowing replacement and keeping external dependencies localized.
 
@@ -9,11 +10,28 @@ type
   App* = object
     window: Window
     renderer: Renderer
+    device: Device
 
   AppConfig* = object
     appname*, appversion*: string
     width* = 1280
     height* = 720
+
+  Font* = object
+    data*: sdl3_ttf.Font
+    size*: float32
+    ascent*, descent*, lineHeight*: int
+
+  Texture* = object
+    data*: sdl3.Texture
+    width*, height*: int
+
+  ResourceLoader* = ref object
+    renderer: Renderer
+
+proc loadTexture*(res: ResourceLoader, path: string): Texture =
+  result = Texture()
+  result.data = sdl3_image.loadTexture(res.renderer, path)
 
 proc renderClear*(app: App, clearColor: chroma.Color) =
   let c = clearColor.to(ColorRGBA)
@@ -35,6 +53,16 @@ proc initApp*(cfg: AppConfig): App =
   if result.renderer.isNil:
     raiseSdlError("Failed to create renderer")
   checkSdl setRenderVSync(result.renderer, 0), "Failed to disable vsync"
+  result.device = initDevice(result.renderer)
+
+proc gpuDevice*(app: App): Device =
+  app.device
+
+proc gpuSwapchainFormat*(app: App): TextureFormat =
+  swapchainFormat(app.device, app.window)
+
+proc gpuFrame*(app: App): GpuFrame =
+  beginFrame(app.device, app.window)
 
 proc `=copy`*(app: var App, source: App) {.error.}
 proc `=destroy`*(app: var App) =
@@ -57,10 +85,10 @@ proc initialize*() =
     raiseSdlError("Failed to initialize SDL")
   if not sdl3_ttf.init():
     raiseSdlError("Failed to initialize SDL_ttf")
-  defer:
-    sdl3_ttf.quit()
-    sdl3.quit()
 
+proc deinitialize*() =
+  sdl3_ttf.quit()
+  sdl3.quit()
 proc processEvents*(running: var bool): void =
   var sdlEvent: sdl3.Event
   while pollEvent(sdlEvent):
