@@ -69,7 +69,6 @@ vertex main0_out main0(main0_in in [[stage_in]], constant Uniforms& u [[buffer(0
     main0_out out = {};
     float4 world = u.model * float4(in.position, 1.0);
     out.gl_Position = u.viewProj * world;
-    out.gl_Position.y = -out.gl_Position.y;
     float3x3 normalMatrix = transpose(spvInverse3x3(float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz)));
     float3 n = fast::normalize(normalMatrix * in.normal);
     float3 l = fast::normalize(-u.light.xyz);

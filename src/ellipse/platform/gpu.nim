@@ -8,12 +8,19 @@ proc acquireSwapchainTextureRaw(
   width: var uint32,
   height: var uint32
 ): bool {.importc: "SDL_AcquireGPUSwapchainTexture".}
+# The sdl3 binding declares GPUSampler as a value object; the handles are
+# actually pointers, so they are handled as raw pointers here.
+proc createGPUSamplerRaw(device: GPUDevice, createinfo: ptr GPUSamplerCreateInfo): pointer
+  {.importc: "SDL_CreateGPUSampler".}
+proc releaseGPUSamplerRaw(device: GPUDevice, sampler: pointer)
+  {.importc: "SDL_ReleaseGPUSampler".}
 {.pop.}
 
 type
   Device* = ref DeviceObj
   Texture* = ref TextureObj
   Shader* = ref ShaderObj
+  Sampler* = ref SamplerObj
   Pipeline* = ref PipelineObj
   CommandBuffer* = ref CommandBufferObj
   RenderPass* = ref RenderPassObj
@@ -38,6 +45,10 @@ type
   ShaderObj* = object
     device: Device
     raw: GPUShader
+
+  SamplerObj* = object
+    device: Device
+    raw: pointer
 
   PipelineObj* = object
     device: Device
@@ -113,6 +124,11 @@ proc `=destroy`*(shader: var ShaderObj) =
   if not shader.raw.isNil and not shader.device.isNil and not shader.device.raw.isNil:
     releaseGPUShader(shader.device.raw, shader.raw)
     shader.raw = nil
+
+proc `=destroy`*(sampler: var SamplerObj) =
+  if not sampler.raw.isNil and not sampler.device.isNil and not sampler.device.raw.isNil:
+    releaseGPUSamplerRaw(sampler.device.raw, sampler.raw)
+    sampler.raw = nil
 
 proc `=destroy`*(pipeline: var PipelineObj) =
   if not pipeline.raw.isNil and not pipeline.device.isNil and not pipeline.device.raw.isNil:
@@ -243,6 +259,41 @@ proc depthTarget*(device: Device, width, height: uint32): Texture =
     device.depthHeight = height
   device.depth
 
+proc retire*(device: Device, texture: Texture) =
+  # Deferred release: the raw texture may still be referenced by in-flight
+  # command buffers; collectGarbage frees it once the next fence has passed.
+  device.freeTextures.add texture
+
+proc newColorTexture*(device: Device, width, height: uint32, format: TextureFormat): Texture =
+  var info = GPUTextureCreateInfo(
+    `type`: GPU_TEXTURETYPE_2D,
+    format: GPUTextureFormat(format.int32),
+    usage: uint32(GPU_TEXTUREUSAGE_COLOR_TARGET) or uint32(GPU_TEXTUREUSAGE_SAMPLER),
+    width: width,
+    height: height,
+    layer_count_or_depth: 1,
+    num_levels: 1,
+    sample_count: GPU_SAMPLECOUNT_1,
+  )
+  let raw = createGPUTexture(device.raw, addr info)
+  if raw.isNil:
+    raiseSdlError("Failed to create color texture")
+  Texture(device: device, raw: raw, owned: true)
+
+proc newSampler*(device: Device): Sampler =
+  var info = GPUSamplerCreateInfo(
+    min_filter: GPU_FILTER_LINEAR,
+    mag_filter: GPU_FILTER_LINEAR,
+    mipmap_mode: GPU_SAMPLERMIPMAPMODE_NEAREST,
+    address_mode_u: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+    address_mode_v: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+    address_mode_w: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+  )
+  let raw = createGPUSamplerRaw(device.raw, addr info)
+  if raw.isNil:
+    raiseSdlError("Failed to create sampler")
+  Sampler(device: device, raw: raw)
+
 proc beginRender*(cmd: CommandBuffer, target: Texture, clearColor: ClearColor, depth: Texture): RenderPass =
   var colorInfo = GPUColorTargetInfo(
     texture: cast[ptr GPUTexture](target.raw),
@@ -260,6 +311,19 @@ proc beginRender*(cmd: CommandBuffer, target: Texture, clearColor: ClearColor, d
     cycle: true,
   )
   let raw = beginGPURenderPass(cmd.raw, addr colorInfo, 1, addr depthInfo)
+  if raw.isNil:
+    raiseSdlError("Failed to begin render pass")
+  RenderPass(cmd: cmd, raw: raw)
+
+proc beginRender*(cmd: CommandBuffer, target: Texture, clearColor: ClearColor): RenderPass =
+  ## Pass without a depth attachment, for fullscreen post-process passes.
+  var colorInfo = GPUColorTargetInfo(
+    texture: cast[ptr GPUTexture](target.raw),
+    clear_color: FColor(r: clearColor.r, g: clearColor.g, b: clearColor.b, a: clearColor.a),
+    load_op: GPU_LOADOP_CLEAR,
+    store_op: GPU_STOREOP_STORE,
+  )
+  let raw = beginGPURenderPass(cmd.raw, addr colorInfo, 1, nil)
   if raw.isNil:
     raiseSdlError("Failed to begin render pass")
   RenderPass(cmd: cmd, raw: raw)
@@ -328,15 +392,18 @@ proc newPipeline*(device: Device, desc: PipelineDesc): Pipeline =
     depth_stencil_format: GPUTextureFormat(desc.depthFormat.int32),
     has_depth_stencil_target: desc.hasDepth,
   )
-  var info = GPUGraphicsPipelineCreateInfo(
-    vertex_shader: cast[ptr GPUShader](desc.vertex.raw),
-    fragment_shader: cast[ptr GPUShader](desc.fragment.raw),
-    vertex_input_state: GPUVertexInputState(
+  var vertexInput = GPUVertexInputState(num_vertex_buffers: 0)
+  if attributeDescriptions.len > 0:
+    vertexInput = GPUVertexInputState(
       vertex_buffer_descriptions: cast[ptr UncheckedArray[GPUVertexBufferDescription]](addr bufferDescriptions[0]),
       num_vertex_buffers: 1,
       vertex_attributes: cast[ptr UncheckedArray[GPUVertexAttribute]](addr attributeDescriptions[0]),
       num_vertex_attributes: attributeDescriptions.len.uint32,
-    ),
+    )
+  var info = GPUGraphicsPipelineCreateInfo(
+    vertex_shader: cast[ptr GPUShader](desc.vertex.raw),
+    fragment_shader: cast[ptr GPUShader](desc.fragment.raw),
+    vertex_input_state: vertexInput,
     primitive_type: desc.kind.toSdl(),
     rasterizer_state: GPURasterizerState(
       fill_mode: GPU_FILLMODE_FILL,
@@ -421,6 +488,15 @@ proc bindIndexBuffer*(pass: RenderPass, buffer: DynamicBuffer, offset: uint32 = 
     offset: offset,
   )
   bindGPUIndexBuffer(pass.raw, addr binding, GPU_INDEXELEMENTSIZE_32BIT)
+
+proc bindFragmentSamplers*(pass: RenderPass, bindings: openArray[tuple[texture: Texture, sampler: Sampler]]) =
+  var sdlBindings: seq[sdl3.GPUTextureSamplerBinding] = @[]
+  for (texture, sampler) in bindings:
+    sdlBindings.add sdl3.GPUTextureSamplerBinding(
+      texture: cast[ptr GPUTexture](texture.raw),
+      sampler: cast[ptr GPUSampler](sampler.raw),
+    )
+  bindGPUFragmentSamplers(pass.raw, 0, addr sdlBindings[0], sdlBindings.len.uint32)
 
 proc pushVertexUniforms*[T](cmd: CommandBuffer, slot: uint32, value: T) =
   pushGPUVertexUniformData(cmd.raw, slot, addr value, sizeof(T).uint32)

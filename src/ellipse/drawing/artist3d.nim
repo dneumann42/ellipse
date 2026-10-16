@@ -1,35 +1,13 @@
 import std/[math]
 
 import ../platform/sdl
+import geometry
+import ssao
+
+export geometry
+export ssao
 
 type
-  Vec2* = object
-    x*, y*: float32
-
-  Vec3* = object
-    x*, y*, z*: float32
-
-  Vec4* = object
-    x*, y*, z*, w*: float32
-
-  Mat4* = object
-    c*: array[16, float32]
-
-  Vertex* = object
-    position*: Vec3
-    normal*: Vec3
-    color*: Vec4
-    uv*: Vec2
-
-  Mesh* = object
-    vertices*: seq[Vec3]
-    indices*: seq[uint32]
-    normals*: seq[Vec3]
-    uvs*: seq[Vec2]
-
-  DrawMode* = enum
-    Triangles, TriangleStrip, TriangleFan, Quads
-
   Uniforms = object
     model, viewProj: Mat4
     color, light, params: Vec4
@@ -49,6 +27,9 @@ type
     pending: Batch
     view: Mat4
     projection: Mat4
+    fovY, near, far: float32
+    perspective: bool
+    referenceAspect: float32
     model: Mat4
     stack: seq[Mat4]
     material: Vec4
@@ -61,151 +42,8 @@ type
     mode: DrawMode
     current: Vertex
     face: seq[Vertex]
-
-func vec2*(x, y: float32): Vec2 =
-  Vec2(x: x.float32, y: y.float32)
-
-func vec3*(x, y, z: float32): Vec3 =
-  Vec3(x: x.float32, y: y.float32, z: z.float32)
-
-func vec3*(v: Vec4): Vec3 =
-  Vec3(x: v.x, y: v.y, z: v.z)
-
-func vec4*(x, y, z: float32, w: float32 = 1): Vec4 =
-  Vec4(x: x.float32, y: y.float32, z: z.float32, w: w.float32)
-
-func vec4*(v: Vec3, w: float32 = 1): Vec4 =
-  Vec4(x: v.x, y: v.y, z: v.z, w: w.float32)
-
-func `+`*(a, b: Vec3): Vec3 =
-  Vec3(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z)
-
-func `-`*(a, b: Vec3): Vec3 =
-  Vec3(x: a.x - b.x, y: a.y - b.y, z: a.z - b.z)
-
-func `*`*(a: Vec3, s: float32): Vec3 =
-  Vec3(x: a.x * s, y: a.y * s, z: a.z * s)
-
-func dot*(a, b: Vec3): float32 =
-  a.x * b.x + a.y * b.y + a.z * b.z
-
-func cross*(a, b: Vec3): Vec3 =
-  Vec3(
-    x: a.y * b.z - a.z * b.y,
-    y: a.z * b.x - a.x * b.z,
-    z: a.x * b.y - a.y * b.x,
-  )
-
-func length*(a: Vec3): float32 =
-  sqrt(dot(a, a))
-
-func normalize*(a: Vec3): Vec3 =
-  let l = length(a)
-  if l == 0:
-    Vec3(x: 0, y: 1, z: 0)
-  else:
-    a * (1 / l)
-
-func identity*(): Mat4 =
-  Mat4(c: [
-    1.0f, 0.0f, 0.0f, 0.0f,
-    0.0f, 1.0f, 0.0f, 0.0f,
-    0.0f, 0.0f, 1.0f, 0.0f,
-    0.0f, 0.0f, 0.0f, 1.0f,
-  ])
-
-func `*`*(a, b: Mat4): Mat4 =
-  for col in 0 ..< 4:
-    for row in 0 ..< 4:
-      var sum = 0.0f
-      for k in 0 ..< 4:
-        sum += a.c[k * 4 + row] * b.c[col * 4 + k]
-      result.c[col * 4 + row] = sum
-
-func `*`*(m: Mat4, v: Vec4): Vec4 =
-  Vec4(
-    x: m.c[0] * v.x + m.c[4] * v.y + m.c[8] * v.z + m.c[12] * v.w,
-    y: m.c[1] * v.x + m.c[5] * v.y + m.c[9] * v.z + m.c[13] * v.w,
-    z: m.c[2] * v.x + m.c[6] * v.y + m.c[10] * v.z + m.c[14] * v.w,
-    w: m.c[3] * v.x + m.c[7] * v.y + m.c[11] * v.z + m.c[15] * v.w,
-  )
-
-func translationMatrix*(v: Vec3): Mat4 =
-  result = identity()
-  result.c[12] = v.x
-  result.c[13] = v.y
-  result.c[14] = v.z
-
-func scalingMatrix*(v: Vec3): Mat4 =
-  result = identity()
-  result.c[0] = v.x
-  result.c[5] = v.y
-  result.c[10] = v.z
-
-func rotationMatrix*(angle: float32, axis: Vec3): Mat4 =
-  let
-    a = normalize(axis)
-    c = cos(angle)
-    s = sin(angle)
-    t = 1.0f - c
-  Mat4(c: [
-    t * a.x * a.x + c,       t * a.x * a.y + a.z * s, t * a.x * a.z - a.y * s, 0.0f,
-    t * a.x * a.y - a.z * s, t * a.y * a.y + c,       t * a.y * a.z + a.x * s, 0.0f,
-    t * a.x * a.z + a.y * s, t * a.y * a.z - a.x * s, t * a.z * a.z + c,       0.0f,
-    0.0f,                    0.0f,                    0.0f,                    1.0f,
-  ])
-
-func perspectiveMatrix*(fovY, aspect, near, far: float32): Mat4 =
-  let
-    f = 1.0f / tan(fovY / 2.0f)
-    nf = 1.0f / (near - far)
-  Mat4(c: [
-    f / aspect, 0.0f, 0.0f, 0.0f,
-    0.0f, f, 0.0f, 0.0f,
-    0.0f, 0.0f, far * nf, -1.0f,
-    0.0f, 0.0f, far * near * nf, 0.0f,
-  ])
-
-func lookAt*(eye, target, up: Vec3): Mat4 =
-  let
-    z = normalize(eye - target)
-    x = normalize(cross(up, z))
-    y = cross(z, x)
-  Mat4(c: [
-    x.x, y.x, z.x, 0.0f,
-    x.y, y.y, z.y, 0.0f,
-    x.z, y.z, z.z, 0.0f,
-    -dot(x, eye), -dot(y, eye), -dot(z, eye), 1.0f,
-  ])
-
-func faceNormal(a, b, c: Vec3): Vec3 =
-  let n = cross(b - a, c - a)
-  if length(n) == 0:
-    vec3(0, 0, 1)
-  else:
-    normalize(n)
-
-func computeNormals*(mesh: Mesh): seq[Vec3] =
-  result.setLen(mesh.vertices.len)
-  if mesh.vertices.len == 0:
-    return
-  var accumulated = newSeq[Vec3](mesh.vertices.len)
-  if mesh.indices.len == 0:
-    for f in 0 ..< (mesh.vertices.len div 3):
-      let n = faceNormal(mesh.vertices[f * 3], mesh.vertices[f * 3 + 1], mesh.vertices[f * 3 + 2])
-      for v in (f * 3) ..< (f * 3 + 3):
-        accumulated[v] = n
-  else:
-    for f in 0 ..< (mesh.indices.len div 3):
-      let
-        ia = mesh.indices[f * 3]
-        ib = mesh.indices[f * 3 + 1]
-        ic = mesh.indices[f * 3 + 2]
-        n = faceNormal(mesh.vertices[ia], mesh.vertices[ib], mesh.vertices[ic])
-      for idx in [ia, ib, ic]:
-        accumulated[idx] = accumulated[idx] + n
-  for i in 0 ..< mesh.vertices.len:
-    result[i] = normalize(accumulated[i])
+    post: SsaoPass
+    ssao: SsaoOptions
 
 func uniformState(a: Artist3D, model, viewProj: Mat4): Uniforms =
   Uniforms(
@@ -215,6 +53,12 @@ func uniformState(a: Artist3D, model, viewProj: Mat4): Uniforms =
     light: vec4(-a.lightDir.x, -a.lightDir.y, -a.lightDir.z, a.lightIntensity),
     params: vec4(a.ambient, a.shininess, a.specular, 0),
   )
+
+func nearFar(a: Artist3D): tuple[near, far: float32] =
+  if a.near > 0 and a.far > a.near:
+    (a.near, a.far)
+  else:
+    (0.1f, 100f)
 
 const
   vertexSpv = staticRead("shaders/spv/mesh.vert.spv")
@@ -228,13 +72,8 @@ proc newArtist*(app: App): Artist3D =
     pipeline = newPipeline(device, PipelineDesc(
       vertex: vertexShader,
       fragment: fragmentShader,
-      stride: sizeof(Vertex).uint32,
-      attributes: @[
-        Attribute(location: 0, offset: 0, format: Float3),
-        Attribute(location: 1, offset: 12, format: Float3),
-        Attribute(location: 2, offset: 24, format: Float4),
-        Attribute(location: 3, offset: 40, format: Float2),
-      ],
+      attributes: VertexAttributes,
+      stride: VertexStride,
       colorFormat: app.gpuSwapchainFormat(),
       depthFormat: Depth32,
       blend: true,
@@ -252,7 +91,9 @@ proc newArtist*(app: App): Artist3D =
     lightIntensity: 0.8,
     ambient: 0.3,
     shininess: 32,
+    referenceAspect: app.designAspect(),
     current: Vertex(normal: vec3(0, 0, 1), color: vec4(1, 1, 1, 1), uv: vec2(0, 0)),
+    post: newSsaoPass(device, vertexShader, app.gpuSwapchainFormat()),
   )
 
 proc reset*(a: Artist3D) =
@@ -266,7 +107,19 @@ proc setView*(a: Artist3D, eye, target, up: Vec3) =
   a.view = lookAt(eye, target, up)
 
 proc setPerspective*(a: Artist3D, fovY, near, far: float32) =
-  a.projection = perspectiveMatrix(fovY, 1, near, far)
+  # The real aspect is only known at present time (swapchain size), so the
+  # projection is rebuilt per frame in present().
+  a.fovY = fovY
+  a.near = near
+  a.far = far
+  a.perspective = true
+
+proc setLetterbox*(a: Artist3D, referenceAspect: float32) =
+  ## Letterbox fit without black bars: the region matching `referenceAspect`
+  ## is always fully visible; windows with a different aspect reveal extra
+  ## world (overscan) where the bars would be, never a distorted image.
+  ## Pass 0 to disable and fall back to plain aspect-corrected perspective.
+  a.referenceAspect = referenceAspect
 
 proc setProjection*(a: Artist3D, projection: Mat4) =
   a.projection = projection
@@ -280,6 +133,11 @@ proc setAmbient*(a: Artist3D, ambient: float32) =
 
 proc setMaterial*(a: Artist3D, color: Vec4) =
   a.material = color
+
+proc setSsao*(a: Artist3D, options: SsaoOptions) =
+  ## Enabled: the scene renders to offscreen targets and goes through the
+  ## depth/occlusion/composite chain. Disabled: direct-to-swapchain as usual.
+  a.ssao = options
 
 proc pushMatrix*(a: Artist3D) =
   a.stack.add a.model
@@ -455,19 +313,60 @@ proc render*(a: Artist3D, mesh: Mesh, model: Mat4) =
   a.render(mesh)
   a.popMatrix()
 
+proc refreshProjection(a: Artist3D, frame: GpuFrame) =
+  if not (a.perspective and frame.width > 0 and frame.height > 0):
+    return
+  let
+    aspect = frame.width.float32 / frame.height.float32
+    # Letterbox fit: widen the frustum until the reference region fits,
+    # never shrink it, so the bars are filled by extra scene content.
+    scale =
+      if a.referenceAspect > 0:
+        max(1.0f, a.referenceAspect / aspect)
+      else:
+        1.0f
+  let fovY = 2.0f * arctan(tan(a.fovY / 2.0f) * scale)
+  a.projection = perspectiveMatrix(fovY, aspect, a.near, a.far)
+  let viewProj = a.projection * a.view
+  for batch in a.batches.mitems:
+    batch.uniforms.viewProj = viewProj
+
+proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
+                 pushFragment: proc () = nil) =
+  pass.bindPipeline(pipeline)
+  pass.bindVertexBuffers([BufferBinding(buffer: a.vertexBuffer)])
+  pass.bindIndexBuffer(a.indexBuffer)
+  for batch in a.batches:
+    cmd.pushVertexUniforms(0, batch.uniforms)
+    if not pushFragment.isNil:
+      pushFragment()
+    pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+
+proc presentSsao(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
+  a.post.ensureSize(frame.width, frame.height)
+  let (near, far) = a.nearFar()
+  let scene = a.post.beginScene(frame.cmd, clearColor, frame.depth)
+  a.drawBatches(frame.cmd, scene, a.pipeline)
+  scene.endRender()
+  let depthPass = a.post.beginDepth(frame.cmd, frame.depth)
+  a.drawBatches(frame.cmd, depthPass, a.post.depthPipeline,
+    a.post.newDepthUniformPusher(frame.cmd, near, far))
+  depthPass.endRender()
+  a.post.runOcclusion(frame.cmd, a.ssao, near, far)
+  a.post.runComposite(frame.cmd, frame.target)
+
 proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
   let frame = app.gpuFrame()
   if frame.valid:
     if a.batches.len > 0:
+      a.refreshProjection(frame)
       frame.cmd.upload(a.vertexBuffer, a.vertices)
       frame.cmd.upload(a.indexBuffer, a.indices)
-      frame.beginRender(clearColor)
-      frame.pass.bindPipeline(a.pipeline)
-      frame.pass.bindVertexBuffers([BufferBinding(buffer: a.vertexBuffer)])
-      frame.pass.bindIndexBuffer(a.indexBuffer)
-      for batch in a.batches:
-        frame.cmd.pushVertexUniforms(0, batch.uniforms)
-        frame.pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+      if a.ssao.enabled:
+        a.presentSsao(frame, clearColor)
+      else:
+        frame.beginRender(clearColor)
+        a.drawBatches(frame.cmd, frame.pass, a.pipeline)
     else:
       frame.beginRender(clearColor)
   frame.endFrame()

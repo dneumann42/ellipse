@@ -54,6 +54,7 @@ proc main() =
   var app = initApp(AppConfig(appname: "Ellipse 3D", appversion: "v0.1.0"))
   let artist = newArtist(app)
   let mesh = tetrahedron()
+  artist.setSsao(newSsaoOptions())
 
   var
     running = true

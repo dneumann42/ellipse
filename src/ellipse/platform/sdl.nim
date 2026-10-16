@@ -11,6 +11,7 @@ type
     window: Window
     renderer: Renderer
     device: Device
+    width*, height*: int
 
   AppConfig* = object
     appname*, appversion*: string
@@ -42,6 +43,8 @@ proc render*(app: App) =
   checkSdl renderPresent(app.renderer), "Failed to present renderer"
 
 proc initApp*(cfg: AppConfig): App =
+  result.width = cfg.width
+  result.height = cfg.height
   result.window = createWindow(cstring(cfg.appname), 
                                cfg.width.cint, 
                                cfg.height.cint, 
@@ -57,6 +60,11 @@ proc initApp*(cfg: AppConfig): App =
 
 proc gpuDevice*(app: App): Device =
   app.device
+
+func designAspect*(app: App): float32 =
+  ## Aspect ratio the application was configured with; used as the
+  ## letterbox reference so resizing never crops or distorts content.
+  if app.height > 0: app.width.float32 / app.height.float32 else: 0
 
 proc gpuSwapchainFormat*(app: App): TextureFormat =
   swapchainFormat(app.device, app.window)

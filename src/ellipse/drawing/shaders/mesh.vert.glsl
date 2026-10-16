@@ -19,7 +19,6 @@ layout(location = 1) out vec2 fragmentUv;
 void main() {
   vec4 world = u.model * vec4(position, 1.0);
   gl_Position = u.viewProj * world;
-  gl_Position.y = -gl_Position.y;
 
   mat3 normalMatrix = transpose(inverse(mat3(u.model)));
   vec3 n = normalize(normalMatrix * normal);

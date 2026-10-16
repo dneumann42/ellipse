@@ -1,0 +1,37 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct Depth
+{
+    float4 uNearFar;
+};
+
+struct main0_out
+{
+    float4 outColor [[color(0)]];
+};
+
+static inline __attribute__((always_inline))
+float4 packDepth(thread const float& value)
+{
+    float4 _packed = fract(float4(16777216.0, 65536.0, 256.0, 1.0) * fast::clamp(value, 0.0, 0.999998986721038818359375));
+    _packed -= (_packed.xxyz * float4(0.0, 0.00390625, 0.00390625, 0.00390625));
+    return _packed;
+}
+
+fragment main0_out main0(constant Depth& _47 [[buffer(0)]], float4 gl_FragCoord [[position]])
+{
+    main0_out out = {};
+    float z = gl_FragCoord.z;
+    float near = _47.uNearFar.x;
+    float far = _47.uNearFar.y;
+    float linear = (near * far) / fast::max(far - (z * (far - near)), 9.9999997473787516355514526367188e-05);
+    float param = linear / far;
+    out.outColor = packDepth(param);
+    return out;
+}
+
