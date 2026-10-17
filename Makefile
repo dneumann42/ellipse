@@ -2,7 +2,7 @@ NIM := nim
 GLSLANG := glslangValidator
 SHADERCROSS := shadercross
 
-.PHONY: build_owl run_owl test_owl owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean
+.PHONY: build_owl run_owl test_owl owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui
 
 OWL_FLAGS := --outdir:bin/ --nimcache:build/nimcache -p:src
 
@@ -11,6 +11,19 @@ OWL_SOURCES := $(wildcard src/owl/*.nim src/owl/*/*.nim src/owl/*/*.owl src/owl/
 ELLIPSE_FLAGS := --outdir:bin/ --nimcache:build/nimcache -p:src
 
 ELLIPSE_SOURCES := $(wildcard src/ellipse/*.nim src/ellipse/*/*.nim src/ellipse/*/*/*.nim)
+
+# The GUI kit (clay + ellipse_ui + its platform/terminal layer), ported from
+# the nimony `ellipse-preview` checkout. Its platform layer links SDL3,
+# SDL3_ttf and (on Linux) wayland directly, so it builds with plain `nim`;
+# -p:src/clay matches the source tree's own Makefile.
+GUI_FLAGS := --outdir:bin/ --nimcache:build/nimcache-gui -p:src -p:src/clay
+
+GUI_SOURCES := $(wildcard src/ellipse_ui.nim src/clay/*.nim src/ellipse_ui/*.nim \
+	src/ellipse_ui/*/*.nim src/ellipse_ui/*/*/*.nim \
+	src/ellipse/logger.nim src/ellipse/failure.nim src/ellipse/clock.nim \
+	src/ellipse/hotload.nim src/ellipse/platform/*.nim src/ellipse/terminal/*.nim)
+
+GUI_TESTS := $(notdir $(wildcard tests/gui/*_test.nim))
 
 SHADER_SOURCES := $(wildcard src/ellipse/drawing/shaders/*.glsl)
 SHADER_SPVS := $(patsubst src/ellipse/drawing/shaders/%.glsl,src/ellipse/drawing/shaders/spv/%.spv,$(SHADER_SOURCES))
@@ -52,6 +65,31 @@ run_3d: bin/hello3d
 
 run_ellipse: bin/ellipse
 	./bin/ellipse $(ARGS)
+
+# --- GUI kit (clay + ellipse_ui, ported from the nimony ellipse-preview) ----
+
+bin/gallery: examples/gallery.nim examples/gallery/memberform.nim $(GUI_SOURCES)
+	@mkdir -p bin
+	$(NIM) $(GUI_FLAGS) c examples/gallery.nim
+
+build_gallery: bin/gallery
+
+run_gallery: bin/gallery
+	./bin/gallery $(ARGS)
+
+run_gallery_tui: bin/gallery
+	./bin/gallery --tui
+
+test_gui:
+	@mkdir -p bin/tests
+	@for t in $(GUI_TESTS); do \
+	  echo ";; $$t"; \
+	  SDL_VIDEODRIVER=offscreen $(NIM) -r --outdir:bin/tests/ \
+	    --nimcache:build/nimcache-gui -p:src -p:src/clay c tests/gui/$$t || exit 1; \
+	done
+
+gui_clean:
+	rm -rf bin/tests build/nimcache-gui
 
 ellipse_clean:
 	rm -rf src/ellipse/drawing/shaders/spv
