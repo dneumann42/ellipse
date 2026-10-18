@@ -7,6 +7,8 @@ builtin names and named arguments from `src/owl/libraries/gui.owl` +
 
 - [nim-tutorial.md](nim-tutorial.md) — full Nim walkthrough.
 - [owl-tutorial.md](owl-tutorial.md) — full Owl walkthrough.
+- [owl-examples.md](owl-examples.md) — every widget in Owl, several examples
+  each, layout recipes and the `widget` command.
 
 Conventions used below:
 

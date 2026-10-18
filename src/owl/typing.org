@@ -1,0 +1,18 @@
+#+TITLE: Typing
+
+#+begin_src owl
+  x Int = 100
+
+  fun add a Int (b Int = 10): Int
+    + a b
+
+  list List.(Int) = []:
+    1
+    2
+    3
+
+  dic Dict.(String String) = {}:
+    Hello = "World"
+    test = to-string 123
+
+#+end_src

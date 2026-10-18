@@ -1,6 +1,6 @@
 import std/syncio
 import ./[objects, reader, evaluator, modules, embedfile]
-import ./libraries/[base, math, io, term, fs, loader, net]
+import ./libraries/[base, math, io, term, fs, loader, net, gui]
 
 
 var programLib: Library = nil
@@ -53,6 +53,8 @@ proc owlLibrary*(): Library  =
   lib.add netModule()
   lib.add newModule("wire").addLibrarySource(embedFile("libraries/wire.owl"))
   lib.add newModule("repl").addLibrarySource(embedFile("scripts/repl.owl"))
+  lib.add newModule("repl-app").addLibrarySource(embedFile("scripts/repl-app.owl"))
   lib.add newModule("attach").addLibrarySource(embedFile("libraries/attach.owl"))
+  lib.add guiModule(embedFile("libraries/gui.owl"))
   result = lib
 

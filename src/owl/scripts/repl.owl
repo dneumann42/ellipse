@@ -31,7 +31,7 @@ fun doc-prelude:
     cond:
         (= project nothing) = prelude
         (= project.kind "gui") = (concat prelude "use gui" newline "export all" newline)
-        true = (concat prelude "export-all" newline)
+        true = (concat prelude "export all" newline)
 
 project = nothing
 no-project = "no project; new-project <dir> creates one, open-project switches to one"
@@ -635,7 +635,8 @@ fun help:
         "Commands (not written to the document):"
     for c (items commands):
         append lines (concat "  " (pad (usage c) 30) c.help)
-    append lines "Keys: Ctrl+Enter (or Alt+Enter, Ctrl+J) runs, Enter adds a line."
+    append lines "Keys: Shift+Enter runs (Alt+Enter on terminals that cannot report"
+    append lines "  it), Enter adds a line. The prompt grows with it: one line to start."
     append lines "F1 or M-x the command menu, F2 the results, F3 the document panel,"
     append lines "Alt+O its items. A command missing what it needs asks for it."
     echo (join-lines lines)
@@ -916,7 +917,7 @@ fun read-new-project cmd done:
             (= r nothing) = (done nothing)
             (= r.button "Cancel") = (done nothing)
             (= r.directory "") = (done nothing)
-            r.gui = (done ([] r.directory "gui"))
+            r.gui = (done ([] r.directory "--gui"))
             true = (done ([] r.directory))
     fields = []:
         text-field "directory" "Directory" "" "where the project goes, e.g. ../tasks"
@@ -1045,7 +1046,8 @@ fun switch-project dir:
 
 fun new-project-command dir kind:
     root = absolute-path dir
-    new-project root (pick-text (= kind nothing) "cli" kind)
+    kind-name = (pick-text (= kind "--gui") "gui" kind)
+    new-project root (pick-text (= kind-name nothing) "cli" kind-name)
     note (concat "created " root "/project.owl and its src/ modules")
     when (and (<> project nothing) (starts-with root (concat project.root "/"))):
         note:
@@ -1157,7 +1159,7 @@ fun stop-remote:
 
 fun run-project:
     when (= project nothing):
-        refuse "run needs a project: open-project, or new-project <dir> gui"
+        refuse "run needs a project: open-project, or new-project <dir> --gui"
     save-all (filter-dirty (docs-in project))
     dir = (socket-dir)
     when (not (dir-exists dir)):
@@ -1168,9 +1170,9 @@ fun run-project:
     note (concat "started " project.name " (pid " (to-string pid) "), output in " log)
     when (and (<> front nothing) (not front.windows)):
         note:
-            concat "this owl has no windows (make build_owl_sdl adds them), so the app":
-                " runs unseen; to watch it, start it with owl run in another terminal"
-                " and attach to that one"
+            concat "this owl has no display for windows, so the app":
+                " runs unseen; to watch it, start it with owl run where you can"
+                " see it and attach to that one"
     tries = 0
     conn = connect pid
     while (= conn nothing):
@@ -1281,7 +1283,7 @@ interactive open-project (dir = read-project):
     switch-project root
 
 interactive new-project (dir = read-new-project) kind?:
-    "create a project in dir (kind gui: a windowed app) and switch to it"
+    "create a project in dir (--gui: a windowed app) and switch to it"
     new-project-command dir kind
 
 interactive move-project (name = read-known-project) (dir = read-directory):

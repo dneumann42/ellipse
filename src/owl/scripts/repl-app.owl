@@ -1,0 +1,704 @@
+use io
+use base
+use math
+use strings
+use iterators
+use term
+use gui
+use repl
+
+
+; The repl as an ellipse_ui app, drawing the session of repl.owl:
+;
+;   owl repl        takes over the terminal
+;   owl repl --gui  opens a window (SDL), where this owl has one
+;
+; The session never draws; this front end reads it through the repl-*
+; functions every frame, so everything (documents, screens, settings)
+; hot-reloads with the session itself.
+;
+;   menu bar    a menu per section of the session's commands (F10), then
+;               the project and unsaved documents
+;   transcript  inputs at their prompts, output, values, notes and errors;
+;               the wheel scrolls it and it follows new lines
+;   documents   tabs of the open documents over the active one's items; a
+;               tab (or Ctrl+PgUp, Ctrl+PgDn) switches, F3 hides it, Alt+O
+;               gives it the keys to work the items like the items view
+;   prompt      a multiline code editor that starts at one line and grows
+;               with the input: Enter adds a line (deeper after ':'),
+;               Shift+Enter runs (Alt+Enter where a terminal cannot report
+;               Shift+Enter), Ctrl+Up/Down (or Up on the first line, Down
+;               on the last) walk the history, Ctrl+D on an empty prompt
+;               leaves
+;   screens     F1 (Alt+X) the command menu, F2 the results, and whatever a
+;               command asks for, in place of transcript and documents until
+;               answered or cancelled with Escape
+
+draft = ""
+history = ([])
+history-at = 0
+history-draft = ""
+
+; The session's status (repl-status), read after each step.
+status = nothing
+show-docs = true
+; The menu bar (repl-menus) and a command picked from it this frame.
+menus = ([])
+picked-command = nothing
+; Whether the document panel has the keys, and its selected item.
+in-docs = false
+doc-selected = 0
+
+; Frames left to keep a scroll at its end (new lines lay out a frame late).
+log-stick = 0
+log-seen = 0
+doc-stick = 0
+
+; The screen on show and its state.
+shown = 0
+selected = 0
+filter = ""
+values = ([])
+answer-text = ""
+want-focus = true
+
+fun at xs i:
+    index xs (+ i 0)
+
+fun pick c a b:
+    if c:
+        a
+        b
+
+fun contains xs x:
+    found = false
+    for y (items xs):
+        when (= y x):
+            set found true
+    found
+
+fun index-of xs x:
+    found = 0
+    for i (range (length xs)):
+        when (= (at xs i) x):
+            set found i
+    found
+
+fun pad s n:
+    out = s
+    while (< (length out) n):
+        set out (concat out " ")
+    out
+
+fun lower s:
+    out = ""
+    for i (range (length s)):
+        c = code s (+ i 0)
+        upper = and (> c 64) (< c 91)
+        set out (concat out (pick upper (char (+ (min c 200) 32)) (at s i)))
+    out
+
+; --- running the session -----------------------------------------------------------
+
+fun after-step:
+    p = (repl-take-pending)
+    when (<> p nothing):
+        set draft p
+        set want-focus true
+    set status (repl-status)
+    set doc-stick 3
+    when (repl-over):
+        (quit-app)
+    (request-frame)
+
+fun submit:
+    text = draft
+    set draft ""
+    cond:
+        (= text "") = nothing
+        (is-empty history) = (append history text)
+        (<> (at history (- (length history) 1)) text) = (append history text)
+        true = nothing
+    set history-at (length history)
+    set want-focus true
+    repl-submit text
+    (after-step)
+
+fun answer value:
+    set want-focus true
+    repl-answer value
+    (after-step)
+
+fun switch-to name:
+    repl-switch name
+    (after-step)
+
+; The document n tabs from the active one, round the ends.
+fun cycle-doc n:
+    p = status.panel
+    when (and (<> p nothing) (> (length p.docs) 1)):
+        k = length p.docs
+        i = + (index-of p.docs p.active) n
+        cond:
+            (< i 0) = (set i (- k 1))
+            (= i k) = (set i 0)
+            true = nothing
+        switch-to (at p.docs i)
+
+; A failure in a key's action would show only for the frame it happened
+; in, so it goes to the transcript.
+fun safely f:
+    try (f):
+        do:
+            repl-error (error-report)
+            when (<> (repl-screen) nothing):
+                answer nothing
+
+fun history-back:
+    when (> history-at 0):
+        when (= history-at (length history)):
+            set history-draft draft
+        set history-at (- history-at 1)
+        set draft (at history history-at)
+        set want-focus true
+
+fun history-forward:
+    when (< history-at (length history)):
+        set history-at (+ history-at 1)
+        if (= history-at (length history)):
+            set draft history-draft
+            set draft (at history history-at)
+        set want-focus true
+
+; Up on the prompt's first line walks back, Down on its last forward.
+fun can-go-back:
+    caret = editor-caret "prompt" draft
+    and (is-any history) (= (find (slice draft 0 caret) newline) nothing)
+
+fun can-go-forward:
+    caret = editor-caret "prompt" draft
+    and (< history-at (length history)) (= (find draft newline caret) nothing)
+
+fun take-any keys:
+    found = false
+    for k (items keys):
+        when (and (not found) (take-key k)):
+            set found true
+    found
+
+; Keys of the whole app while no screen is open. Like the prompt's, they
+; are taken first and acted on once the frame is drawn.
+fun app-keys in-menus:
+    cond:
+        (take-any ([] "F1" "Alt+X")) = "menu"
+        (take-key "F10") = "menubar"
+        (and in-menus (take-key "Escape")) = "prompt"
+        (take-key "F2") = "results"
+        (take-key "F3") = "toggle-docs"
+        (take-key "Alt+O") = "docs"
+        (take-key "Ctrl+PageUp") = "prev-doc"
+        (take-key "Ctrl+PageDown") = "next-doc"
+        true = nothing
+
+; History moves at once; the rest act after the editor has had the frame's
+; typing, which belongs to the input when it came with Shift+Enter. Plain
+; Enter is never taken here: it stays the editor's newline, so an
+; accidental one runs nothing. Alt+Enter runs too: terminals without the
+; kitty keyboard protocol report Shift+Enter as a plain Enter, and there
+; it is the only chord that can tell a run from a newline.
+fun prompt-keys:
+    cond:
+        (take-any ([] "Shift+Enter" "Alt+Enter")) = "submit"
+        (and (= draft "") (take-key "Ctrl+D")) = "leave"
+        (take-any ([] "Ctrl+Up" "Alt+P")) = (history-back)
+        (take-any ([] "Ctrl+Down" "Alt+N")) = (history-forward)
+        (and (can-go-back) (take-key "Up")) = (history-back)
+        (and (can-go-forward) (take-key "Down")) = (history-forward)
+        true = nothing
+
+fun act what:
+    cond:
+        (= what "submit") = (submit)
+        (= what "leave") = (do (repl-leave) (after-step))
+        (= what "toggle-docs") = (do (set show-docs (not show-docs)) (focus-docs false))
+        (= what "docs") = (do (set doc-selected 1000000) (focus-docs (not in-docs)))
+        (= what "menubar") = (toggle-menus)
+        (= what "prompt") = (focus-at "prompt" draft)
+        (= what "prev-doc") = (cycle-doc -1)
+        (= what "next-doc") = (cycle-doc 1)
+        (or (= what "menu") (= what "results")) = (do (repl-key what) (after-step))
+        true = nothing
+
+; Gives the keys to the document panel, or back to the prompt.
+fun focus-docs on:
+    set in-docs on
+    set want-focus (not on)
+    when on:
+        set show-docs true
+    (request-frame)
+
+; --- transcript and documents ------------------------------------------------------
+
+fun entry-view e:
+    k = e.kind
+    cond:
+        (= k "input") = (input-view e)
+        (= k "value") = (marked "=> " "dim" e.text "text")
+        (= k "error") = (text e.text (color = "#ffb4b4") (font = "mono"))
+        (= k "note") = (text e.text (color = "dim") (font = "mono"))
+        (= k "command") = (marked "› " "dim" e.text "dim")
+        true = (text e.text (font = "mono"))
+
+fun input-view e:
+    row (width = (grow)) (padding = ([] 0 0 8 0)):
+        text (concat e.prompt "> ") (color = "accent") (font = "mono")
+        text e.text (font = "mono")
+
+fun marked mark mark-color body body-color:
+    row (width = (grow)):
+        text mark (color = mark-color) (font = "mono")
+        text body (color = body-color) (font = "mono")
+
+; Keeps scroll id at its end for a few frames from when changed is true.
+fun follow id stick changed:
+    n = pick changed 3 stick
+    when (> n 0):
+        scroll-to-end id
+        (request-frame)
+    max 0 (- n 1)
+
+fun transcript-view:
+    entries = (repl-transcript)
+    n = length entries
+    column "log" (width = (grow)) (height = (grow)) (scroll = "y") (padding = ([] 8 8 4 4)) (gap = 0):
+        for i (range (max 0 (- n 300)) n):
+            entry-view (at entries i)
+    set log-stick (follow "log" log-stick (<> n log-seen))
+    set log-seen n
+
+fun doc-tabs p:
+    labels = ([])
+    for name (items p.docs):
+        append labels (pick (contains p.dirty name) (concat name " •") name)
+    at-tab = index-of p.docs p.active
+    picked = tab-strip "docs" labels at-tab
+    when (<> picked at-tab):
+        switch-to (at p.docs picked)
+
+; The active document's items, worked like the items view while it has the
+; keys; otherwise it follows the end of the document.
+fun docs-view p:
+    fun done what value:
+        cond:
+            (= what "pick") = (focus-docs true)
+            (= what "close") = (focus-docs false)
+            true = (doc-action p.active what value)
+    column (width = (pct 0.42)) (height = (grow)) (bg = "panel"):
+        doc-tabs p
+        set doc-selected (item-list "doc" p.sections doc-selected in-docs p.actions done)
+        when in-docs:
+            text p.hint (color = "dim")
+    when (not in-docs):
+        set doc-stick (follow "doc" doc-stick false)
+
+; Editing goes to the prompt; the other actions leave the keys here.
+fun doc-action name what value:
+    when (= what "edit"):
+        focus-docs false
+    repl-item-action name what value
+    (after-step)
+
+; The menu bar: the session's commands by menu (picking one runs it as F1's
+; menu does), then the project and unsaved documents.
+fun menu-bar:
+    where = "no project"
+    when (<> status.project nothing):
+        set where (concat "project " status.project)
+    when (> status.dirty 0):
+        set where (concat where " · " (to-string status.dirty) " unsaved")
+    tool-bar "menubar":
+        for m (items menus):
+            menu m.label:
+                for c (items m.items):
+                    when (menu-item c.name c.params):
+                        set picked-command c.name
+        (spacer)
+        text (concat where "  ·  F10 menus · F1 commands · Shift+Enter run ") (color = "dim")
+
+fun menus-focused:
+    found = false
+    for m (items menus):
+        when (focused (concat "menu." m.label)):
+            set found true
+    found
+
+; F10 gives the menu bar the keys (its first menu), or gives them back.
+fun toggle-menus:
+    if (menus-focused):
+        focus-at "prompt" draft
+        do:
+            set in-docs false
+            set-focus (concat "menu." (index (at menus 0) "label"))
+
+; A command picked from the menu bar runs once the frame is drawn, and the
+; keys go back to the prompt; one picked while a screen is open is dropped.
+fun run-picked live:
+    name = picked-command
+    set picked-command nothing
+    when (and live (<> name nothing)):
+        focus-at "prompt" draft
+        repl-run name
+        (after-step)
+
+; The prompt takes keys only in frames that began with it having them: a
+; screen answered this frame has had the frame's keys already. Clicking it
+; takes them back from the document panel.
+fun prompt-view live:
+    row "prompt.row" (width = (grow)) (padding = ([] 8 8 4 4)) (gap = 8) (bg = "panel"):
+        color = pick status.attached "#d070ff" "accent"
+        text (concat status.doc ">") (color = color) (font = "mono")
+        if live:
+            do:
+                what = (prompt-keys)
+                ; a menu clicked this frame took the focus after the
+                ; frame began: leave it there
+                when (or want-focus (not (or (focused "prompt") (menus-focused)))):
+                    focus-at "prompt" draft
+                    set want-focus false
+                set draft:
+                    code-editor "prompt" draft (max-lines = 12) (font = "mono") (indent-after = ":")
+                act what
+            text (pick (= draft "") "…" draft) (color = "dim") (font = "mono")
+    when (and in-docs (clicked "prompt.row")):
+        focus-docs false
+
+; Entries matching the filter: by label first, then by hint.
+fun filtered entries:
+    q = lower filter
+    if (= q ""):
+        entries
+        do:
+            by-label = ([])
+            by-hint = ([])
+            for e (items entries):
+                cond:
+                    (<> (find (lower e.label) q) nothing) = (append by-label e)
+                    (<> (find (lower e.hint) q) nothing) = (append by-hint e)
+                    true = nothing
+            concat by-label by-hint
+
+fun clamp i n:
+    max 0 (min i (- n 1))
+
+; The selection sel after this frame's moves over n rows: Up Down (C-p
+; C-n), PgUp PgDn, Home End, and with emacs, M-v C-v and M-< M-> as well.
+fun list-keys sel n emacs:
+    while (take-any ([] "Up" "Ctrl+P")):
+        set sel (- sel 1)
+    while (take-any ([] "Down" "Ctrl+N")):
+        set sel (+ sel 1)
+    while (take-any (pick emacs ([] "PageUp" "Alt+V") ([] "PageUp"))):
+        set sel (- sel 10)
+    while (take-any (pick emacs ([] "PageDown" "Ctrl+V") ([] "PageDown"))):
+        set sel (+ sel 10)
+    when (take-any (pick emacs ([] "Home" "Alt+<" "Alt+Shift+<") ([] "Home"))):
+        set sel 0
+    when (take-any (pick emacs ([] "End" "Alt+>" "Alt+Shift+>") ([] "End"))):
+        set sel (- n 1)
+    clamp sel n
+
+; --- item lists: the items view and the document panel -----------------------------
+
+; One frame of a list of sections (title, text, value) under id. While live
+; it takes the keys first: list-keys moves the selection, an action's key
+; (actions: key and what) or its button calls done with the action and the
+; selected section's value, and Escape or C-g calls done with "close".
+; Clicking a row selects it and calls done with "pick". Gives the selection.
+fun item-list id sections sel live actions done:
+    n = length sections
+    what = nothing
+    when live:
+        set sel (list-keys sel n true)
+        for a (items actions):
+            when (and (= what nothing) (take-key (pick (= a.key "enter") "Enter" a.key))):
+                set what a.what
+        when (take-any ([] "Escape" "Ctrl+G")):
+            set what "close"
+    column id (width = (grow)) (height = (grow)) (scroll = "y") (gap = 0):
+        for i (range n):
+            row-id = concat id "." (to-string i)
+            when (item-row row-id (at sections i) (and live (= i sel))):
+                set sel i
+                set what "pick"
+    when live:
+        scroll-into-view id (concat id "." (to-string sel))
+        row (gap = 8):
+            seen = ([])
+            for a (items actions):
+                when (not (contains seen a.what)):
+                    append seen a.what
+                    when (button (concat id ".act." a.what) a.what):
+                        set what a.what
+    cond:
+        (= what nothing) = nothing
+        (or (= what "close") (= what "pick")) = (done what nothing)
+        (> n 0) = (done what (index (at sections sel) "value"))
+        true = nothing
+    sel
+
+; One section's row, marked when on; true when clicked.
+fun item-row id sec on:
+    bg = pick on "selected" "none"
+    row id (width = (grow)) (gap = 8) (padding = ([] 0 0 2 2)) (bg = bg) (hover-bg = "button-hover"):
+        mark = concat (pad sec.title 4) (pick on " ▌" "  ")
+        text mark (color = (pick on "accent" "dim")) (font = "mono")
+        text sec.text (font = "mono")
+    clicked id
+
+; --- screens -----------------------------------------------------------------------
+
+fun panel title hint &body:
+    column (width = (grow)) (height = (grow)) (padding = 8):
+        column "screen" (width = (grow)) (height = (grow)) (padding = ([] 12 12 16 16)) (gap = 8) (border = 1) (border-color = "accent") (bg = "panel") (corner = 6):
+            text title (color = "accent")
+            (body)
+            text hint (color = "dim")
+
+; Escape and Enter are taken before the screen's fields see the keys and
+; acted on after they have taken the frame's typing.
+fun screen-keys:
+    cond:
+        (take-key "Escape") = "cancel"
+        (take-key "Enter") = "accept"
+        true = nothing
+
+fun choose-view s:
+    set selected (list-keys selected (length (filtered s.entries)) false)
+    key = (screen-keys)
+    choose-panel s
+    shown-entries = filtered s.entries
+    set selected (clamp selected (length shown-entries))
+    cond:
+        (= key "cancel") = (answer nothing)
+        (and (= key "accept") (is-any shown-entries)) = (answer-at shown-entries)
+        true = nothing
+
+fun choose-panel s:
+    shown-entries = filtered s.entries
+    n = length shown-entries
+    panel s.title "type to filter · ↑↓ C-p C-n move · enter choose · esc cancel":
+        f = text-field "pick.filter" filter "filter"
+        when (<> f filter):
+            set filter f
+            set selected 0
+        when (not (focused "pick.filter")):
+            focus-at "pick.filter" filter
+        column "pick.list" (width = (grow)) (height = (grow)) (scroll = "y"):
+            for i (range n):
+                choice-row i (at shown-entries i)
+            when (= n 0):
+                text "nothing matches" (color = "dim")
+        when (> n 0):
+            scroll-into-view "pick.list" (concat "pick." (to-string selected))
+
+fun answer-at entries:
+    answer (index (at entries selected) "value")
+
+fun choice-row i e:
+    id = concat "pick." (to-string i)
+    on = = i selected
+    bg = pick on "selected" "none"
+    row id (width = (grow)) (gap = 16) (padding = ([] 4 4 0 0)) (bg = bg) (hover-bg = "button-hover"):
+        text (pick on "▌" " ") (color = "accent")
+        text e.label (font = "mono")
+        (spacer)
+        text e.hint (color = "dim")
+    when (clicked id):
+        answer e.value
+
+fun ask-view s:
+    key = (screen-keys)
+    panel s.title "enter accept · esc cancel":
+        labeled s.label:
+            set answer-text (text-field "ask.field" answer-text)
+        when (not (focused "ask.field")):
+            focus-at "ask.field" answer-text
+        row (gap = 8):
+            when (button "ask.ok" "OK"):
+                answer answer-text
+            when (button "ask.cancel" "Cancel"):
+                answer nothing
+    cond:
+        (= key "cancel") = (answer nothing)
+        (= key "accept") = (answer answer-text)
+        true = nothing
+
+fun confirm-view s:
+    when (or (take-key "Left") (take-key "Shift+Tab")):
+        set selected (- selected 1)
+    when (or (take-key "Right") (take-key "Tab")):
+        set selected (+ selected 1)
+    set selected (clamp selected (length s.buttons))
+    cond:
+        (take-key "Escape") = (answer nothing)
+        (take-key "Enter") = (answer (at s.buttons selected))
+        true = (confirm-panel s)
+
+fun confirm-panel s:
+    panel s.title "←→ choose · enter accept · esc cancel":
+        for line (items s.lines):
+            text line
+        row (gap = 8):
+            for k (range (length s.buttons)):
+                id = concat "confirm." (to-string k)
+                when (= k selected):
+                    set-focus id
+                when (button id (at s.buttons k)):
+                    answer (at s.buttons k)
+
+; A form keeps its values in `values`, in field order.
+fun form-answer s button-text:
+    fun build:
+        r = {} (button = button-text)
+        for i (range (length s.fields)):
+            set r (with-field r (index (at s.fields i) "name") (at values i))
+        answer r
+    safely build
+
+; r with field name set to v (names come from the form, so as code).
+fun with-field r name v:
+    code = concat "(with (" (to-code r 1000000) ") (":
+        concat name " = " (to-code v 1000000) "))"
+    eval (at (parse code) 0)
+
+fun form-view s:
+    key = (screen-keys)
+    form-panel s
+    cond:
+        (= key "cancel") = (answer nothing)
+        (= key "accept") = (form-answer s (at s.buttons 0))
+        true = nothing
+
+fun form-panel s:
+    panel s.title "tab move · space toggle · enter accept · esc cancel":
+        for i (range (length s.fields)):
+            f = at s.fields i
+            id = concat "form." f.name
+            when (= f.kind "check"):
+                set values (replace-at values i (checkbox id f.label (at values i)))
+            when (= f.kind "text"):
+                labeled f.label:
+                    v = text-field id (at values i) f.hint
+                    set values (replace-at values i v)
+            when (and want-focus (= i 0)):
+                set-focus id
+                set want-focus false
+        row (gap = 8):
+            for k (range (length s.buttons)):
+                when (button (concat "form.button." (to-string k)) (at s.buttons k)):
+                    form-answer s (at s.buttons k)
+
+fun replace-at xs i v:
+    out = ([])
+    for k (range (length xs)):
+        append out (pick (= k i) v (at xs k))
+    out
+
+fun view-view s:
+    fun done what value:
+        cond:
+            (= what "close") = (answer nothing)
+            (= what "pick") = nothing
+            true = (answer ({} (action = what) (value = value)))
+    panel s.title s.hint:
+        set selected (item-list "view" s.sections selected true s.actions done)
+
+; A new screen starts fresh: the selection at its start (or end), an empty
+; filter, the form's initial values.
+fun reset-for s:
+    set shown s.serial
+    set filter ""
+    set selected 0
+    set answer-text ""
+    set values ([])
+    set want-focus true
+    cond:
+        (= s.kind "ask") = (set answer-text s.initial)
+        (and (= s.kind "view") s.at-end) = (set selected (- (length s.sections) 1))
+        (= s.kind "form") = (for f (items s.fields) (append values f.value))
+        true = nothing
+
+fun screen-view s:
+    when (<> s.serial shown):
+        reset-for s
+    k = s.kind
+    cond:
+        (= k "choose") = (choose-view s)
+        (= k "ask") = (ask-view s)
+        (= k "confirm") = (confirm-view s)
+        (= k "form") = (form-view s)
+        (= k "view") = (view-view s)
+        true = (answer nothing)
+
+; --- the app -----------------------------------------------------------------------
+
+fun view:
+    s = (repl-screen)
+    cols = (text-columns)
+    can-show = and show-docs (and (<> status.panel nothing) (> cols 79))
+    when (not can-show):
+        set in-docs false
+    side = and can-show (= s nothing)
+    repl-set-columns (max 40 (- (pick side (floor (* cols 0.58)) cols) 2))
+    in-menus = (menus-focused)
+    what = nothing
+    when (= s nothing):
+        set what (app-keys in-menus)
+    live = and (= s nothing) (and (not in-docs) (not in-menus))
+    column (width = (grow)) (height = (grow)) (bg = "bg"):
+        (menu-bar)
+        if (= s nothing):
+            row (width = (grow)) (height = (grow)) (gap = 1):
+                (transcript-view)
+                when side:
+                    docs-view status.panel
+            screen-view s
+        prompt-view live
+    act what
+    run-picked (= s nothing)
+
+fun copy-text text:
+    set-clipboard text
+
+; Not run-app: the repl is not a program others attach to, and it owns the
+; surface, so what code prints (quiet) lands in the transcript instead.
+; Terminal by default; gui asks for a window.
+fun repl-app (gui = false):
+    if gui:
+        do:
+            (use-window)
+            when (not (window-capable)):
+                error "owl repl --gui needs a display for a window: plain owl repl uses the terminal"
+        do:
+            when (not (is-terminal)):
+                error "owl repl needs a terminal, or a window: owl repl --gui"
+            (use-terminal)
+    repl-start ({} (copy = copy-text) (windows = (window-capable)))
+    set status (repl-status)
+    set menus (repl-menus)
+    ; closing the window (or Ctrl+Q) is exit, asking about unsaved documents
+    fun closing:
+        (repl-leave)
+        (after-step)
+        false
+    on-close closing
+    fun frame:
+        fun draw:
+            (view)
+        out = capture-output draw
+        when (<> out ""):
+            repl-output out
+    gui-run ({} (title = "owl repl") (debug = false) (quiet = true)) frame
+
+export:
+    repl-app = repl-app

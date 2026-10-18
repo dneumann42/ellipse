@@ -2,11 +2,19 @@ NIM := nim
 GLSLANG := glslangValidator
 SHADERCROSS := shadercross
 
-.PHONY: build_owl run_owl test_owl owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui
+# Install prefix (~/local/bin is on PATH here; override for system-wide:
+#   sudo make install PREFIX=/usr/local). DESTDIR stages into a root dir.
+PREFIX ?= $(HOME)/.local
+DESTDIR ?=
 
-OWL_FLAGS := --outdir:bin/ --nimcache:build/nimcache -p:src
+.PHONY: build_owl run_owl test_owl test_repl install owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui
 
-OWL_SOURCES := $(wildcard src/owl/*.nim src/owl/*/*.nim src/owl/*/*.owl src/owl/*/*.c)
+OWL_FLAGS := --outdir:bin/ --nimcache:build/nimcache -p:src -p:src/clay
+
+# owl embeds its libraries and links the ellipse_ui kit behind the gui module.
+OWL_SOURCES := $(wildcard src/owl/*.nim src/owl/*/*.nim src/owl/*/*.owl src/owl/*/*.c \
+	src/ellipse/*.nim src/ellipse/*/*.nim src/ellipse/*/*.c src/ellipse_ui/*.nim \
+	src/ellipse_ui/*/*.nim src/ellipse_ui/*/*/*.nim src/clay/*.nim src/clay/*/*.nim)
 
 ELLIPSE_FLAGS := --outdir:bin/ --nimcache:build/nimcache -p:src
 
@@ -103,6 +111,12 @@ build_owl: bin/owl
 run_owl: bin/owl
 	./bin/owl $(ARGS)
 
+# Build owl and install the binary into $(PREFIX)/bin. Its libraries and
+# scripts are embedded at compile time (embedFile), so the binary is all
+# that is needed.
+install: build_owl
+	install -Dm755 bin/owl $(DESTDIR)$(PREFIX)/bin/owl
+
 test_owl:
 	@mkdir -p build
 	$(NIM) $(OWL_FLAGS) -r c tests/objects_test.nim
@@ -110,6 +124,15 @@ test_owl:
 	$(NIM) $(OWL_FLAGS) -r c tests/evaluator_test.nim
 	$(NIM) $(OWL_FLAGS) -r c tests/modules_test.nim
 	$(NIM) $(OWL_FLAGS) -r c tests/errors_test.nim
+
+# The repl app. Its window face runs headless (offscreen SDL, scripted
+# frames); its terminal face runs `owl repl` on a pseudo-terminal, keys as
+# the kitty keyboard protocol sends them.
+test_repl: bin/owl
+	@mkdir -p build
+	SDL_VIDEODRIVER=offscreen $(NIM) $(OWL_FLAGS) -r c tests/repl_gui_test.nim
+	python3 -I ./tests/repl_commands_test.py
+	python3 -I ./tests/repl_screens_test.py
 
 owl_clean:
 	rm -rf bin build

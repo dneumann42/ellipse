@@ -9,6 +9,7 @@ use modules
 use source
 use projects
 use repl
+use repl-app
 use term
 
 
@@ -16,9 +17,11 @@ fun usage:
     echo "usage: owl <command> [args]"
     echo ""
     echo "commands:"
-    echo "  new <dir> [gui]               create a project: project.owl and src/main.owl;"
-    echo "                                gui makes a windowed app on ellipse_ui"
-    echo "  repl                          interactive session: enter owl code, quit to leave"
+    echo "  new <dir> [--gui]             create a project: project.owl and src/main.owl;"
+    echo "                                --gui makes a windowed app on ellipse_ui"
+    echo "  repl [--gui]                  interactive session: an app on ellipse_ui,"
+    echo "                                in the terminal (--gui for a window);"
+    echo "                                Shift+Enter runs, Enter adds a line"
     echo "  run [<file>]                  evaluate an owl file, or the project's main module"
     echo "  projects                      list the projects owl knows"
     echo "  modules                       list the project's modules"
@@ -90,9 +93,14 @@ fun module-file-of name:
 
 fun new-command next:
     dir = word next "a directory"
-    kind = word next "a kind" true
-    when (= kind nothing):
-        set kind "cli"
+    kind = "cli"
+    arg = (next)
+    while (<> arg nothing):
+        cond:
+            (and (= arg.type "long-flag") (= arg.flag "gui")) = (set kind "gui")
+            (= arg.type "cmd") = (fail (concat "new takes --gui, not the word " arg.name))
+            true = (fail (concat "expected --gui, not the option " arg.flag))
+        set arg (next)
     remember-project (read-project (new-project dir kind))
     echo (concat "created " dir "/project.owl and its modules in " dir "/src")
     when (= kind "gui"):
@@ -144,7 +152,7 @@ fun print-out s:
         echo (slice s 0 (- (length s) 1))
         echo s
 
-fun repl-command:
+fun text-repl:
     echo "owl repl; type quit to leave"
     st = (serve-input "")
     line = (readline (concat st.prompt "> "))
@@ -154,6 +162,25 @@ fun repl-command:
             when (<> st.output ""):
                 (print-out st.output)
             set line (readline (concat st.prompt "> "))
+
+fun repl-flag arg what:
+    and (= arg.type "long-flag") (= arg.flag what)
+
+; The app in the terminal by default, in a window with --gui; a plain line
+; prompt when there is no terminal to take over (a pipe, a script).
+fun repl-command next:
+    gui = false
+    arg = (next)
+    while (<> arg nothing):
+        cond:
+            (repl-flag arg "gui") = (set gui true)
+            (repl-flag arg "tui") = (set gui false)
+            (= arg.type "cmd") = (fail (concat "repl takes --gui, not the word " arg.name))
+            true = (fail (concat "expected --gui, not the option " arg.flag))
+        set arg (next)
+    if (or gui (is-terminal)):
+        repl-app gui
+        (text-repl)
 
 fun read-input path:
     if (= path nothing):
@@ -223,7 +250,7 @@ fun dispatch arg next:
         (= arg.name "new") = (new-command next)
         (= arg.name "modules") = (modules-command)
         (= arg.name "projects") = (projects-command)
-        (= arg.name "repl") = (repl-command)
+        (= arg.name "repl") = (repl-command next)
         (= arg.name "run") = (run-command next)
         (= arg.name "items") = (items-command next)
         (= arg.name "show") = (show-command next)
