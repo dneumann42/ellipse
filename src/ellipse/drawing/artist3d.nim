@@ -1,10 +1,12 @@
 import std/[math]
 
-import ../platform/sdl
+import ../platform/[gpu, sdl]
 import geometry
+import snapshot
 import ssao
 
 export geometry
+export snapshot
 export ssao
 
 type
@@ -44,6 +46,11 @@ type
     face: seq[Vertex]
     post: SsaoPass
     ssao: SsaoOptions
+    colorFormat: TextureFormat
+    snapshotPath: string
+    snapshotTarget: gpu.Texture
+    snapshotWidth, snapshotHeight: uint32
+    snapshotDownload: TextureDownload
 
 func uniformState(a: Artist3D, model, viewProj: Mat4): Uniforms =
   Uniforms(
@@ -92,6 +99,7 @@ proc newArtist*(app: App): Artist3D =
     ambient: 0.3,
     shininess: 32,
     referenceAspect: app.designAspect(),
+    colorFormat: app.gpuSwapchainFormat(),
     current: Vertex(normal: vec3(0, 0, 1), color: vec4(1, 1, 1, 1), uv: vec2(0, 0)),
     post: newSsaoPass(device, vertexShader, app.gpuSwapchainFormat()),
   )
@@ -102,6 +110,10 @@ proc reset*(a: Artist3D) =
   a.batches.setLen(0)
   a.face.setLen(0)
   a.building = false
+
+proc vertexCount*(a: Artist3D): int =
+  ## Vertices queued for this frame: a proxy for the work the LOD keeps down.
+  a.vertices.len
 
 proc setView*(a: Artist3D, eye, target, up: Vec3) =
   a.view = lookAt(eye, target, up)
@@ -263,6 +275,23 @@ proc vertex*(a: Artist3D, v: Vec3) =
 proc vertex*(a: Artist3D, x, y, z: float32) =
   a.vertex(vec3(x, y, z))
 
+proc quad*(a: Artist3D, v0, v1, v2, v3: Vertex) =
+  ## Immediate quad from complete vertices: appends the two triangles
+  ## directly, skipping the per-corner staging the generic path does.
+  ## Terrain and other vertex-rich meshes stream through this.
+  if not a.building:
+    return
+  case a.mode
+  of Quads:
+    a.appendVertex(v0)
+    a.appendVertex(v1)
+    a.appendVertex(v2)
+    a.appendVertex(v0)
+    a.appendVertex(v2)
+    a.appendVertex(v3)
+  else:
+    discard
+
 proc render*(a: Artist3D, mesh: Mesh) =
   let
     firstIndex = a.indices.len.uint32
@@ -355,8 +384,40 @@ proc presentSsao(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
   a.post.runOcclusion(frame.cmd, a.ssao, near, far)
   a.post.runComposite(frame.cmd, frame.target)
 
+proc snapshot*(a: Artist3D, path: string) =
+  ## Save the frame being built to `path` as a PNG once present() draws it.
+  ## The readback blocks for the GPU, so use it for debugging, not per frame.
+  a.snapshotPath = path
+
+proc snapshotScene(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
+  ## Re-renders the queued batches into an offscreen target and records a
+  ## CPU readback in the same command buffer; bytes become readable after
+  ## the frame is submitted and its fence waited on.
+  if a.snapshotTarget.isNil or a.snapshotWidth != frame.width or a.snapshotHeight != frame.height:
+    if not a.snapshotTarget.isNil:
+      a.device.retire(a.snapshotTarget)
+    a.snapshotTarget = newColorTexture(a.device, frame.width, frame.height, a.colorFormat)
+    a.snapshotWidth = frame.width
+    a.snapshotHeight = frame.height
+  let depth = a.device.depthTarget(frame.width, frame.height)
+  let pass = frame.cmd.beginRender(a.snapshotTarget, clearColor, depth)
+  a.drawBatches(frame.cmd, pass, a.pipeline)
+  pass.endRender()
+  a.snapshotDownload = frame.cmd.stageDownload(a.snapshotTarget, frame.width, frame.height)
+
+proc saveSnapshot(a: Artist3D, path: string, width, height: uint32) =
+  a.device.waitLastFence()
+  let pixels = a.device.finishDownload(a.snapshotDownload)
+  a.snapshotDownload = nil
+  if writePng(path, width.int, height.int, pixels, bgra = a.colorFormat == Rgba8):
+    echo "snapshot: wrote ", path
+  else:
+    echo "snapshot: failed to encode ", path
+
 proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
   let frame = app.gpuFrame()
+  var snapshotPath = a.snapshotPath
+  a.snapshotPath = ""
   if frame.valid:
     if a.batches.len > 0:
       a.refreshProjection(frame)
@@ -367,10 +428,15 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
       else:
         frame.beginRender(clearColor)
         a.drawBatches(frame.cmd, frame.pass, a.pipeline)
+        frame.pass.endRender()
+      if snapshotPath.len > 0:
+        a.snapshotScene(frame, clearColor)
     else:
       frame.beginRender(clearColor)
   frame.endFrame()
   a.reset()
+  if frame.valid and not a.snapshotDownload.isNil:
+    a.saveSnapshot(snapshotPath, frame.width, frame.height)
 
 proc present*(a: Artist3D, app: App, color: chroma.Color) =
   a.present(app, (color.r.float32, color.g.float32, color.b.float32, color.a.float32))

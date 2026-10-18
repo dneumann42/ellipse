@@ -69,6 +69,11 @@ type
     capacity*: uint32
     usages: set[BufferUsage]
 
+  TextureDownload* = ref object
+    transfer: GPUTransferBuffer
+    mapped: pointer
+    width*, height*: uint32
+
   BufferBinding* = object
     buffer*: DynamicBuffer
     offset*: uint32
@@ -469,6 +474,54 @@ proc upload*(cmd: CommandBuffer, buffer: DynamicBuffer, data: pointer, size: uin
 proc upload*[T](cmd: CommandBuffer, buffer: DynamicBuffer, data: openArray[T]) =
   if data.len > 0:
     cmd.upload(buffer, unsafeAddr data[data.low], (data.len * sizeof(T)).uint32)
+
+proc waitLastFence*(device: Device) =
+  ## Block until the most recently submitted command buffer finishes,
+  ## leaving the fence for the next acquireCommandBuffer to release.
+  if not device.fence.isNil:
+    discard waitForGPUFences(device.raw, true, [device.fence])
+
+proc stageDownload*(cmd: CommandBuffer, texture: Texture, width, height: uint32): TextureDownload =
+  ## Record a GPU->CPU copy of a whole texture into a mapped transfer buffer.
+  ## The bytes are only readable once the command buffer has been submitted
+  ## and its fence waited on; call finishDownload for that.
+  let
+    device = cmd.device
+    size = width * height * 4
+  var info = GPUTransferBufferCreateInfo(
+    usage: GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+    size: size,
+  )
+  let transfer = createGPUTransferBuffer(device.raw, addr info)
+  if transfer.isNil:
+    raiseSdlError("Failed to create transfer buffer")
+  let mapped = mapGPUTransferBuffer(device.raw, transfer, false)
+  if mapped.isNil:
+    releaseGPUTransferBuffer(device.raw, transfer)
+    raiseSdlError("Failed to map transfer buffer")
+  var source = GPUTextureRegion(
+    texture: cast[ptr GPUTexture](texture.raw),
+    w: width,
+    h: height,
+    d: 1,
+  )
+  var destination = GPUTextureTransferInfo(
+    transfer_buffer: cast[ptr GPUTransferBuffer](transfer),
+    pixels_per_row: width,
+    rows_per_layer: height,
+  )
+  let copyPass = beginGPUCopyPass(cmd.raw)
+  downloadFromGPUTexture(copyPass, addr source, addr destination)
+  endGPUCopyPass(copyPass)
+  TextureDownload(transfer: transfer, mapped: mapped, width: width, height: height)
+
+proc finishDownload*(device: Device, download: TextureDownload): seq[uint8] =
+  ## Copy out bytes staged by stageDownload; the owning command buffer must
+  ## have been submitted and its fence waited on.
+  result.setLen((download.width * download.height * 4).int)
+  copyMem(addr result[0], download.mapped, result.len)
+  unmapGPUTransferBuffer(device.raw, download.transfer)
+  releaseGPUTransferBuffer(device.raw, download.transfer)
 
 proc bindPipeline*(pass: RenderPass, pipeline: Pipeline) =
   bindGPUGraphicsPipeline(pass.raw, pipeline.raw)

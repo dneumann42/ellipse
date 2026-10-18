@@ -124,6 +124,8 @@ test_owl:
 	$(NIM) $(OWL_FLAGS) -r c tests/evaluator_test.nim
 	$(NIM) $(OWL_FLAGS) -r c tests/modules_test.nim
 	$(NIM) $(OWL_FLAGS) -r c tests/errors_test.nim
+	$(NIM) $(OWL_FLAGS) -r c tests/serde_test.nim
+	$(NIM) $(OWL_FLAGS) -r c tests/settings_test.nim
 
 # The repl app. Its window face runs headless (offscreen SDL, scripted
 # frames); its terminal face runs `owl repl` on a pseudo-terminal, keys as

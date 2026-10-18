@@ -114,10 +114,12 @@ proc headSymbol(f: Object): string =
   if itemCount(f) > 0:
     result = toSymbol(headOf(f))
 
-proc isUseForm(f: Object): bool =
+proc isUseForm*(f: Object): bool =
+  ## Whether `f` is a `use name...` line.
   headSymbol(f) == "use" and bodyStart(f) < 0 and itemCount(f) > 1
 
-proc useNames(f: Object): seq[string] =
+proc useNames*(f: Object): seq[string] =
+  ## The modules a `use` line asks for.
   result = @[]
   let it = toSeq(f)
   for i in 1 ..< it.len:
@@ -153,7 +155,9 @@ proc exportNames*(m: Module): seq[string] =
 proc useModule*(env: ref Environment, m: Module) =
   addImport(env, m.exports)
 
-proc useFormsIn(env: ref Environment, forms: seq[Object], lib: Library) =
+proc useFormsIn*(env: ref Environment, forms: seq[Object], lib: Library) =
+  ## Import into `env` every module the `use` lines in `forms` name, as long
+  ## as the library holds it.
   for f in forms:
     if isUseForm(f):
       for name in useNames(f):
@@ -161,7 +165,9 @@ proc useFormsIn(env: ref Environment, forms: seq[Object], lib: Library) =
           if dep.name == name:
             useModule(env, dep)
 
-proc hoistDefinitions(env: ref Environment, forms: seq[Object]) =
+proc hoistDefinitions*(env: ref Environment, forms: seq[Object]) =
+  ## Define every `fun`/`command` in `forms` before anything runs, so a body
+  ## may call a definition that comes later in the file.
   for f in forms:
     if evaluator.isCommandDefinition(f):
       evaluator.makeCommandDefinition(env, f)
