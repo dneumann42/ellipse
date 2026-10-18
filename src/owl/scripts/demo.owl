@@ -1,0 +1,9 @@
+if x:
+| echo "TRUE"
+  echo (+ 1 2 3)    
+| echo "OTHERWISE"   
+if y:
+    echo "Test"
+    do:
+	echo "Test"
+	echo (+ 1 2 3 4)
