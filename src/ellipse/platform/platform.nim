@@ -248,6 +248,15 @@ when withSdl:
     importc: "SDL_GetKeyFromScancode", header: "<SDL3/SDL.h>".}
   proc SDL_DestroyWindow(win: ptr SDL_Window) {.importc: "SDL_DestroyWindow", header: "<SDL3/SDL.h>".}
   proc SDL_DestroyRenderer(ren: ptr SDL_Renderer) {.importc: "SDL_DestroyRenderer", header: "<SDL3/SDL.h>".}
+  type
+    SDL_Surface {.importc: "SDL_Surface", header: "<SDL3/SDL.h>".} = object
+      ## Opaque here: only SDL's calls touch its contents.
+  proc SDL_CreateSurface(w, h: int32; format: uint32): ptr SDL_Surface {.
+    importc: "SDL_CreateSurface", header: "<SDL3/SDL.h>".}
+  proc SDL_DestroySurface(surf: ptr SDL_Surface) {.
+    importc: "SDL_DestroySurface", header: "<SDL3/SDL.h>".}
+  proc SDL_CreateSoftwareRenderer(surf: ptr SDL_Surface): ptr SDL_Renderer {.
+    importc: "SDL_CreateSoftwareRenderer", header: "<SDL3/SDL.h>".}
   proc SDL_PollEvent(event: ptr SDL_Event): bool {.importc: "SDL_PollEvent", header: "<SDL3/SDL.h>".}
   proc SDL_PushEvent(event: ptr SDL_Event): bool {.importc: "SDL_PushEvent", header: "<SDL3/SDL.h>".}
   proc SDL_CreateProperties(): uint32 {.importc: "SDL_CreateProperties", header: "<SDL3/SDL.h>".}
@@ -352,6 +361,9 @@ type
   PlatformApplication* = object
     window: Window
     renderer: Renderer
+    when withSdl:
+      surface: ptr SDL_Surface ## the offscreen picture's backbuffer
+      surfaceWidth, surfaceHeight: int32
     pointer: PointerState
     width, height: float32
     running: bool
@@ -364,11 +376,17 @@ type
     vsync: bool                 ## presents are paced by the display
     visible: bool               ## not hidden / minimized: worth presenting
     docked: bool                ## a wlr-layer-shell surface (see `layershell`)
+    offscreen: bool             ## no window of ours: a host app owns the
+                                ## screen and draws our picture itself (see
+                                ## `initializeOffscreen`)
 
 when withSdl:
   proc `=destroy`(app: var PlatformApplication) =
     `=destroy`(app.renderer)
     `=destroy`(app.window)
+    if not app.surface.isNil:
+      SDL_DestroySurface(app.surface)
+      app.surface = nil
 
 when withSdl:
   {.compile: "sdl_wake.c".}
@@ -400,12 +418,6 @@ proc setCloseHandler*(f: CloseHandler) =
   ## closes at once, the default. Termination signals always close.
   closeHandler = f
 
-proc closeAsked(app: var PlatformApplication) =
-  let h = closeHandler
-  if h == nil or h():
-    app.running = false
-  wake()
-
 var inputDebug = getEnv("ELLIPSE_INPUT_DEBUG") != ""
   ## When set, pumpEvents logs every raw SDL event (type + key fields),
   ## revealing exactly what the platform backend delivers.
@@ -415,6 +427,22 @@ when withSdl:
     ## The live SDL_Renderer handle, for drawing modules (see
     ## `ellipse/platform/renderer`). Only valid inside the main loop.
     activeApp.renderer.raw
+
+var quitSignaled = false
+  ## Set once anything asked the app to close: a quit or window-close event,
+  ## a signal, `quit()`. The host loop reads it through `quitAsked`.
+
+proc quitAsked*(): bool =
+  ## A close was asked for: the host that drives `pumpEvents` from its own
+  ## loop ends itself when this says true.
+  quitSignaled
+
+proc closeAsked(app: var PlatformApplication) =
+  let h = closeHandler
+  if h == nil or h():
+    app.running = false
+    quitSignaled = true
+  wake()
 
 type
   FrameFn* = proc() {.closure.}
@@ -762,6 +790,53 @@ proc initialize*()  =
   ## The default window: 1280x720, resizable.
   initialize(WindowConfig())
 
+when withSdl:
+  const PixelFormatARGB8888 = 0x16362004'u32  ## SDL_PIXELFORMAT_ARGB8888
+
+  proc openOffscreen(app: var PlatformApplication; w, h: int32)  =
+    ## (Re)build the offscreen picture: an ARGB surface with a software
+    ## renderer on it. Nothing about it is visible; the renderer module
+    ## paints commands into it and `readPicture` copies it out.
+    `=destroy`(app.renderer)
+    if not app.surface.isNil:
+      SDL_DestroySurface(app.surface)
+      app.surface = nil
+    app.surface = SDL_CreateSurface(w, h, PixelFormatARGB8888)
+    if app.surface.isNil:
+      raise Failure()
+    app.renderer.raw = SDL_CreateSoftwareRenderer(app.surface)
+    if app.renderer.raw.isNil:
+      raise Failure()
+    app.surfaceWidth = w
+    app.surfaceHeight = h
+
+proc initializeOffscreen*(width, height: int32)  =
+  ## The platform app without a window of its own: SDL stays as the host
+  ## found it, the UI paints into an offscreen surface, and the host pumps
+  ## `pumpEvents` for its widgets and takes the picture through
+  ## `renderer.readPicture` to draw over its own scene. No window, no
+  ## present, no paced loop.
+  activeApp = PlatformApplication()
+  activeApp.running = true
+  activeApp.width = width.float32
+  activeApp.height = height.float32
+  when withSdl:
+    activeApp.offscreen = true
+    openOffscreen(activeApp, width, height)
+
+proc resizeOffscreen*(width, height: int32) =
+  ## Give the offscreen picture the host window's new shape. The renderer
+  ## module rebinds its text engine and repaints in full afterwards; the
+  ## clay context follows `windowPixelSize` on the next input frame.
+  when withSdl:
+    if not activeApp.offscreen or width <= 0 or height <= 0:
+      return
+    if width == activeApp.surfaceWidth and height == activeApp.surfaceHeight:
+      return
+    openOffscreen(activeApp, width, height)
+    activeApp.width = width.float32
+    activeApp.height = height.float32
+
 proc docked*(): bool =
   ## The window is a wlr-layer-shell surface (not the fallback window).
   activeApp.docked
@@ -920,6 +995,10 @@ when withSdl:
     ## Drain SDL's queue into the app state, and tell the pacer which events
     ## need a frame: everything but pointer motion that changes nothing the
     ## UI shows (see `pacing.motionWakes`).
+    if app.keyPending.len > 4096:
+      # A host that pumps but runs no input frame (a scene without UI):
+      # stale keys are worthless -- drop them rather than grow forever.
+      app.keyPending.setLen(0)
     var event = default(SDL_Event)
     while SDL_PollEvent(addr event):
       let kind = cast[ptr SDL_CommonEvent](addr event)[].typ
@@ -933,6 +1012,7 @@ when withSdl:
         runReadyFds()
       elif kind == EventTerminating:
         app.running = false
+        quitSignaled = true
         wake()
       elif kind == EventQuit or kind == EventWindowCloseRequested:
         closeAsked(app)
@@ -1107,6 +1187,7 @@ proc pointerState*(): PointerState =
 proc quit*() =
   ## End the `start` loop at the next iteration -- an app's File > Exit.
   activeApp.running = false
+  quitSignaled = true
 
 proc windowPixelSize*(): tuple[width, height: float32] =
   ## The window's drawable size in renderer pixels, as of the most recent
@@ -1344,6 +1425,14 @@ proc pumpEvents(app: var PlatformApplication) =
   when withSdl:
     pumpSdlEvents(app)
     pumpLayer(app)
+
+proc pumpEvents*() =
+  ## The game loop's seam: drain SDL's queue into the platform app once per
+  ## frame -- pointer, keys, wheel, resizes, close requests -- without the
+  ## `start` loop. Paired with `quitAsked` and, offscreen, the
+  ## `initializeOffscreen` picture; a host that owns window and present
+  ## pumps this instead of polluting the queue with a second reader.
+  pumpEvents(activeApp)
 
 var statsDebug = getEnv("ELLIPSE_FRAME_STATS") != ""
   ## When set, the loop logs once per second what the pacer did: frames,

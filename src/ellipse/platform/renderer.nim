@@ -113,6 +113,8 @@ when withSdl:
     importc: "TTF_OpenFont", header: "<SDL3_ttf/SDL_ttf.h>".}
   proc TTF_CreateRendererTextEngine(ren: ptr SDL_Renderer): ptr TTF_TextEngine {.
     importc: "TTF_CreateRendererTextEngine", header: "<SDL3_ttf/SDL_ttf.h>".}
+  proc TTF_DestroyRendererTextEngine(engine: ptr TTF_TextEngine) {.
+    importc: "TTF_DestroyRendererTextEngine", header: "<SDL3_ttf/SDL_ttf.h>".}
   proc TTF_CreateText(engine: ptr TTF_TextEngine; font: ptr TTF_Font;
                       text: nil cstring; length: int): ptr TTF_Text {.
     importc: "TTF_CreateText", header: "<SDL3_ttf/SDL_ttf.h>".}
@@ -478,10 +480,18 @@ when withSdl:
 proc initializeRenderer*()  =
   ## Prepare fonts + text engine on the platform's renderer. Call after
   ## `platform.initialize()` and before the first frame. Nothing to do in
-  ## a build without SDL.
+  ## a build without SDL. Re-running rebinds to the live renderer: the
+  ## engine's cached texts belong to the old one and go with it (see
+  ## `resizeOffscreen`).
   when withSdl:
     if not TTF_Init():
       raise Failure()
+    if not textEngine.isNil:
+      TTF_DestroyRendererTextEngine(textEngine)
+      for _, cached in texts:
+        if cached.text != nil:
+          TTF_DestroyText(cached.text)
+      texts.clear()
     textEngine = TTF_CreateRendererTextEngine(sdlRenderer())
     if textEngine == nil:
       raise Failure()
@@ -669,6 +679,62 @@ proc invalidateFrame*() =
   ## Forget the retained picture: the next `drawCommands` repaints it all.
   lastValid = false
   termValid = false
+
+proc bootupOffscreen*(width, height: int32)  =
+  ## The windowless bootup, for a host that owns its own window and present
+  ## path (see `platform.initializeOffscreen`): the UI paints commands into
+  ## an offscreen surface, `drawCommands` works unchanged, and the host
+  ## copies the picture out with `readPicture` each frame something
+  ## painted. The clear colour starts fully transparent: whatever the
+  ## widgets leave unpainted stays the host's scene underneath.
+  when withSdl:
+    initializeOffscreen(width, height)
+    clearColor = rgb(0, 0, 0, 0)
+    bootContext(width.float32, height.float32)
+
+proc resizeOffscreen*(width, height: int32) =
+  ## After the host's window changes shape: new surface, new text engine
+  ## bound to it, and a full repaint demanded so the next `readPicture`
+  ## sees nothing stale.
+  when withSdl:
+    platform.resizeOffscreen(width, height)
+    initializeRenderer()
+    dropRetained()
+    invalidateFrame()
+    requestFullRedraw()
+
+proc readPicture*(bytes: var seq[uint8]): tuple[width, height: int32] =
+  ## Copy the offscreen picture into `bytes`: ARGB8888 (memory B, G, R, A;
+  ## alpha as blended -- effectively premultiplied over a transparent
+  ## clear), row 0 the window's top. Returns the size, 0x0 when the read
+  ## failed. Call after `drawCommands` when `contentPainted` says true;
+  ## upload it with `gpu.uploadPicture` and blend with premultiplied
+  ## factors (`gpu.PipelineDesc.premultiplied`).
+  result = (0'i32, 0'i32)
+  when withSdl:
+    let ren = sdlRenderer()
+    if ren == nil:
+      return
+    let surf = SDL_RenderReadPixels(ren, nil)
+    if surf == nil:
+      return
+    let
+      w = surf[].w
+      h = surf[].h
+    if w <= 0 or h <= 0:
+      SDL_DestroySurface(surf)
+      return
+    result = (w, h)
+    bytes.setLen(w * h * 4)
+    let
+      src = cast[uint](surf[].pixels)
+      dst = cast[uint](addr bytes[0])
+    var y = 0'i32
+    while y < h:
+      copyMem(cast[pointer](dst + uint(y) * uint(w * 4)),
+              cast[pointer](src + uint(y) * uint(surf[].pitch)), w * 4)
+      inc y
+    SDL_DestroySurface(surf)
 
 proc frameSignatures(cmds: seq[RenderCommand]): seq[CmdSig] =
   var b = SigBuilder()

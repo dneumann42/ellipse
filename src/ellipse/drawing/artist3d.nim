@@ -30,6 +30,9 @@ type
     view: Mat4
     projection: Mat4
     fovY, near, far: float32
+    fovTan: float32 ## tan(fovY / 2) of the projection last built: the
+    ## occlusion pass scales its metre-wide reach by it, so it walks the
+    ## same frustum the frame was drawn through -- the letterboxed one.
     perspective: bool
     referenceAspect: float32
     model: Mat4
@@ -51,7 +54,13 @@ type
     snapshotTarget: gpu.Texture
     snapshotWidth, snapshotHeight: uint32
     snapshotDownload: TextureDownload
-
+    overlayPipeline: Pipeline
+    overlaySampler: Sampler
+    overlayTexture: gpu.Texture
+    overlayWidth, overlayHeight: uint32
+    overlayTextureWidth, overlayTextureHeight: uint32
+    overlayBytes: seq[uint8]
+    overlayValid: bool ## a picture is staged; `overlayBytes` holds it
 func uniformState(a: Artist3D, model, viewProj: Mat4): Uniforms =
   Uniforms(
     model: model,
@@ -70,12 +79,16 @@ func nearFar(a: Artist3D): tuple[near, far: float32] =
 const
   vertexSpv = staticRead("shaders/spv/mesh.vert.spv")
   fragmentSpv = staticRead("shaders/spv/mesh.frag.spv")
+  fullscreenVertSpv = staticRead("shaders/spv/fullscreen.vert.spv")
+  overlayFragSpv = staticRead("shaders/spv/overlay.frag.spv")
 
 proc newArtist*(app: App): Artist3D =
   let device = app.gpuDevice
   let
     vertexShader = newShader(device, vertexSpv.toOpenArrayByte(0, vertexSpv.high), VertexShader, numUniformBuffers = 1)
     fragmentShader = newShader(device, fragmentSpv.toOpenArrayByte(0, fragmentSpv.high), FragmentShader)
+    fullscreenVertex = newShader(device, fullscreenVertSpv.toOpenArrayByte(0, fullscreenVertSpv.high), VertexShader)
+    overlayFragment = newShader(device, overlayFragSpv.toOpenArrayByte(0, overlayFragSpv.high), FragmentShader, numSamplers = 1)
     pipeline = newPipeline(device, PipelineDesc(
       vertex: vertexShader,
       fragment: fragmentShader,
@@ -85,7 +98,7 @@ proc newArtist*(app: App): Artist3D =
       depthFormat: Depth32,
       blend: true,
     ))
-  Artist3D(
+  result = Artist3D(
     device: device,
     pipeline: pipeline,
     vertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
@@ -102,6 +115,15 @@ proc newArtist*(app: App): Artist3D =
     colorFormat: app.gpuSwapchainFormat(),
     current: Vertex(normal: vec3(0, 0, 1), color: vec4(1, 1, 1, 1), uv: vec2(0, 0)),
     post: newSsaoPass(device, vertexShader, app.gpuSwapchainFormat()),
+    overlayPipeline: newPipeline(device, PipelineDesc(
+      vertex: fullscreenVertex,
+      fragment: overlayFragment,
+      colorFormat: app.gpuSwapchainFormat(),
+      hasDepth: false,
+      blend: true,
+      premultiplied: true,
+    )),
+    overlaySampler: newSampler(device),
   )
 
 proc reset*(a: Artist3D) =
@@ -120,11 +142,24 @@ proc setView*(a: Artist3D, eye, target, up: Vec3) =
 
 proc setPerspective*(a: Artist3D, fovY, near, far: float32) =
   # The real aspect is only known at present time (swapchain size), so the
-  # projection is rebuilt per frame in present().
+  # projection is rebuilt per frame in present(). Seed it now from the
+  # letterbox reference, so viewProjection() answers with a sane frustum
+  # even before the first present has measured the window.
   a.fovY = fovY
   a.near = near
   a.far = far
   a.perspective = true
+  a.fovTan = tan(fovY / 2.0f)
+  if a.referenceAspect > 0:
+    a.projection = perspectiveMatrix(fovY, a.referenceAspect, near, far)
+
+proc viewProjection*(a: Artist3D): Mat4 =
+  ## The matrix the queued batches will be drawn with: the projection last
+  ## present() built for the real window, times the view set for this frame.
+  ## Anything culling against the view frustum uses this and only this --
+  ## a look-alike projection assembled elsewhere drifts from what the GPU
+  ## actually shows, and culls what the screen was about to draw.
+  a.projection * a.view
 
 proc setLetterbox*(a: Artist3D, referenceAspect: float32) =
   ## Letterbox fit without black bars: the region matching `referenceAspect`
@@ -355,6 +390,7 @@ proc refreshProjection(a: Artist3D, frame: GpuFrame) =
       else:
         1.0f
   let fovY = 2.0f * arctan(tan(a.fovY / 2.0f) * scale)
+  a.fovTan = tan(fovY / 2.0f) # the reach the occlusion pass walks by
   a.projection = perspectiveMatrix(fovY, aspect, a.near, a.far)
   let viewProj = a.projection * a.view
   for batch in a.batches.mitems:
@@ -381,8 +417,47 @@ proc presentSsao(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
   a.drawBatches(frame.cmd, depthPass, a.post.depthPipeline,
     a.post.newDepthUniformPusher(frame.cmd, near, far))
   depthPass.endRender()
-  a.post.runOcclusion(frame.cmd, a.ssao, near, far)
+  a.post.runOcclusion(frame.cmd, a.ssao, near, far, a.fovTan)
   a.post.runComposite(frame.cmd, frame.target)
+
+proc setOverlayPicture*(a: Artist3D, width, height: int,
+                        pixels: openArray[uint8]) =
+  ## Stage the premultiplied BGRA8 picture `present` blends over every
+  ## frame -- row 0 at the window's top: the seam the offscreen UI paints
+  ## through. The bytes are copied; the picture rides until
+  ## `clearOverlayPicture` or the next stage.
+  if width <= 0 or height <= 0 or pixels.len < width * height * 4:
+    return
+  a.overlayBytes.setLen(width * height * 4)
+  copyMem(addr a.overlayBytes[0], unsafeAddr pixels[0], a.overlayBytes.len)
+  a.overlayWidth = width.uint32
+  a.overlayHeight = height.uint32
+  a.overlayValid = true
+
+proc clearOverlayPicture*(a: Artist3D) =
+  ## Stop drawing the staged picture; the next present shows only the scene.
+  a.overlayValid = false
+
+proc presentOverlay(a: Artist3D, cmd: CommandBuffer, target: gpu.Texture) =
+  ## One fullscreen pass over the finished frame: upload the staged picture
+  ## and blend it with premultiplied alpha.
+  if a.overlayTexture.isNil or a.overlayTextureWidth != a.overlayWidth or
+      a.overlayTextureHeight != a.overlayHeight:
+    if not a.overlayTexture.isNil:
+      a.device.retire(a.overlayTexture)
+    a.overlayTexture = newPictureTexture(a.device, a.overlayWidth,
+      a.overlayHeight, Rgba8)
+    a.overlayTextureWidth = a.overlayWidth
+    a.overlayTextureHeight = a.overlayHeight
+  cmd.uploadPicture(a.overlayTexture, addr a.overlayBytes[0],
+    a.overlayWidth, a.overlayHeight)
+  let pass = cmd.beginOverlay(target)
+  pass.bindPipeline(a.overlayPipeline)
+  pass.bindFragmentSamplers([
+    (texture: a.overlayTexture, sampler: a.overlaySampler),
+  ])
+  pass.drawPrimitive(3)
+  pass.endRender()
 
 proc snapshot*(a: Artist3D, path: string) =
   ## Save the frame being built to `path` as a PNG once present() draws it.
@@ -392,7 +467,10 @@ proc snapshot*(a: Artist3D, path: string) =
 proc snapshotScene(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
   ## Re-renders the queued batches into an offscreen target and records a
   ## CPU readback in the same command buffer; bytes become readable after
-  ## the frame is submitted and its fence waited on.
+  ## the frame is submitted and its fence waited on. With the post chain
+  ## active (SSAO), the whole present sequence is replayed onto the
+  ## snapshot target -- composite and UI overlay included -- so the file
+  ## shows what the window shows, in the window's orientation.
   if a.snapshotTarget.isNil or a.snapshotWidth != frame.width or a.snapshotHeight != frame.height:
     if not a.snapshotTarget.isNil:
       a.device.retire(a.snapshotTarget)
@@ -400,9 +478,24 @@ proc snapshotScene(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
     a.snapshotWidth = frame.width
     a.snapshotHeight = frame.height
   let depth = a.device.depthTarget(frame.width, frame.height)
-  let pass = frame.cmd.beginRender(a.snapshotTarget, clearColor, depth)
-  a.drawBatches(frame.cmd, pass, a.pipeline)
-  pass.endRender()
+  if a.ssao.enabled:
+    a.post.ensureSize(frame.width, frame.height)
+    let (near, far) = a.nearFar()
+    let scene = a.post.beginScene(frame.cmd, clearColor, depth)
+    a.drawBatches(frame.cmd, scene, a.pipeline)
+    scene.endRender()
+    let depthPass = a.post.beginDepth(frame.cmd, depth)
+    a.drawBatches(frame.cmd, depthPass, a.post.depthPipeline,
+      a.post.newDepthUniformPusher(frame.cmd, near, far))
+    depthPass.endRender()
+    a.post.runOcclusion(frame.cmd, a.ssao, near, far, a.fovTan)
+    a.post.runComposite(frame.cmd, a.snapshotTarget)
+  else:
+    let pass = frame.cmd.beginRender(a.snapshotTarget, clearColor, depth)
+    a.drawBatches(frame.cmd, pass, a.pipeline)
+    pass.endRender()
+  if a.overlayValid:
+    a.presentOverlay(frame.cmd, a.snapshotTarget)
   a.snapshotDownload = frame.cmd.stageDownload(a.snapshotTarget, frame.width, frame.height)
 
 proc saveSnapshot(a: Artist3D, path: string, width, height: uint32) =
@@ -433,6 +526,9 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
         a.snapshotScene(frame, clearColor)
     else:
       frame.beginRender(clearColor)
+      frame.pass.endRender()
+    if a.overlayValid:
+      a.presentOverlay(frame.cmd, frame.target)
   frame.endFrame()
   a.reset()
   if frame.valid and not a.snapshotDownload.isNil:

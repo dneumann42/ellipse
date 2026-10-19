@@ -97,9 +97,26 @@ proc initialize*() =
 proc deinitialize*() =
   sdl3_ttf.quit()
   sdl3.quit()
+
+import ./platform except Window, Renderer
+
+proc pixelSize*(app: App): tuple[width, height: int] =
+  ## The window's drawable size in device pixels -- the shape an offscreen
+  ## UI picture must match to cover it exactly. Falls back to the logical
+  ## size before the window has one.
+  var w, h: cint
+  if getWindowSizeInPixels(app.window, w, h) and w > 0 and h > 0:
+    (w.int, h.int)
+  else:
+    (app.width, app.height)
+
 proc processEvents*(running: var bool): void =
-  var sdlEvent: sdl3.Event
-  while pollEvent(sdlEvent):
-    if sdlEvent.`type` == EVENT_QUIT:
-      running = false
-      return
+  ## Drain SDL's event queue once through the UI platform (see
+  ## `ellipse/platform/platform`): widgets need the pointer, keys, wheel
+  ## and close requests, and the polled keyboard state the game reads is
+  ## refreshed by the same pump. SDL's queue has exactly one consumer --
+  ## pumping it here would starve the other -- so this loop only turns
+  ## the quit signal into `running = false`.
+  platform.pumpEvents()
+  if platform.quitAsked():
+    running = false

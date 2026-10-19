@@ -33,7 +33,12 @@ const
   # Packed depth just below the far plane: background never occludes.
   farClear: ClearColor = (0.75, 0.996, 0.996, 0.996)
 
-func newSsaoOptions*(radius = 3.2'f32, strength = 1.15'f32, bias = 0.012'f32): SsaoOptions =
+func newSsaoOptions*(radius = 1.2'f32, strength = 0.8'f32, bias = 0.02'f32): SsaoOptions =
+  ## `radius` is how far through the world a surface may reach to shade a
+  ## neighbour: metres, so a corner reads as a corner whether the eye is a
+  ## hand's width from it or a hill away. `strength` is how deep that shade
+  ## goes, and `bias` the height a sample must clear the surface's plane
+  ## before it counts -- enough to let flat ground pass for open sky.
   SsaoOptions(enabled: true, radius: radius, strength: strength, bias: bias)
 
 proc newSsaoPass*(
@@ -99,13 +104,17 @@ func newDepthUniformPusher*(p: SsaoPass, cmd: CommandBuffer, near, far: float32)
   let uniforms = DepthUniforms(nearFar: [near, far, 0.0f, 0.0f])
   proc () = cmd.pushFragmentUniforms(0, uniforms)
 
-proc runOcclusion*(p: SsaoPass, cmd: CommandBuffer, options: SsaoOptions, near, far: float32) =
+proc runOcclusion*(p: SsaoPass, cmd: CommandBuffer, options: SsaoOptions,
+    near, far, tanHalfFovY: float32) =
+  ## `tanHalfFovY` is the tangent of the perspective frustum's half-angle:
+  ## the one number the pass needs to turn a reach in metres into the stride
+  ## in screen space it walks at this depth.
   let pass = cmd.beginRender(p.occlusion, (1.0f, 1.0f, 1.0f, 1.0f))
   pass.bindPipeline(p.occlusionPipeline)
   pass.bindFragmentSamplers([(texture: p.depthData, sampler: p.sampler)])
   cmd.pushFragmentUniforms(0, SsaoUniforms(
     resolutionRadius: [p.width.float32, p.height.float32, options.radius, 0.0f],
-    projection: [near, far, 0.0f, 0.0f],
+    projection: [near, far, tanHalfFovY, 0.0f],
     strengthBias: [options.strength, options.bias, 0.0f, 0.0f],
   ))
   pass.drawPrimitive(3)

@@ -1,0 +1,10 @@
+;; Object Ellipse
+;; EDE Project Files are auto generated: Do Not Edit
+(ede-proj-project "Ellipse"
+  :file "Project.ede"
+  :name "Ellipse"
+  :targets nil
+  :configurations '("debug" "release")
+  :object-name "Ellipse"
+  :makefile-type Makefile
+  :configuration-variables '("debug" (("DEBUG" . "1"))))

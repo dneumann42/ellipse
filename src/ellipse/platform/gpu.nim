@@ -41,6 +41,8 @@ type
     depthWidth, depthHeight: uint32
     freeTextures: seq[Texture]
     freeBuffers: seq[GPUBuffer]
+    pictureTransfer: GPUTransferBuffer ## one upload transfer, grown as
+    pictureTransferSize: uint32        ## the UI pictures need it
 
   ShaderObj* = object
     device: Device
@@ -107,6 +109,8 @@ type
     depthFormat*: TextureFormat
     hasDepth*: bool = true
     blend*: bool = false
+    premultiplied*: bool = false ## blended sources carry their alpha already:
+    ## `ONE` on the source side instead of `SRC_ALPHA` (see `newPipeline`)
     cull*: CullMode = NoCulling
     depthWrite*: bool = true
 
@@ -285,6 +289,65 @@ proc newColorTexture*(device: Device, width, height: uint32, format: TextureForm
     raiseSdlError("Failed to create color texture")
   Texture(device: device, raw: raw, owned: true)
 
+proc newPictureTexture*(device: Device, width, height: uint32, format: TextureFormat): Texture =
+  ## A texture a CPU picture is uploaded into and sampled from: no color
+  ## target usage, so the format only has to be sampleable (see
+  ## `uploadPicture`).
+  var info = GPUTextureCreateInfo(
+    `type`: GPU_TEXTURETYPE_2D,
+    format: GPUTextureFormat(format.int32),
+    usage: uint32(GPU_TEXTUREUSAGE_SAMPLER),
+    width: width,
+    height: height,
+    layer_count_or_depth: 1,
+    num_levels: 1,
+    sample_count: GPU_SAMPLECOUNT_1,
+  )
+  let raw = createGPUTexture(device.raw, addr info)
+  if raw.isNil:
+    raiseSdlError("Failed to create picture texture")
+  Texture(device: device, raw: raw, owned: true)
+
+proc pictureTransfer(device: Device, capacity: uint32): GPUTransferBuffer =
+  if device.pictureTransfer.isNil or device.pictureTransferSize < capacity:
+    if not device.pictureTransfer.isNil:
+      releaseGPUTransferBuffer(device.raw, device.pictureTransfer)
+    var info = GPUTransferBufferCreateInfo(
+      usage: GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+      size: capacity,
+    )
+    device.pictureTransfer = createGPUTransferBuffer(device.raw, addr info)
+    device.pictureTransferSize = capacity
+    if device.pictureTransfer.isNil:
+      raiseSdlError("Failed to create picture transfer buffer")
+  device.pictureTransfer
+
+proc uploadPicture*(cmd: CommandBuffer, texture: Texture, data: pointer,
+                    width, height: uint32) =
+  ## Copy `width` x `height` RGBA8 pixels from CPU memory into a picture
+  ## texture: map, memcpy, `SDL_UploadToGPUTexture`, all recorded on `cmd`.
+  let size = width * height * 4
+  let transfer = pictureTransfer(cmd.device, size)
+  let mapped = mapGPUTransferBuffer(cmd.device.raw, transfer, true)
+  if mapped.isNil:
+    raiseSdlError("Failed to map picture transfer buffer")
+  copyMem(mapped, data, size.int)
+  unmapGPUTransferBuffer(cmd.device.raw, transfer)
+  var source = GPUTextureTransferInfo(
+    transfer_buffer: cast[ptr GPUTransferBuffer](transfer),
+    pixels_per_row: width,
+    rows_per_layer: height,
+  )
+  var destination = GPUTextureRegion(
+    texture: cast[ptr GPUTexture](texture.raw),
+    w: width,
+    h: height,
+    d: 1,
+  )
+  let copyPass = beginGPUCopyPass(cmd.raw)
+  uploadToGPUTexture(copyPass, addr source, addr destination, false)
+  endGPUCopyPass(copyPass)
+
 proc newSampler*(device: Device): Sampler =
   var info = GPUSamplerCreateInfo(
     min_filter: GPU_FILTER_LINEAR,
@@ -331,6 +394,19 @@ proc beginRender*(cmd: CommandBuffer, target: Texture, clearColor: ClearColor): 
   let raw = beginGPURenderPass(cmd.raw, addr colorInfo, 1, nil)
   if raw.isNil:
     raiseSdlError("Failed to begin render pass")
+  RenderPass(cmd: cmd, raw: raw)
+
+proc beginOverlay*(cmd: CommandBuffer, target: Texture): RenderPass =
+  ## A pass that draws on top of what `target` already shows: color LOAD,
+  ## no clear, no depth -- the seam for a fullscreen UI overlay.
+  var colorInfo = GPUColorTargetInfo(
+    texture: cast[ptr GPUTexture](target.raw),
+    load_op: GPU_LOADOP_LOAD,
+    store_op: GPU_STOREOP_STORE,
+  )
+  let raw = beginGPURenderPass(cmd.raw, addr colorInfo, 1, nil)
+  if raw.isNil:
+    raiseSdlError("Failed to begin overlay pass")
   RenderPass(cmd: cmd, raw: raw)
 
 proc endRender*(pass: RenderPass) =
@@ -382,10 +458,14 @@ proc newPipeline*(device: Device, desc: PipelineDesc): Pipeline =
   var colorTarget = GPUColorTargetDescription(
     format: GPUTextureFormat(desc.colorFormat.int32),
     blend_state: GPUColorTargetBlendState(
-      src_color_blendfactor: GPU_BLENDFACTOR_SRC_ALPHA,
+      src_color_blendfactor:
+        if desc.premultiplied: GPU_BLENDFACTOR_ONE
+        else: GPU_BLENDFACTOR_SRC_ALPHA,
       dst_color_blendfactor: GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
       color_blend_op: GPU_BLENDOP_ADD,
-      src_alpha_blendfactor: GPU_BLENDFACTOR_SRC_ALPHA,
+      src_alpha_blendfactor:
+        if desc.premultiplied: GPU_BLENDFACTOR_ONE
+        else: GPU_BLENDFACTOR_SRC_ALPHA,
       dst_alpha_blendfactor: GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
       alpha_blend_op: GPU_BLENDOP_ADD,
       enable_blend: desc.blend,
