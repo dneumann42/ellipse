@@ -107,6 +107,8 @@ when withSdl:
     importc: "SDL_SetTextureScaleMode", header: "<SDL3/SDL.h>".}
   proc SDL_GetRenderOutputSize(ren: ptr SDL_Renderer; w, h: ptr int32): bool {.
     importc: "SDL_GetRenderOutputSize", header: "<SDL3/SDL.h>".}
+  proc SDL_FlushRenderer(ren: ptr SDL_Renderer): bool {.
+    importc: "SDL_FlushRenderer", header: "<SDL3/SDL.h>".}
 
   proc TTF_Init(): bool {.importc: "TTF_Init", header: "<SDL3_ttf/SDL_ttf.h>".}
   proc TTF_OpenFont(file: cstring; ptsize: float32): ptr TTF_Font {.
@@ -190,6 +192,8 @@ when withSdl:
     texts: Table[TextKey, CachedText]
     textEngine: ptr TTF_TextEngine
     clipStack: seq[SDL_Rect] = @[]
+    cullBox: Rect             ## where painting can land now: the SDL clip
+    culling = false           ## ... when one is set
     paintSerial = 0'i64
     lastEvict = 0'i64
 
@@ -241,10 +245,24 @@ when withSdl:
   proc setColor(ren: ptr SDL_Renderer; col: Color) =
     discard SDL_SetRenderDrawColor(ren, col.r.toU8, col.g.toU8, col.b.toU8, col.a.toU8)
 
+  proc storeOpaque(ren: ptr SDL_Renderer; col: Color): bool =
+    ## An opaque fill needs no blend: switch to a straight store, which the
+    ## software renderer fills many times faster than its per-pixel blend.
+    ## True when it did -- `blendAgain` puts the blend back.
+    if col.a >= 255.0:
+      discard SDL_SetRenderDrawBlendMode(ren, BlendModeNone)
+      return true
+
+  proc blendAgain(ren: ptr SDL_Renderer) =
+    discard SDL_SetRenderDrawBlendMode(ren, BlendModeBlend)
+
   proc fillRect(ren: ptr SDL_Renderer; r: Rect; col: Color) =
     var fr = SDL_FRect(x: r.x, y: r.y, w: r.width, h: r.height)
     setColor(ren, col)
+    let stored = storeOpaque(ren, col)
     discard SDL_RenderFillRect(ren, addr fr)
+    if stored:
+      blendAgain(ren)
 
   ## --- rounded-rectangle geometry -------------------------------------------------
   ##
@@ -384,26 +402,107 @@ when withSdl:
     addBand(verts, base, mid, col, BandInner)
     addBand(verts, mid, far, col, BandOuter)
 
-  proc fillRounded(ren: ptr SDL_Renderer; r: Rect; corner: CornerRadius; col: Color) =
-    ## Rounded rectangle as a center fan (the clamped shape is convex) plus two
-    ## outward smoothing bands.
-    let c = clampCorners(r, corner)
-    let seg = arcSegments(cornerSize(c))
-    let pts = roundedContour(r, c, seg)
-    let vc = SDL_FColor(r: col.r / 255.0, g: col.g / 255.0, b: col.b / 255.0,
-                        a: col.a / 255.0)
-    let center = SDL_FPoint(x: r.x + r.width / 2.0, y: r.y + r.height / 2.0)
-    var verts: seq[SDL_Vertex] = @[]
+  proc addSector(verts: var seq[SDL_Vertex]; cx, cy, rad, startAngle: float32;
+                 seg: int; vc: SDL_FColor) =
+    ## A quarter disc around `(cx, cy)` as a fan from its centre: one rounded
+    ## corner's inside, its triangles no larger than the corner.
+    if rad <= 0.0:
+      return
+    var pts: seq[SDL_FPoint] = @[]
+    addArc(pts, cx, cy, rad, startAngle, QuarterTurn / float32(seg), seg)
+    let centre = SDL_FPoint(x: cx, y: cy)
     var i = 0
-    while i < pts.len:
-      let j = (i + 1) mod pts.len
-      verts.add(SDL_Vertex(position: center, color: vc, tex_coord: SDL_FPoint()))
+    while i + 1 < pts.len:
+      verts.add(SDL_Vertex(position: centre, color: vc, tex_coord: SDL_FPoint()))
       verts.add(SDL_Vertex(position: pts[i], color: vc, tex_coord: SDL_FPoint()))
-      verts.add(SDL_Vertex(position: pts[j], color: vc, tex_coord: SDL_FPoint()))
+      verts.add(SDL_Vertex(position: pts[i + 1], color: vc, tex_coord: SDL_FPoint()))
       inc i
-    addFeathering(verts, r, c, seg, col, inside = false)
+
+  proc submitGeometry(ren: ptr SDL_Renderer; verts: var seq[SDL_Vertex]) =
+    ## Hand a shape's triangles to SDL, less those wholly outside the clip:
+    ## a damaged sliver of a large rounded box needs only the few that
+    ## reach it, and SDL's software path costs per triangle even when it
+    ## clips one away. Triangles that can touch the clip go unchanged, so
+    ## the pixels are the same either way.
+    if culling:
+      let
+        cx0 = cullBox.x - 1.0
+        cy0 = cullBox.y - 1.0
+        cx1 = cullBox.x + cullBox.width + 1.0
+        cy1 = cullBox.y + cullBox.height + 1.0
+      var kept = 0
+      var t = 0
+      while t + 2 < verts.len:
+        let a = verts[t].position
+        let b = verts[t + 1].position
+        let c = verts[t + 2].position
+        if max(a.x, max(b.x, c.x)) >= cx0 and min(a.x, min(b.x, c.x)) <= cx1 and
+            max(a.y, max(b.y, c.y)) >= cy0 and min(a.y, min(b.y, c.y)) <= cy1:
+          if kept != t:
+            verts[kept] = verts[t]
+            verts[kept + 1] = verts[t + 1]
+            verts[kept + 2] = verts[t + 2]
+          kept += 3
+        t += 3
+      verts.setLen(kept)
     if verts.len > 0:
       discard SDL_RenderGeometry(ren, nil, addr verts[0], int32(verts.len), nil, 0)
+
+  proc outsideCull(r: Rect): bool =
+    ## `r`, with its smoothing bands, lands nowhere the clip lets through.
+    culling and not overlaps(rect(r.x - 2.0, r.y - 2.0, r.width + 4.0,
+                                  r.height + 4.0), cullBox)
+
+  proc fillSpan(ren: ptr SDL_Renderer; x0, y0, x1, y1: float32) =
+    ## A plain rectangle in the draw colour already set; empty spans skip.
+    if x1 > x0 and y1 > y0:
+      var fr = SDL_FRect(x: x0, y: y0, w: x1 - x0, h: y1 - y0)
+      discard SDL_RenderFillRect(ren, addr fr)
+
+  proc fillRounded(ren: ptr SDL_Renderer; r: Rect; corner: CornerRadius; col: Color) =
+    ## Rounded rectangle on whole pixels: every straight-sided part -- the
+    ## middle band and the runs between corners -- is a plain rectangle fill,
+    ## only the four corner sectors are triangles, plus two outward smoothing
+    ## bands. The software rasterizer walks each triangle's bounding box, so
+    ## a fan from the middle would cost it the box's area once per chord.
+    let x0 = round(r.x)
+    let y0 = round(r.y)
+    let x1 = round(r.x + r.width)
+    let y1 = round(r.y + r.height)
+    if x1 <= x0 or y1 <= y0 or outsideCull(r):
+      return
+    let box = Rect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+    var c = clampCorners(box, corner)
+    c = CornerRadius(topLeft: floor(c.topLeft), topRight: floor(c.topRight),
+                     bottomLeft: floor(c.bottomLeft),
+                     bottomRight: floor(c.bottomRight))
+    let seg = arcSegments(cornerSize(c))
+    let top = max(c.topLeft, c.topRight)
+    let bottom = max(c.bottomLeft, c.bottomRight)
+    setColor(ren, col)
+    let stored = storeOpaque(ren, col)
+    fillSpan(ren, x0, y0 + top, x1, y1 - bottom)
+    fillSpan(ren, x0 + c.topLeft, y0, x1 - c.topRight, y0 + top)
+    fillSpan(ren, x0, y0 + c.topLeft, x0 + c.topLeft, y0 + top)
+    fillSpan(ren, x1 - c.topRight, y0 + c.topRight, x1, y0 + top)
+    fillSpan(ren, x0 + c.bottomLeft, y1 - bottom, x1 - c.bottomRight, y1)
+    fillSpan(ren, x0, y1 - bottom, x0 + c.bottomLeft, y1 - c.bottomLeft)
+    fillSpan(ren, x1 - c.bottomRight, y1 - bottom, x1, y1 - c.bottomRight)
+    if stored:
+      blendAgain(ren)
+    let vc = SDL_FColor(r: col.r / 255.0, g: col.g / 255.0, b: col.b / 255.0,
+                        a: col.a / 255.0)
+    var verts: seq[SDL_Vertex] = @[]
+    addSector(verts, x0 + c.topLeft, y0 + c.topLeft, c.topLeft,
+              2.0'f32 * QuarterTurn, seg, vc)
+    addSector(verts, x1 - c.topRight, y0 + c.topRight, c.topRight,
+              3.0'f32 * QuarterTurn, seg, vc)
+    addSector(verts, x1 - c.bottomRight, y1 - c.bottomRight, c.bottomRight,
+              4.0'f32 * QuarterTurn, seg, vc)
+    addSector(verts, x0 + c.bottomLeft, y1 - c.bottomLeft, c.bottomLeft,
+              5.0'f32 * QuarterTurn, seg, vc)
+    addFeathering(verts, box, c, seg, col, inside = false)
+    submitGeometry(ren, verts)
 
   proc strokeRounded(ren: ptr SDL_Renderer; r: Rect; bw: BorderWidth;
                      corner: CornerRadius; col: Color) =
@@ -411,6 +510,8 @@ when withSdl:
     ## its inner offset -- the per-side border widths inset the inner edge, and
     ## each inner corner keeps `outerRadius - adjacentBorderWidth` so the band
     ## stays visually uniform through the curve. Smoothing bands hug both edges.
+    if outsideCull(r):
+      return
     let c = clampCorners(r, corner)
     let l = float32(bw.left)
     let t = float32(bw.top)
@@ -434,8 +535,7 @@ when withSdl:
     addFeathering(verts, r, c, seg, col, inside = false)
     if iw >= 2.0 and ih >= 2.0:
       addFeathering(verts, inner, ci, seg, col, inside = true)
-    if verts.len > 0:
-      discard SDL_RenderGeometry(ren, nil, addr verts[0], int32(verts.len), nil, 0)
+    submitGeometry(ren, verts)
 
   proc fillStrip(ren: ptr SDL_Renderer; x, y, w, h: float32; col: Color) =
     if w <= 0.0 or h <= 0.0:
@@ -575,11 +675,16 @@ when withSdl:
         if cr.w <= 0 or cr.h <= 0:
           cr = SDL_Rect(x: 0, y: 0, w: 0, h: 0)
       discard SDL_SetRenderClipRect(ren, addr cr)
+      cullBox = toRect(cr)
+      culling = true
     elif limited:
       var cr = toSdlRect(area)
       discard SDL_SetRenderClipRect(ren, addr cr)
+      cullBox = toRect(cr)
+      culling = true
     else:
       discard SDL_SetRenderClipRect(ren, nil)
+      culling = false
 
   proc paintCommands(cmds: seq[RenderCommand]; area: Rect; limited: bool) =
     ## Paint `cmds` in order. `limited`: only into `area` -- commands entirely
@@ -638,6 +743,7 @@ when withSdl:
       of renderImage, renderCustom, renderOverlayStart, renderOverlayEnd:
         discard   # not produced by the built-in UI (yet)
     discard SDL_SetRenderClipRect(ren, nil)
+    culling = false
     evictTexts()
 
 ## --- retained frame ------------------------------------------------------------
@@ -756,6 +862,31 @@ proc frameSignatures(cmds: seq[RenderCommand]): seq[CmdSig] =
     b.add(cmd, if cmd.kind == renderText: lineText(cmd) else: "")
   result = b.sigs
 
+type
+  PixelArea* = object
+    ## A whole-pixel rectangle of the picture: `x0 ..< x1` by `y0 ..< y1`.
+    x0*, y0*, x1*, y1*: int32
+
+proc isEmpty*(a: PixelArea): bool = a.x1 <= a.x0 or a.y1 <= a.y0
+
+proc merge*(a, b: PixelArea): PixelArea =
+  ## The smallest area holding both; an empty side adds nothing.
+  if a.isEmpty: return b
+  if b.isEmpty: return a
+  PixelArea(x0: min(a.x0, b.x0), y0: min(a.y0, b.y0),
+            x1: max(a.x1, b.x1), y1: max(a.y1, b.y1))
+
+var paintedArea: PixelArea
+  ## What the last `drawCommands` repainted, for `readPainted`.
+
+proc notePainted(r: Rect; w, h: int32) =
+  ## Widen `painted` by `r`, out to whole pixels and in to the picture.
+  paintedArea = paintedArea.merge(PixelArea(
+    x0: clamp(int32(floor(r.x)), 0'i32, w),
+    y0: clamp(int32(floor(r.y)), 0'i32, h),
+    x1: clamp(int32(ceil(r.x + r.width)), 0'i32, w),
+    y1: clamp(int32(ceil(r.y + r.height)), 0'i32, h)))
+
 when withSdl:
   proc paintDirect(cmds: seq[RenderCommand]; w, h: int32) =
     let ren = sdlRenderer()
@@ -763,6 +894,45 @@ when withSdl:
     discard SDL_RenderClear(ren)
     paintCommands(cmds, rect(0, 0, float32(w), float32(h)), false)
     noteDamage(int64(w) * int64(h))
+    notePainted(rect(0, 0, float32(w), float32(h)), w, h)
+
+proc readPainted*(bytes: var seq[uint8]):
+    tuple[width, height: int32; area: PixelArea] =
+  ## `readPicture` for a host that keeps its copy: only the pixels the last
+  ## `drawCommands` repainted are copied into `bytes` -- which holds the
+  ## whole picture, row 0 the window's top -- and `area` says which. A
+  ## copy of another size is taken whole. Offscreen the pixels come
+  ## straight from the surface the renderer paints into; otherwise this
+  ## reads back the whole picture.
+  result = (0'i32, 0'i32, PixelArea())
+  when withSdl:
+    let surf = cast[ptr SDL_Surface](offscreenSurface())
+    if surf == nil:
+      let (w, h) = readPicture(bytes)
+      return (w, h, PixelArea(x1: w, y1: h))
+    discard SDL_FlushRenderer(sdlRenderer())
+    let
+      w = surf[].w
+      h = surf[].h
+    if w <= 0 or h <= 0:
+      return
+    var area = paintedArea
+    if bytes.len != w * h * 4:
+      bytes.setLen(w * h * 4)
+      area = PixelArea(x1: w, y1: h)
+    result = (w, h, area)
+    if area.isEmpty:
+      return
+    let
+      src = cast[uint](surf[].pixels)
+      dst = cast[uint](addr bytes[0])
+      span = int(area.x1 - area.x0) * 4
+    var y = area.y0
+    while y < area.y1:
+      copyMem(cast[pointer](dst + uint(y) * uint(w * 4) + uint(area.x0 * 4)),
+              cast[pointer](src + uint(y) * uint(surf[].pitch) +
+                            uint(area.x0 * 4)), span)
+      inc y
 
 type
   OverlayFn* = proc () {.closure.}
@@ -785,12 +955,47 @@ proc contentPainted*(): bool =
   contentPaintedFlag
 
 when withSdl:
+  proc shiftRows(scroll: Scroll) =
+    ## Move the offscreen surface's rows inside `scroll.area` by
+    ## `scroll.dy`: what scrolled keeps its pixels, and the rows it leaves
+    ## behind are damage the diff already named.
+    let surf = cast[ptr SDL_Surface](offscreenSurface())
+    if surf == nil:
+      return
+    discard SDL_FlushRenderer(sdlRenderer()) # paint queued before the move
+    let
+      x0 = clamp(int32(scroll.area.x), 0'i32, surf[].w)
+      x1 = clamp(int32(scroll.area.x + scroll.area.width), 0'i32, surf[].w)
+      y0 = clamp(int32(scroll.area.y), 0'i32, surf[].h)
+      y1 = clamp(int32(scroll.area.y + scroll.area.height), 0'i32, surf[].h)
+      dy = int32(scroll.dy)
+    if x1 <= x0 or y1 - y0 <= abs(dy):
+      return
+    let
+      base = cast[uint](surf[].pixels)
+      pitch = uint(surf[].pitch)
+      span = int(x1 - x0) * 4
+    proc row(y: int32): pointer =
+      cast[pointer](base + uint(y) * pitch + uint(x0) * 4)
+    if dy < 0:
+      # Up: walk down, each row taking the one `-dy` below it.
+      var y = y0
+      while y < y1 + dy:
+        moveMem(row(y), row(y - dy), span)
+        inc y
+    else:
+      var y = y1 - 1
+      while y >= y0 + dy:
+        moveMem(row(y), row(y - dy), span)
+        dec y
+
   proc paintContent(): tuple[painted, ready: bool]  =
     ## Bring the picture up to date. `painted`: app pixels changed; `ready`:
     ## the backbuffer already holds the picture.
     let ren = sdlRenderer()
     let cmds = renderCommands()
     let sigs = frameSignatures(cmds)
+    paintedArea = PixelArea()
     var w = 0'i32
     var h = 0'i32
     discard SDL_GetRenderOutputSize(ren, addr w, addr h)
@@ -805,7 +1010,7 @@ when withSdl:
       lastSigs = sigs
       return (true, true)
 
-    if not ensureRetained(w, h):
+    if offscreenSurface() == nil and not ensureRetained(w, h):
       # No target textures: the plain paint-everything path, still skipping
       # frames whose commands did not change.
       let unchanged = lastValid and not full and
@@ -817,21 +1022,30 @@ when withSdl:
       paintDirect(cmds, w, h)
       return (true, true)
 
+    # Offscreen the surface itself keeps the picture between frames: the
+    # damage is painted straight into it, with no texture to copy across,
+    # and a scrolled region is shifted in place rather than painted anew.
+    let direct = offscreenSurface() != nil
     let viewport = rect(0, 0, float32(w), float32(h))
     var dmg = Damage(kind: dmgFull)
     if lastValid and not full:
-      dmg = diffDamage(lastSigs, sigs, viewport)
+      dmg = diffDamage(lastSigs, sigs, viewport, shift = direct)
     lastSigs = sigs
     lastValid = true
     if dmg.kind == dmgNone:
       return (false, false)
 
-    discard SDL_SetRenderTarget(ren, retained)
+    if not direct:
+      discard SDL_SetRenderTarget(ren, retained)
+    elif dmg.kind == dmgRects and dmg.scroll.dy != 0.0:
+      shiftRows(dmg.scroll)
+      notePainted(dmg.scroll.area, w, h)
     if dmg.kind == dmgFull:
       setColor(ren, clearColor)
       discard SDL_RenderClear(ren)
       paintCommands(cmds, viewport, false)
       noteDamage(int64(w) * int64(h))
+      notePainted(viewport, w, h)
     else:
       for r in dmg.rects:
         var cr = toSdlRect(r)
@@ -841,8 +1055,11 @@ when withSdl:
         discard SDL_SetRenderDrawBlendMode(ren, BlendModeBlend)
         paintCommands(cmds, r, true)
         noteDamage(int64(r.width) * int64(r.height))
-    discard SDL_SetRenderTarget(ren, nil)
+        notePainted(r, w, h)
     discard SDL_SetRenderClipRect(ren, nil)
+    if direct:
+      return (true, true)
+    discard SDL_SetRenderTarget(ren, nil)
     let tex = retained
     if tex != nil:
       discard SDL_RenderTexture(ren, tex, nil, nil)
@@ -940,8 +1157,8 @@ proc drawCommands*()  =
       requestSettleFrame()
       requestPresent()
     let hook = overlayHook
-    if hook == nil:
-      return
+    if hook == nil or offscreenSurface() != nil:
+      return   # offscreen there is no backbuffer to lay it over
     if not ready:
       # Unchanged picture: put it back on the backbuffer under the overlay.
       let ren = sdlRenderer()

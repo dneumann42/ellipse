@@ -155,13 +155,16 @@ func rubber(v, lo, hi: float32): float32 =
 proc currentScrollOffset*(ctx: Context): Vec2 =
   ## The scroll position of the enclosing scroll container, read *during*
   ## declaration to feed `clip(..., childOffset = currentScrollOffset())`.
-  ## Clay does this with `Clay_GetScrollOffset()` inside `CLAY(...)`.
+  ## Clay does this with `Clay_GetScrollOffset()` inside `CLAY(...)`. The
+  ## offset comes in whole pixels: the glide keeps its fraction, but the
+  ## contents land on the pixel grid, so a scroll moves them by whole rows
+  ## a renderer can shift instead of painting anew.
   if ctx.openStack.len == 0:
     return Vec2()
   let openEl = ctx.elements[ctx.openStack[^1]]
   for sd in ctx.scrollDatas:
     if sd.elementId == openEl.id:
-      return sd.position
+      return Vec2(x: round(sd.position.x), y: round(sd.position.y))
   return Vec2()
 
 proc updateScrollContainers*(ctx: Context; dragScrolling: bool;

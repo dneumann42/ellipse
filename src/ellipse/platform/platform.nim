@@ -428,6 +428,12 @@ when withSdl:
     ## `ellipse/platform/renderer`). Only valid inside the main loop.
     activeApp.renderer.raw
 
+  proc offscreenSurface*(): pointer =
+    ## The offscreen picture's `SDL_Surface*` (see `initializeOffscreen`),
+    ## nil when the app has a window of its own. The renderer paints
+    ## straight into it and reads the changed pixels back from it.
+    if activeApp.offscreen: activeApp.surface else: nil
+
 var quitSignaled = false
   ## Set once anything asked the app to close: a quit or window-close event,
   ## a signal, `quit()`. The host loop reads it through `quitAsked`.

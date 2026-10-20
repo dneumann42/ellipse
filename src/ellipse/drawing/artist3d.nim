@@ -44,6 +44,7 @@ type
     bytes: seq[uint8]
     valid: bool ## a picture is staged; `bytes` holds it
     dirty: bool ## `bytes` changed since the texture last took them
+    dirtyX0, dirtyY0, dirtyX1, dirtyY1: uint32 ## ... and where
 
   WaterUniforms = object
     shallow: Vec4 # rgb, clarity
@@ -800,6 +801,46 @@ proc stage(picture: var StagedPicture, width, height: int,
   picture.height = height.uint32
   picture.valid = true
   picture.dirty = true
+  picture.dirtyX0 = 0
+  picture.dirtyY0 = 0
+  picture.dirtyX1 = picture.width
+  picture.dirtyY1 = picture.height
+
+proc stageArea(picture: var StagedPicture, width, height: int,
+               pixels: openArray[uint8], x0, y0, x1, y1: int) =
+  ## `stage` for the columns `x0 ..< x1` and rows `y0 ..< y1` of a picture
+  ## whose rest is staged already: only those pixels are copied, and only
+  ## they go up on the next present. A picture of another size is taken
+  ## whole.
+  if width <= 0 or height <= 0 or pixels.len < width * height * 4:
+    return
+  if picture.width != width.uint32 or picture.height != height.uint32 or
+      picture.bytes.len != width * height * 4:
+    picture.stage(width, height, pixels)
+    return
+  picture.valid = true
+  let
+    ax0 = clamp(x0, 0, width)
+    ay0 = clamp(y0, 0, height)
+    ax1 = clamp(x1, 0, width)
+    ay1 = clamp(y1, 0, height)
+  if ax1 <= ax0 or ay1 <= ay0:
+    return
+  let span = (ax1 - ax0) * 4
+  for y in ay0 ..< ay1:
+    let at = (y * width + ax0) * 4
+    copyMem(addr picture.bytes[at], unsafeAddr pixels[at], span)
+  if picture.dirty:
+    picture.dirtyX0 = min(picture.dirtyX0, ax0.uint32)
+    picture.dirtyY0 = min(picture.dirtyY0, ay0.uint32)
+    picture.dirtyX1 = max(picture.dirtyX1, ax1.uint32)
+    picture.dirtyY1 = max(picture.dirtyY1, ay1.uint32)
+  else:
+    picture.dirty = true
+    picture.dirtyX0 = ax0.uint32
+    picture.dirtyY0 = ay0.uint32
+    picture.dirtyX1 = ax1.uint32
+    picture.dirtyY1 = ay1.uint32
 
 proc setOverlayPicture*(a: Artist3D, width, height: int,
                         pixels: openArray[uint8]) =
@@ -808,6 +849,13 @@ proc setOverlayPicture*(a: Artist3D, width, height: int,
   ## through. The bytes are copied; the picture rides until
   ## `clearOverlayPicture` or the next stage.
   a.overlay.stage(width, height, pixels)
+
+proc updateOverlayPicture*(a: Artist3D, width, height: int,
+                           pixels: openArray[uint8], x0, y0, x1, y1: int) =
+  ## `setOverlayPicture` when only the columns `x0 ..< x1` and rows
+  ## `y0 ..< y1` of `pixels` changed since the last stage: just those are
+  ## copied and uploaded. The picture shows again if it was cleared.
+  a.overlay.stageArea(width, height, pixels, x0, y0, x1, y1)
 
 proc clearOverlayPicture*(a: Artist3D) =
   ## Stop drawing the staged picture; the next present shows only the scene.
@@ -844,9 +892,14 @@ proc presentPicture(a: Artist3D, cmd: CommandBuffer, target: gpu.Texture,
     picture.textureWidth = picture.width
     picture.textureHeight = picture.height
     picture.dirty = true
+    picture.dirtyX0 = 0
+    picture.dirtyY0 = 0
+    picture.dirtyX1 = picture.width
+    picture.dirtyY1 = picture.height
   if picture.dirty:
-    cmd.uploadPicture(picture.texture, addr picture.bytes[0],
-      picture.width, picture.height)
+    cmd.uploadPictureArea(picture.texture, addr picture.bytes[0],
+      picture.width, picture.dirtyX0, picture.dirtyY0, picture.dirtyX1,
+      picture.dirtyY1)
     picture.dirty = false
   let pass = cmd.beginOverlay(target)
   pass.bindPipeline(a.overlayPipeline)

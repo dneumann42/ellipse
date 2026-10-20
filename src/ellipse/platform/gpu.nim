@@ -350,6 +350,45 @@ proc uploadPicture*(cmd: CommandBuffer, texture: Texture, data: pointer,
   uploadToGPUTexture(copyPass, addr source, addr destination, false)
   endGPUCopyPass(copyPass)
 
+proc uploadPictureArea*(cmd: CommandBuffer, texture: Texture, data: pointer,
+                        width: uint32, x0, y0, x1, y1: uint32) =
+  ## `uploadPicture` for the columns `x0 ..< x1` and rows `y0 ..< y1` of a
+  ## picture `width` pixels across: only those rows' spans are copied out
+  ## and sent, the rest of the texture keeps what it held.
+  if x1 <= x0 or y1 <= y0:
+    return
+  let
+    w = x1 - x0
+    h = y1 - y0
+    span = w * 4
+  let transfer = pictureTransfer(cmd.device, span * h)
+  let mapped = mapGPUTransferBuffer(cmd.device.raw, transfer, true)
+  if mapped.isNil:
+    raiseSdlError("Failed to map picture transfer buffer")
+  let
+    src = cast[uint](data)
+    dst = cast[uint](mapped)
+  for row in 0'u32 ..< h:
+    copyMem(cast[pointer](dst + uint(row * span)),
+            cast[pointer](src + uint(((y0 + row) * width + x0) * 4)), span.int)
+  unmapGPUTransferBuffer(cmd.device.raw, transfer)
+  var source = GPUTextureTransferInfo(
+    transfer_buffer: cast[ptr GPUTransferBuffer](transfer),
+    pixels_per_row: w,
+    rows_per_layer: h,
+  )
+  var destination = GPUTextureRegion(
+    texture: cast[ptr GPUTexture](texture.raw),
+    x: x0,
+    y: y0,
+    w: w,
+    h: h,
+    d: 1,
+  )
+  let copyPass = beginGPUCopyPass(cmd.raw)
+  uploadToGPUTexture(copyPass, addr source, addr destination, false)
+  endGPUCopyPass(copyPass)
+
 proc newCubeTexture*(device: Device, size: uint32, format: TextureFormat): Texture =
   ## A cube map of six square faces `size` pixels across: the sky's box.
   ## Only the sampler ever reads it, so that is all it is made for.
