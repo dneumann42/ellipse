@@ -159,6 +159,8 @@ func `==`*(a, b: TextureFormat): bool =
 const
   Depth32* = TextureFormat(ord(GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT).int32)
   Rgba8* = TextureFormat(ord(GPU_TEXTUREFORMAT_B8G8R8A8_UNORM).int32)
+  R8G8B8A8* = TextureFormat(ord(GPU_TEXTUREFORMAT_R8G8B8A8_UNORM).int32)
+    ## Bytes in red, green, blue, alpha order, as CPU-made images hold them.
 
 proc swapchainFormat*(device: Device, window: Window): TextureFormat =
   TextureFormat(ord(getGPUSwapchainTextureFormat(device.raw, window)).int32)
@@ -348,14 +350,82 @@ proc uploadPicture*(cmd: CommandBuffer, texture: Texture, data: pointer,
   uploadToGPUTexture(copyPass, addr source, addr destination, false)
   endGPUCopyPass(copyPass)
 
-proc newSampler*(device: Device): Sampler =
+proc newLayeredTexture*(device: Device, width, height, layers, levels: uint32,
+                        format: TextureFormat): Texture =
+  ## A 2D array texture of `layers` same-sized pictures, each with `levels`
+  ## mip levels. It is a colour target too, so `generateMipmaps` can fill
+  ## the levels below the uploaded one; each layer filters on its own, so
+  ## no layer's edge ever bleeds into another's the way atlas cells do.
+  var info = GPUTextureCreateInfo(
+    `type`: GPU_TEXTURETYPE_2D_ARRAY,
+    format: GPUTextureFormat(format.int32),
+    usage: uint32(GPU_TEXTUREUSAGE_SAMPLER) or uint32(GPU_TEXTUREUSAGE_COLOR_TARGET),
+    width: width,
+    height: height,
+    layer_count_or_depth: layers,
+    num_levels: levels,
+    sample_count: GPU_SAMPLECOUNT_1,
+  )
+  let raw = createGPUTexture(device.raw, addr info)
+  if raw.isNil:
+    raiseSdlError("Failed to create layered texture")
+  Texture(device: device, raw: raw, owned: true)
+
+proc uploadLayers*(cmd: CommandBuffer, texture: Texture, data: pointer,
+                   width, height, layers: uint32) =
+  ## Copy `layers` RGBA8 pictures of `width` x `height`, one after another in
+  ## CPU memory, into the top mip level of a layered texture.
+  let
+    layerSize = width * height * 4
+    size = layerSize * layers
+    transfer = pictureTransfer(cmd.device, size)
+    mapped = mapGPUTransferBuffer(cmd.device.raw, transfer, true)
+  if mapped.isNil:
+    raiseSdlError("Failed to map layer transfer buffer")
+  copyMem(mapped, data, size.int)
+  unmapGPUTransferBuffer(cmd.device.raw, transfer)
+  let copyPass = beginGPUCopyPass(cmd.raw)
+  for layer in 0'u32 ..< layers:
+    var source = GPUTextureTransferInfo(
+      transfer_buffer: cast[ptr GPUTransferBuffer](transfer),
+      offset: layer * layerSize,
+      pixels_per_row: width,
+      rows_per_layer: height,
+    )
+    var destination = GPUTextureRegion(
+      texture: cast[ptr GPUTexture](texture.raw),
+      layer: layer,
+      w: width,
+      h: height,
+      d: 1,
+    )
+    uploadToGPUTexture(copyPass, addr source, addr destination, false)
+  endGPUCopyPass(copyPass)
+
+proc generateMipmaps*(cmd: CommandBuffer, texture: Texture) =
+  ## Fill every mip level below the top one by halving it, layer by layer.
+  generateMipmapsForGPUTexture(cmd.raw, texture.raw)
+
+proc newSampler*(device: Device, repeat = false, mipmaps = false,
+                 anisotropy = 0.0f): Sampler =
+  ## Linear filtering, clamped at the edges unless `repeat` tiles the
+  ## texture; `mipmaps` blends between mip levels, and an `anisotropy`
+  ## above 1 keeps surfaces seen at a grazing angle sharp.
+  let address =
+    if repeat: GPU_SAMPLERADDRESSMODE_REPEAT
+    else: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE
   var info = GPUSamplerCreateInfo(
     min_filter: GPU_FILTER_LINEAR,
     mag_filter: GPU_FILTER_LINEAR,
-    mipmap_mode: GPU_SAMPLERMIPMAPMODE_NEAREST,
-    address_mode_u: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-    address_mode_v: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-    address_mode_w: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+    mipmap_mode:
+      if mipmaps: GPU_SAMPLERMIPMAPMODE_LINEAR
+      else: GPU_SAMPLERMIPMAPMODE_NEAREST,
+    address_mode_u: address,
+    address_mode_v: address,
+    address_mode_w: address,
+    max_anisotropy: anisotropy,
+    max_lod: if mipmaps: 1000.0f else: 0.0f,
+    enable_anisotropy: anisotropy > 1.0f,
   )
   let raw = createGPUSamplerRaw(device.raw, addr info)
   if raw.isNil:

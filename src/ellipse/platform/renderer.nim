@@ -19,7 +19,7 @@ import ./termmode
 when withSdl:
   {.passL: "-lSDL3_ttf".}
 
-import std/[math, tables, strutils, envvars, syncio]
+import std/[math, os, tables, strutils, envvars, syncio]
 
 import clay
 import ./platform
@@ -134,10 +134,17 @@ var
   fontPath*: string = "assets/fonts/inter/Inter-Regular.ttf"
     ## UI font, resolved relative to the working directory (the repo root
     ## when run via `make run`). Set before `initializeRenderer` to override;
-    ## `fontFallbackPath` is tried if this one cannot be opened.
+    ## `vendoredFontPath` and then `fontFallbackPaths` are tried if this one
+    ## cannot be opened.
 
-  fontFallbackPath = "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf"
-    ## System fallback so text still renders if the vendored font is missing.
+  fontFallbackPaths = @[
+    "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+    "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+    ## System fallbacks (Arch, Fedora, Debian layouts) so text still renders
+    ## if the vendored font is missing.
 
   monoFontPaths*: seq[string] = @[
     "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf",
@@ -154,6 +161,13 @@ var
     ## anyway.
 
 const
+  vendoredFontPath = currentSourcePath().parentDir.parentDir.parentDir.parentDir /
+    "assets/fonts/inter/Inter-Regular.ttf"
+    ## The Inter this checkout ships, found from the source tree at compile
+    ## time: a project built against ellipse (whose working directory has no
+    ## `assets/`) still gets the UI font, whichever mount the tree was
+    ## compiled from.
+
   MonoFont* = 1'u16
     ## `TextConfig.fontId` of the monospaced font.
 
@@ -186,11 +200,11 @@ when withSdl:
       ## days.
 
   proc openUiFont(size: int): ptr TTF_Font =
-    var path = fontPath
-    result = TTF_OpenFont(path.cstring, float32(size))
-    if result == nil:
-      var fallback = fontFallbackPath
-      result = TTF_OpenFont(fallback.cstring, float32(size))
+    for p in @[fontPath, vendoredFontPath] & fontFallbackPaths:
+      var path = p
+      result = TTF_OpenFont(path.cstring, float32(size))
+      if result != nil:
+        return
 
   proc fontFor(size: int; id = 0'u16): ptr TTF_Font =
     ## One opened TTF font per pixel size and font (TTF point size == pixel

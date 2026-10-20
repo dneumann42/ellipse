@@ -3,10 +3,12 @@ import std/[math]
 import ../platform/[gpu, sdl]
 import geometry
 import snapshot
+import splatting
 import ssao
 
 export geometry
 export snapshot
+export splatting
 export ssao
 
 type
@@ -17,6 +19,9 @@ type
   Batch = object
     firstIndex, indexCount: uint32
     uniforms: Uniforms
+
+  SplatUniforms = object
+    splat: Vec4 # metres per repeat, blend depth, height contrast, unused
 
   Artist3D* = ref object
     device: Device
@@ -61,6 +66,18 @@ type
     overlayTextureWidth, overlayTextureHeight: uint32
     overlayBytes: seq[uint8]
     overlayValid: bool ## a picture is staged; `overlayBytes` holds it
+    splatPipeline, splatDepthPipeline: Pipeline
+    splatVertexBuffer, splatIndexBuffer: DynamicBuffer
+    splatVertices: seq[SplatVertex]
+    splatIndices: seq[uint32]
+    splatBatches: seq[Batch]
+    splatting: bool ## the batch being built is splatted ground
+    splatOptions: SplatOptions
+    splatTexture: gpu.Texture ## one array layer per atlas cell
+    splatSampler: Sampler
+    splatBytes: seq[uint8] ## an atlas staged for the next present, cell
+    splatCell, splatCount: uint32 ## after cell, and its cells' size and number
+    splatStaged: bool
 func uniformState(a: Artist3D, model, viewProj: Mat4): Uniforms =
   Uniforms(
     model: model,
@@ -81,6 +98,8 @@ const
   fragmentSpv = staticRead("shaders/spv/mesh.frag.spv")
   fullscreenVertSpv = staticRead("shaders/spv/fullscreen.vert.spv")
   overlayFragSpv = staticRead("shaders/spv/overlay.frag.spv")
+  splatVertexSpv = staticRead("shaders/spv/splat.vert.spv")
+  splatFragmentSpv = staticRead("shaders/spv/splat.frag.spv")
 
 proc newArtist*(app: App): Artist3D =
   let device = app.gpuDevice
@@ -89,6 +108,9 @@ proc newArtist*(app: App): Artist3D =
     fragmentShader = newShader(device, fragmentSpv.toOpenArrayByte(0, fragmentSpv.high), FragmentShader)
     fullscreenVertex = newShader(device, fullscreenVertSpv.toOpenArrayByte(0, fullscreenVertSpv.high), VertexShader)
     overlayFragment = newShader(device, overlayFragSpv.toOpenArrayByte(0, overlayFragSpv.high), FragmentShader, numSamplers = 1)
+    splatVertex = newShader(device, splatVertexSpv.toOpenArrayByte(0, splatVertexSpv.high), VertexShader, numUniformBuffers = 1)
+    splatFragment = newShader(device, splatFragmentSpv.toOpenArrayByte(0, splatFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
+    post = newSsaoPass(device, vertexShader, app.gpuSwapchainFormat())
     pipeline = newPipeline(device, PipelineDesc(
       vertex: vertexShader,
       fragment: fragmentShader,
@@ -114,7 +136,7 @@ proc newArtist*(app: App): Artist3D =
     referenceAspect: app.designAspect(),
     colorFormat: app.gpuSwapchainFormat(),
     current: Vertex(normal: vec3(0, 0, 1), color: vec4(1, 1, 1, 1), uv: vec2(0, 0)),
-    post: newSsaoPass(device, vertexShader, app.gpuSwapchainFormat()),
+    post: post,
     overlayPipeline: newPipeline(device, PipelineDesc(
       vertex: fullscreenVertex,
       fragment: overlayFragment,
@@ -124,6 +146,19 @@ proc newArtist*(app: App): Artist3D =
       premultiplied: true,
     )),
     overlaySampler: newSampler(device),
+    splatPipeline: newPipeline(device, PipelineDesc(
+      vertex: splatVertex,
+      fragment: splatFragment,
+      attributes: SplatAttributes,
+      stride: SplatStride,
+      colorFormat: app.gpuSwapchainFormat(),
+      depthFormat: Depth32,
+    )),
+    splatDepthPipeline: post.newDepthPipeline(splatVertex, SplatAttributes, SplatStride),
+    splatVertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
+    splatIndexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
+    splatOptions: newSplatOptions(),
+    splatSampler: newSampler(device, repeat = true, mipmaps = true, anisotropy = 8),
   )
 
 proc reset*(a: Artist3D) =
@@ -132,10 +167,14 @@ proc reset*(a: Artist3D) =
   a.batches.setLen(0)
   a.face.setLen(0)
   a.building = false
+  a.splatVertices.setLen(0)
+  a.splatIndices.setLen(0)
+  a.splatBatches.setLen(0)
+  a.splatting = false
 
 proc vertexCount*(a: Artist3D): int =
   ## Vertices queued for this frame: a proxy for the work the LOD keeps down.
-  a.vertices.len
+  a.vertices.len + a.splatVertices.len
 
 proc setView*(a: Artist3D, eye, target, up: Vec3) =
   a.view = lookAt(eye, target, up)
@@ -239,6 +278,13 @@ proc appendVertex(a: Artist3D, v: Vertex) =
 proc `end`*(a: Artist3D) =
   if not a.building:
     return
+  if a.splatting:
+    a.building = false
+    a.splatting = false
+    a.pending.indexCount = a.splatIndices.len.uint32 - a.pending.firstIndex
+    if a.pending.indexCount > 0:
+      a.splatBatches.add a.pending
+    return
   case a.mode
   of TriangleFan:
     if a.face.len > 2:
@@ -272,7 +318,7 @@ proc begin*(a: Artist3D, mode: DrawMode = Triangles) =
   )
 
 proc vertex*(a: Artist3D, v: Vec3) =
-  if not a.building:
+  if not a.building or a.splatting:
     return
   let vertex = Vertex(
     position: v,
@@ -313,8 +359,8 @@ proc vertex*(a: Artist3D, x, y, z: float32) =
 proc quad*(a: Artist3D, v0, v1, v2, v3: Vertex) =
   ## Immediate quad from complete vertices: appends the two triangles
   ## directly, skipping the per-corner staging the generic path does.
-  ## Terrain and other vertex-rich meshes stream through this.
-  if not a.building:
+  ## Vertex-rich meshes stream through this.
+  if not a.building or a.splatting:
     return
   case a.mode
   of Quads:
@@ -326,6 +372,60 @@ proc quad*(a: Artist3D, v0, v1, v2, v3: Vertex) =
     a.appendVertex(v3)
   else:
     discard
+
+proc beginSplat*(a: Artist3D) =
+  ## Open a batch of splatted ground under the current matrices and light:
+  ## `splatQuad` adds to it, and `end` closes it. The ground is drawn with
+  ## the atlas `setSplatAtlas` last staged, and nothing until there is one.
+  if a.building:
+    a.`end`()
+  a.building = true
+  a.splatting = true
+  a.pending = Batch(
+    firstIndex: a.splatIndices.len.uint32,
+    uniforms: a.uniformState(a.model, a.projection * a.view),
+  )
+
+proc splatQuad*(a: Artist3D, v0, v1, v2, v3: SplatVertex) =
+  ## Two triangles of splatted ground, corners in winding order; the four
+  ## vertices are shared between them.
+  if not a.splatting:
+    return
+  let first = a.splatVertices.len.uint32
+  a.splatVertices.add v0
+  a.splatVertices.add v1
+  a.splatVertices.add v2
+  a.splatVertices.add v3
+  a.splatIndices.add [first, first + 1, first + 2, first, first + 2, first + 3]
+
+proc setSplatAtlas*(a: Artist3D, atlas: TextureAtlas) =
+  ## Stage the layer textures splatted ground is drawn with: cell `i` of the
+  ## atlas is layer `i`. The cells are uploaded and mipmapped at the next
+  ## present, and serve every frame after until the next atlas is staged.
+  if atlas.cell <= 0 or atlas.cells <= 0 or
+      atlas.pixels.len < atlas.width * atlas.height * 4:
+    return
+  a.splatBytes = atlas.layered()
+  a.splatCell = atlas.cell.uint32
+  a.splatCount = atlas.cells.uint32
+  a.splatStaged = true
+
+proc setSplatOptions*(a: Artist3D, options: SplatOptions) =
+  a.splatOptions = options
+
+proc uploadSplatAtlas(a: Artist3D, cmd: CommandBuffer) =
+  if not a.splatTexture.isNil:
+    a.device.retire(a.splatTexture)
+  var levels = 1'u32
+  while (a.splatCell shr levels) > 0:
+    inc levels
+  a.splatTexture = newLayeredTexture(a.device, a.splatCell, a.splatCell,
+    a.splatCount, levels, R8G8B8A8)
+  cmd.uploadLayers(a.splatTexture, addr a.splatBytes[0], a.splatCell,
+    a.splatCell, a.splatCount)
+  cmd.generateMipmaps(a.splatTexture)
+  a.splatBytes = @[]
+  a.splatStaged = false
 
 proc render*(a: Artist3D, mesh: Mesh) =
   let
@@ -395,6 +495,8 @@ proc refreshProjection(a: Artist3D, frame: GpuFrame) =
   let viewProj = a.projection * a.view
   for batch in a.batches.mitems:
     batch.uniforms.viewProj = viewProj
+  for batch in a.splatBatches.mitems:
+    batch.uniforms.viewProj = viewProj
 
 proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
                  pushFragment: proc () = nil) =
@@ -407,15 +509,45 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
       pushFragment()
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
+proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
+                pushFragment: proc (); textured: bool) =
+  if a.splatBatches.len == 0 or a.splatTexture.isNil:
+    return
+  pass.bindPipeline(pipeline)
+  pass.bindVertexBuffers([BufferBinding(buffer: a.splatVertexBuffer)])
+  pass.bindIndexBuffer(a.splatIndexBuffer)
+  if textured:
+    pass.bindFragmentSamplers([(texture: a.splatTexture, sampler: a.splatSampler)])
+  for batch in a.splatBatches:
+    cmd.pushVertexUniforms(0, batch.uniforms)
+    pushFragment()
+    pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+
+proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
+  ## Every batch in colour: meshes, then splatted ground.
+  a.drawBatches(cmd, pass, a.pipeline)
+  let uniforms = SplatUniforms(splat: vec4(
+    max(a.splatOptions.metersPerRepeat, 1e-3f), max(a.splatOptions.blendDepth, 1e-3f),
+    a.splatOptions.heightContrast, 0))
+  a.drawSplats(cmd, pass, a.splatPipeline,
+    proc () = cmd.pushFragmentUniforms(0, uniforms), textured = true)
+
+proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
+  ## Every batch again, packing linear depth for the occlusion pass.
+  let
+    (near, far) = a.nearFar()
+    pushDepth = a.post.newDepthUniformPusher(cmd, near, far)
+  a.drawBatches(cmd, pass, a.post.depthPipeline, pushDepth)
+  a.drawSplats(cmd, pass, a.splatDepthPipeline, pushDepth, textured = false)
+
 proc presentSsao(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
   a.post.ensureSize(frame.width, frame.height)
   let (near, far) = a.nearFar()
   let scene = a.post.beginScene(frame.cmd, clearColor, frame.depth)
-  a.drawBatches(frame.cmd, scene, a.pipeline)
+  a.drawScene(frame.cmd, scene)
   scene.endRender()
   let depthPass = a.post.beginDepth(frame.cmd, frame.depth)
-  a.drawBatches(frame.cmd, depthPass, a.post.depthPipeline,
-    a.post.newDepthUniformPusher(frame.cmd, near, far))
+  a.drawDepth(frame.cmd, depthPass)
   depthPass.endRender()
   a.post.runOcclusion(frame.cmd, a.ssao, near, far, a.fovTan)
   a.post.runComposite(frame.cmd, frame.target)
@@ -482,17 +614,16 @@ proc snapshotScene(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
     a.post.ensureSize(frame.width, frame.height)
     let (near, far) = a.nearFar()
     let scene = a.post.beginScene(frame.cmd, clearColor, depth)
-    a.drawBatches(frame.cmd, scene, a.pipeline)
+    a.drawScene(frame.cmd, scene)
     scene.endRender()
     let depthPass = a.post.beginDepth(frame.cmd, depth)
-    a.drawBatches(frame.cmd, depthPass, a.post.depthPipeline,
-      a.post.newDepthUniformPusher(frame.cmd, near, far))
+    a.drawDepth(frame.cmd, depthPass)
     depthPass.endRender()
     a.post.runOcclusion(frame.cmd, a.ssao, near, far, a.fovTan)
     a.post.runComposite(frame.cmd, a.snapshotTarget)
   else:
     let pass = frame.cmd.beginRender(a.snapshotTarget, clearColor, depth)
-    a.drawBatches(frame.cmd, pass, a.pipeline)
+    a.drawScene(frame.cmd, pass)
     pass.endRender()
   if a.overlayValid:
     a.presentOverlay(frame.cmd, a.snapshotTarget)
@@ -512,15 +643,19 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
   var snapshotPath = a.snapshotPath
   a.snapshotPath = ""
   if frame.valid:
-    if a.batches.len > 0:
+    if a.splatStaged:
+      a.uploadSplatAtlas(frame.cmd)
+    if a.batches.len > 0 or a.splatBatches.len > 0:
       a.refreshProjection(frame)
       frame.cmd.upload(a.vertexBuffer, a.vertices)
       frame.cmd.upload(a.indexBuffer, a.indices)
+      frame.cmd.upload(a.splatVertexBuffer, a.splatVertices)
+      frame.cmd.upload(a.splatIndexBuffer, a.splatIndices)
       if a.ssao.enabled:
         a.presentSsao(frame, clearColor)
       else:
         frame.beginRender(clearColor)
-        a.drawBatches(frame.cmd, frame.pass, a.pipeline)
+        a.drawScene(frame.cmd, frame.pass)
         frame.pass.endRender()
       if snapshotPath.len > 0:
         a.snapshotScene(frame, clearColor)

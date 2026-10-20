@@ -19,6 +19,7 @@ type
     device: Device
     sceneFormat: TextureFormat
     sampler: Sampler
+    depthFragment: Shader
     depthPipeline*: Pipeline
     occlusionPipeline, compositePipeline: Pipeline
     sceneColor, depthData, occlusion: Texture
@@ -55,6 +56,7 @@ proc newSsaoPass*(
     device: device,
     sceneFormat: sceneFormat,
     sampler: newSampler(device),
+    depthFragment: depthFragment,
     depthPipeline: newPipeline(device, PipelineDesc(
       vertex: meshVertex,
       fragment: depthFragment,
@@ -76,6 +78,19 @@ proc newSsaoPass*(
       hasDepth: false,
     )),
   )
+
+proc newDepthPipeline*(p: SsaoPass, vertex: Shader, attributes: seq[Attribute],
+                       stride: uint32): Pipeline =
+  ## The depth pipeline again for geometry of another vertex layout: the
+  ## same packed depth, behind whichever vertex shader places that geometry.
+  newPipeline(p.device, PipelineDesc(
+    vertex: vertex,
+    fragment: p.depthFragment,
+    attributes: attributes,
+    stride: stride,
+    colorFormat: Rgba8,
+    depthFormat: Depth32,
+  ))
 
 proc ensureSize*(p: SsaoPass, width, height: uint32) =
   if width == 0 or height == 0 or (width == p.width and height == p.height):
