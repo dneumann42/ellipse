@@ -1,15 +1,23 @@
 import std/[math]
 
 import ../platform/[gpu, sdl]
+import fog
 import geometry
+import shapes
+import sky
 import snapshot
 import splatting
 import ssao
+import water
 
+export fog
 export geometry
+export shapes
+export sky
 export snapshot
 export splatting
 export ssao
+export water
 
 type
   Uniforms = object
@@ -22,6 +30,29 @@ type
 
   SplatUniforms = object
     splat: Vec4 # metres per repeat, blend depth, height contrast, unused
+    fog: FogUniforms
+
+  ShapeUniforms = object
+    viewport: Vec4 # width, height in pixels, two unused
+
+  StagedPicture = object
+    ## A window-sized picture blended over the frame, and the texture it
+    ## rides up in. Uploaded only on the presents after it was staged anew.
+    texture: gpu.Texture
+    width, height: uint32
+    textureWidth, textureHeight: uint32
+    bytes: seq[uint8]
+    valid: bool ## a picture is staged; `bytes` holds it
+    dirty: bool ## `bytes` changed since the texture last took them
+
+  WaterUniforms = object
+    shallow: Vec4 # rgb, clarity
+    deep: Vec4 # rgb, metres across a ripple
+    sky: Vec4 # rgb, ripple strength
+    eye: Vec4 # the eye, seconds
+    sun: Vec4 # toward the sun, intensity
+    ambient: Vec4 # flat fill, then three unused
+    fogNear, fogFar, fogLimit: Vec4 # the haze's colours, and where it ends
 
   Artist3D* = ref object
     device: Device
@@ -33,6 +64,7 @@ type
     batches: seq[Batch]
     pending: Batch
     view: Mat4
+    eye: Vec3 ## where `setView` last put the eye: water reflects toward it
     projection: Mat4
     fovY, near, far: float32
     fovTan: float32 ## tan(fovY / 2) of the projection last built: the
@@ -61,11 +93,11 @@ type
     snapshotDownload: TextureDownload
     overlayPipeline: Pipeline
     overlaySampler: Sampler
-    overlayTexture: gpu.Texture
-    overlayWidth, overlayHeight: uint32
-    overlayTextureWidth, overlayTextureHeight: uint32
-    overlayBytes: seq[uint8]
-    overlayValid: bool ## a picture is staged; `overlayBytes` holds it
+    overlay: StagedPicture ## over everything: the offscreen UI
+    backdrop: StagedPicture ## over the scene, under the shapes: a map
+    shapePipeline: Pipeline
+    shapeBuffer: DynamicBuffer
+    shapes2d: Shapes
     splatPipeline, splatDepthPipeline: Pipeline
     splatVertexBuffer, splatIndexBuffer: DynamicBuffer
     splatVertices: seq[SplatVertex]
@@ -78,6 +110,21 @@ type
     splatBytes: seq[uint8] ## an atlas staged for the next present, cell
     splatCell, splatCount: uint32 ## after cell, and its cells' size and number
     splatStaged: bool
+    waterPipeline, waterDepthPipeline: Pipeline
+    waterVertexBuffer, waterIndexBuffer: DynamicBuffer
+    waterVertices: seq[WaterVertex]
+    waterIndices: seq[uint32]
+    waterBatches: seq[Batch]
+    watering: bool ## the batch being built is water
+    waterOptions: WaterOptions
+    skyPipeline: Pipeline
+    skySampler: Sampler
+    sky: SkyOptions
+    skybox: SkyboxState ## the cube texture the sky samples, and what made it
+    fog: FogOptions
+    aspect: float32 ## width over height of the frame last presented: the
+    ## sky spreads its rays by it, so the dome matches the frustum
+
 func uniformState(a: Artist3D, model, viewProj: Mat4): Uniforms =
   Uniforms(
     model: model,
@@ -98,18 +145,30 @@ const
   fragmentSpv = staticRead("shaders/spv/mesh.frag.spv")
   fullscreenVertSpv = staticRead("shaders/spv/fullscreen.vert.spv")
   overlayFragSpv = staticRead("shaders/spv/overlay.frag.spv")
+  shapeVertexSpv = staticRead("shaders/spv/shape.vert.spv")
+  shapeFragmentSpv = staticRead("shaders/spv/shape.frag.spv")
   splatVertexSpv = staticRead("shaders/spv/splat.vert.spv")
   splatFragmentSpv = staticRead("shaders/spv/splat.frag.spv")
+  waterVertexSpv = staticRead("shaders/spv/water.vert.spv")
+  waterFragmentSpv = staticRead("shaders/spv/water.frag.spv")
+  skyVertexSpv = staticRead("shaders/spv/sky.vert.spv")
+  skyFragmentSpv = staticRead("shaders/spv/sky.frag.spv")
 
 proc newArtist*(app: App): Artist3D =
   let device = app.gpuDevice
   let
     vertexShader = newShader(device, vertexSpv.toOpenArrayByte(0, vertexSpv.high), VertexShader, numUniformBuffers = 1)
-    fragmentShader = newShader(device, fragmentSpv.toOpenArrayByte(0, fragmentSpv.high), FragmentShader)
+    fragmentShader = newShader(device, fragmentSpv.toOpenArrayByte(0, fragmentSpv.high), FragmentShader, numUniformBuffers = 1)
     fullscreenVertex = newShader(device, fullscreenVertSpv.toOpenArrayByte(0, fullscreenVertSpv.high), VertexShader)
     overlayFragment = newShader(device, overlayFragSpv.toOpenArrayByte(0, overlayFragSpv.high), FragmentShader, numSamplers = 1)
+    shapeVertex = newShader(device, shapeVertexSpv.toOpenArrayByte(0, shapeVertexSpv.high), VertexShader, numUniformBuffers = 1)
+    shapeFragment = newShader(device, shapeFragmentSpv.toOpenArrayByte(0, shapeFragmentSpv.high), FragmentShader)
     splatVertex = newShader(device, splatVertexSpv.toOpenArrayByte(0, splatVertexSpv.high), VertexShader, numUniformBuffers = 1)
     splatFragment = newShader(device, splatFragmentSpv.toOpenArrayByte(0, splatFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
+    waterVertex = newShader(device, waterVertexSpv.toOpenArrayByte(0, waterVertexSpv.high), VertexShader, numUniformBuffers = 1)
+    waterFragment = newShader(device, waterFragmentSpv.toOpenArrayByte(0, waterFragmentSpv.high), FragmentShader, numUniformBuffers = 1)
+    skyVertex = newShader(device, skyVertexSpv.toOpenArrayByte(0, skyVertexSpv.high), VertexShader, numUniformBuffers = 1)
+    skyFragment = newShader(device, skyFragmentSpv.toOpenArrayByte(0, skyFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
     post = newSsaoPass(device, vertexShader, app.gpuSwapchainFormat())
     pipeline = newPipeline(device, PipelineDesc(
       vertex: vertexShader,
@@ -146,6 +205,17 @@ proc newArtist*(app: App): Artist3D =
       premultiplied: true,
     )),
     overlaySampler: newSampler(device),
+    shapePipeline: newPipeline(device, PipelineDesc(
+      vertex: shapeVertex,
+      fragment: shapeFragment,
+      attributes: ShapeAttributes,
+      stride: ShapeStride,
+      colorFormat: app.gpuSwapchainFormat(),
+      hasDepth: false,
+      blend: true,
+      premultiplied: true,
+    )),
+    shapeBuffer: newDynamicBuffer(device, {VertexData}, 4096),
     splatPipeline: newPipeline(device, PipelineDesc(
       vertex: splatVertex,
       fragment: splatFragment,
@@ -159,6 +229,35 @@ proc newArtist*(app: App): Artist3D =
     splatIndexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
     splatOptions: newSplatOptions(),
     splatSampler: newSampler(device, repeat = true, mipmaps = true, anisotropy = 8),
+    # Water blends over the ground already drawn, and still writes depth: a
+    # river ribbon folding over itself on a bend, or running into a lake,
+    # covers what lies behind instead of doubling up on it.
+    waterPipeline: newPipeline(device, PipelineDesc(
+      vertex: waterVertex,
+      fragment: waterFragment,
+      attributes: WaterAttributes,
+      stride: WaterStride,
+      colorFormat: app.gpuSwapchainFormat(),
+      depthFormat: Depth32,
+      blend: true,
+    )),
+    waterDepthPipeline: post.newDepthPipeline(waterVertex, WaterAttributes, WaterStride),
+    waterVertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
+    waterIndexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
+    waterOptions: newWaterOptions(),
+    # The sky neither tests nor writes anything the scene cares about: it
+    # draws first, where the cleared depth lets every fragment through, and
+    # writes none of it, so the world always lands on top of the dome.
+    skyPipeline: newPipeline(device, PipelineDesc(
+      vertex: skyVertex,
+      fragment: skyFragment,
+      colorFormat: app.gpuSwapchainFormat(),
+      depthFormat: Depth32,
+      depthWrite: false,
+    )),
+    skySampler: newSampler(device),
+    fog: newFogOptions(),
+    aspect: 1.0f,
   )
 
 proc reset*(a: Artist3D) =
@@ -171,13 +270,19 @@ proc reset*(a: Artist3D) =
   a.splatIndices.setLen(0)
   a.splatBatches.setLen(0)
   a.splatting = false
+  a.waterVertices.setLen(0)
+  a.waterIndices.setLen(0)
+  a.waterBatches.setLen(0)
+  a.watering = false
+  a.shapes2d.clearShapes()
 
 proc vertexCount*(a: Artist3D): int =
   ## Vertices queued for this frame: a proxy for the work the LOD keeps down.
-  a.vertices.len + a.splatVertices.len
+  a.vertices.len + a.splatVertices.len + a.waterVertices.len
 
 proc setView*(a: Artist3D, eye, target, up: Vec3) =
   a.view = lookAt(eye, target, up)
+  a.eye = eye
 
 proc setPerspective*(a: Artist3D, fovY, near, far: float32) =
   # The real aspect is only known at present time (swapchain size), so the
@@ -224,6 +329,18 @@ proc setSsao*(a: Artist3D, options: SsaoOptions) =
   ## Enabled: the scene renders to offscreen targets and goes through the
   ## depth/occlusion/composite chain. Disabled: direct-to-swapchain as usual.
   a.ssao = options
+
+proc setSky*(a: Artist3D, options: SkyOptions) =
+  ## What sky, if any, stands behind the frames to come: the dome is drawn
+  ## before the scene, and the skybox cube is rebuilt at the next present
+  ## when `options.skybox` is a picture the artist has not seen.
+  a.sky = options
+
+proc setFog*(a: Artist3D, options: FogOptions) =
+  ## The haze the scene sinks into: it rides every scene shader -- meshes,
+  ## splatted ground, and water -- and reaches the depth pass too, which
+  ## drops geometry the fog has already swallowed.
+  a.fog = options
 
 proc pushMatrix*(a: Artist3D) =
   a.stack.add a.model
@@ -285,6 +402,13 @@ proc `end`*(a: Artist3D) =
     if a.pending.indexCount > 0:
       a.splatBatches.add a.pending
     return
+  if a.watering:
+    a.building = false
+    a.watering = false
+    a.pending.indexCount = a.waterIndices.len.uint32 - a.pending.firstIndex
+    if a.pending.indexCount > 0:
+      a.waterBatches.add a.pending
+    return
   case a.mode
   of TriangleFan:
     if a.face.len > 2:
@@ -318,7 +442,7 @@ proc begin*(a: Artist3D, mode: DrawMode = Triangles) =
   )
 
 proc vertex*(a: Artist3D, v: Vec3) =
-  if not a.building or a.splatting:
+  if not a.building or a.splatting or a.watering:
     return
   let vertex = Vertex(
     position: v,
@@ -360,7 +484,7 @@ proc quad*(a: Artist3D, v0, v1, v2, v3: Vertex) =
   ## Immediate quad from complete vertices: appends the two triangles
   ## directly, skipping the per-corner staging the generic path does.
   ## Vertex-rich meshes stream through this.
-  if not a.building or a.splatting:
+  if not a.building or a.splatting or a.watering:
     return
   case a.mode
   of Quads:
@@ -397,6 +521,34 @@ proc splatQuad*(a: Artist3D, v0, v1, v2, v3: SplatVertex) =
   a.splatVertices.add v2
   a.splatVertices.add v3
   a.splatIndices.add [first, first + 1, first + 2, first, first + 2, first + 3]
+
+proc beginWater*(a: Artist3D) =
+  ## Open a batch of water under the current matrices: `waterQuad` adds to
+  ## it, and `end` closes it. Water is drawn after everything else, blended
+  ## over it, with the options `setWaterOptions` last set.
+  if a.building:
+    a.`end`()
+  a.building = true
+  a.watering = true
+  a.pending = Batch(
+    firstIndex: a.waterIndices.len.uint32,
+    uniforms: a.uniformState(a.model, a.projection * a.view),
+  )
+
+proc waterQuad*(a: Artist3D, v0, v1, v2, v3: WaterVertex) =
+  ## Two triangles of water, corners in winding order; the four vertices are
+  ## shared between them.
+  if not a.watering:
+    return
+  let first = a.waterVertices.len.uint32
+  a.waterVertices.add v0
+  a.waterVertices.add v1
+  a.waterVertices.add v2
+  a.waterVertices.add v3
+  a.waterIndices.add [first, first + 1, first + 2, first, first + 2, first + 3]
+
+proc setWaterOptions*(a: Artist3D, options: WaterOptions) =
+  a.waterOptions = options
 
 proc setSplatAtlas*(a: Artist3D, atlas: TextureAtlas) =
   ## Stage the layer textures splatted ground is drawn with: cell `i` of the
@@ -478,10 +630,12 @@ proc render*(a: Artist3D, mesh: Mesh, model: Mat4) =
   a.popMatrix()
 
 proc refreshProjection(a: Artist3D, frame: GpuFrame) =
+  if frame.width > 0 and frame.height > 0:
+    a.aspect = frame.width.float32 / frame.height.float32
   if not (a.perspective and frame.width > 0 and frame.height > 0):
     return
   let
-    aspect = frame.width.float32 / frame.height.float32
+    aspect = a.aspect
     # Letterbox fit: widen the frustum until the reference region fits,
     # never shrink it, so the bars are filled by extra scene content.
     scale =
@@ -496,6 +650,8 @@ proc refreshProjection(a: Artist3D, frame: GpuFrame) =
   for batch in a.batches.mitems:
     batch.uniforms.viewProj = viewProj
   for batch in a.splatBatches.mitems:
+    batch.uniforms.viewProj = viewProj
+  for batch in a.waterBatches.mitems:
     batch.uniforms.viewProj = viewProj
 
 proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
@@ -523,22 +679,104 @@ proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pip
     pushFragment()
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
+proc drawWater(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
+               pushFragment: proc ()) =
+  if a.waterBatches.len == 0:
+    return
+  pass.bindPipeline(pipeline)
+  pass.bindVertexBuffers([BufferBinding(buffer: a.waterVertexBuffer)])
+  pass.bindIndexBuffer(a.waterIndexBuffer)
+  for batch in a.waterBatches:
+    cmd.pushVertexUniforms(0, batch.uniforms)
+    pushFragment()
+    pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+
+func waterUniforms(a: Artist3D): WaterUniforms =
+  let
+    o = a.waterOptions
+    fog = a.fog
+  WaterUniforms(
+    shallow: vec4(o.shallow.x, o.shallow.y, o.shallow.z, o.clarity),
+    deep: vec4(o.deep.x, o.deep.y, o.deep.z, o.rippleMeters),
+    sky: vec4(o.sky.x, o.sky.y, o.sky.z, o.rippleStrength),
+    eye: vec4(a.eye.x, a.eye.y, a.eye.z, o.time),
+    sun: vec4(-a.lightDir.x, -a.lightDir.y, -a.lightDir.z, a.lightIntensity),
+    ambient: vec4(a.ambient, 0, 0, 0),
+    fogNear: vec4(fog.nearColor, fog.density),
+    fogFar: vec4(fog.farColor, fog.falloff),
+    fogLimit: vec4(fog.limit, 0, 0, 0),
+  )
+
+proc syncSkybox(a: Artist3D, cmd: CommandBuffer) =
+  ## Bring the cube texture to what the staged sky asks for: rebuild it
+  ## when a different picture came, and keep a white one at hand so the
+  ## sky's sampler always has a binding, skybox or not.
+  let wanted = if a.sky.useSkybox: a.sky.skybox else: nil
+  if not wanted.isNil and a.skybox.source != wanted:
+    if not a.skybox.texture.isNil:
+      a.device.retire(a.skybox.texture)
+      a.skybox.texture = nil
+    let face = wanted.faceSize.uint32
+    a.skybox = SkyboxState(
+      source: wanted,
+      texture: newCubeTexture(a.device, face, R8G8B8A8),
+      size: face,
+    )
+    var bytes = wanted.faces()
+    cmd.uploadCubeFaces(a.skybox.texture, addr bytes[0], face)
+  if a.skybox.texture.isNil:
+    a.skybox = SkyboxState(
+      texture: newCubeTexture(a.device, 1, R8G8B8A8),
+      size: 1,
+    )
+    var white = newSeq[uint8](6 * 4)
+    for byte in white.mitems:
+      byte = 255'u8
+    cmd.uploadCubeFaces(a.skybox.texture, addr white[0], 1)
+
+proc drawSky(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
+  ## The dome behind the frame: one fullscreen triangle, its fragments
+  ## aimed by un-projecting the screen through the camera's rotation,
+  ## sampled from the skybox where one shows and painted from the sky's
+  ## colours where none does.
+  var uniforms = skyUniforms(a.sky, a.view,
+    vec4(a.fovTan * a.aspect, a.fovTan, 0, 0),
+    hasTexture = not a.skybox.source.isNil)
+  cmd.pushVertexUniforms(0, uniforms)
+  cmd.pushFragmentUniforms(0, uniforms)
+  pass.bindPipeline(a.skyPipeline)
+  pass.bindFragmentSamplers([(texture: a.skybox.texture, sampler: a.skySampler)])
+  pass.drawPrimitive(3)
+
 proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
-  ## Every batch in colour: meshes, then splatted ground.
-  a.drawBatches(cmd, pass, a.pipeline)
-  let uniforms = SplatUniforms(splat: vec4(
-    max(a.splatOptions.metersPerRepeat, 1e-3f), max(a.splatOptions.blendDepth, 1e-3f),
-    a.splatOptions.heightContrast, 0))
+  ## The sky first, then every batch in colour: meshes, then splatted
+  ## ground, then the water blended over both -- all of them sinking into
+  ## the same fog.
+  if a.sky.enabled:
+    a.drawSky(cmd, pass)
+  let fog = fogUniforms(a.fog, a.eye)
+  a.drawBatches(cmd, pass, a.pipeline,
+    proc () = cmd.pushFragmentUniforms(0, fog))
+  let uniforms = SplatUniforms(
+    splat: vec4(
+      max(a.splatOptions.metersPerRepeat, 1e-3f), max(a.splatOptions.blendDepth, 1e-3f),
+      a.splatOptions.heightContrast, 0),
+    fog: fog,
+  )
   a.drawSplats(cmd, pass, a.splatPipeline,
     proc () = cmd.pushFragmentUniforms(0, uniforms), textured = true)
+  let water = a.waterUniforms()
+  a.drawWater(cmd, pass, a.waterPipeline,
+    proc () = cmd.pushFragmentUniforms(0, water))
 
 proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   ## Every batch again, packing linear depth for the occlusion pass.
   let
     (near, far) = a.nearFar()
-    pushDepth = a.post.newDepthUniformPusher(cmd, near, far)
+    pushDepth = a.post.newDepthUniformPusher(cmd, near, far, depthFogFade(a.fog))
   a.drawBatches(cmd, pass, a.post.depthPipeline, pushDepth)
   a.drawSplats(cmd, pass, a.splatDepthPipeline, pushDepth, textured = false)
+  a.drawWater(cmd, pass, a.waterDepthPipeline, pushDepth)
 
 proc presentSsao(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
   a.post.ensureSize(frame.width, frame.height)
@@ -552,44 +790,95 @@ proc presentSsao(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
   a.post.runOcclusion(frame.cmd, a.ssao, near, far, a.fovTan)
   a.post.runComposite(frame.cmd, frame.target)
 
+proc stage(picture: var StagedPicture, width, height: int,
+           pixels: openArray[uint8]) =
+  if width <= 0 or height <= 0 or pixels.len < width * height * 4:
+    return
+  picture.bytes.setLen(width * height * 4)
+  copyMem(addr picture.bytes[0], unsafeAddr pixels[0], picture.bytes.len)
+  picture.width = width.uint32
+  picture.height = height.uint32
+  picture.valid = true
+  picture.dirty = true
+
 proc setOverlayPicture*(a: Artist3D, width, height: int,
                         pixels: openArray[uint8]) =
   ## Stage the premultiplied BGRA8 picture `present` blends over every
   ## frame -- row 0 at the window's top: the seam the offscreen UI paints
   ## through. The bytes are copied; the picture rides until
   ## `clearOverlayPicture` or the next stage.
-  if width <= 0 or height <= 0 or pixels.len < width * height * 4:
-    return
-  a.overlayBytes.setLen(width * height * 4)
-  copyMem(addr a.overlayBytes[0], unsafeAddr pixels[0], a.overlayBytes.len)
-  a.overlayWidth = width.uint32
-  a.overlayHeight = height.uint32
-  a.overlayValid = true
+  a.overlay.stage(width, height, pixels)
 
 proc clearOverlayPicture*(a: Artist3D) =
   ## Stop drawing the staged picture; the next present shows only the scene.
-  a.overlayValid = false
+  a.overlay.valid = false
 
-proc presentOverlay(a: Artist3D, cmd: CommandBuffer, target: gpu.Texture) =
-  ## One fullscreen pass over the finished frame: upload the staged picture
-  ## and blend it with premultiplied alpha.
-  if a.overlayTexture.isNil or a.overlayTextureWidth != a.overlayWidth or
-      a.overlayTextureHeight != a.overlayHeight:
-    if not a.overlayTexture.isNil:
-      a.device.retire(a.overlayTexture)
-    a.overlayTexture = newPictureTexture(a.device, a.overlayWidth,
-      a.overlayHeight, Rgba8)
-    a.overlayTextureWidth = a.overlayWidth
-    a.overlayTextureHeight = a.overlayHeight
-  cmd.uploadPicture(a.overlayTexture, addr a.overlayBytes[0],
-    a.overlayWidth, a.overlayHeight)
+proc setBackdropPicture*(a: Artist3D, width, height: int,
+                         pixels: openArray[uint8]) =
+  ## Stage a premultiplied BGRA8 picture laid over the scene but under the
+  ## frame's shapes and the overlay: a map for the shapes to mark up, with
+  ## the UI still on top. Staged and kept like the overlay picture.
+  a.backdrop.stage(width, height, pixels)
+
+proc clearBackdropPicture*(a: Artist3D) =
+  ## Stop drawing the backdrop picture.
+  a.backdrop.valid = false
+
+proc shapes*(a: Artist3D): var Shapes =
+  ## The frame's 2D shapes, in window pixels: draw markers, icons and
+  ## pointers into it (see `ellipse/drawing/shapes`). They are laid over
+  ## the scene and the backdrop, under the overlay, and cleared once the
+  ## frame is presented.
+  a.shapes2d
+
+proc presentPicture(a: Artist3D, cmd: CommandBuffer, target: gpu.Texture,
+                    picture: var StagedPicture) =
+  ## One fullscreen pass over the frame so far: upload the staged picture if
+  ## it changed since, and blend it with premultiplied alpha.
+  if picture.texture.isNil or picture.textureWidth != picture.width or
+      picture.textureHeight != picture.height:
+    if not picture.texture.isNil:
+      a.device.retire(picture.texture)
+    picture.texture = newPictureTexture(a.device, picture.width,
+      picture.height, Rgba8)
+    picture.textureWidth = picture.width
+    picture.textureHeight = picture.height
+    picture.dirty = true
+  if picture.dirty:
+    cmd.uploadPicture(picture.texture, addr picture.bytes[0],
+      picture.width, picture.height)
+    picture.dirty = false
   let pass = cmd.beginOverlay(target)
   pass.bindPipeline(a.overlayPipeline)
   pass.bindFragmentSamplers([
-    (texture: a.overlayTexture, sampler: a.overlaySampler),
+    (texture: picture.texture, sampler: a.overlaySampler),
   ])
   pass.drawPrimitive(3)
   pass.endRender()
+
+proc presentShapes(a: Artist3D, cmd: CommandBuffer, target: gpu.Texture,
+                   width, height: uint32) =
+  ## The frame's shapes in one pass over what `target` shows; `present`
+  ## uploads their vertices before any pass opens.
+  if a.shapes2d.vertices.len == 0 or width == 0 or height == 0:
+    return
+  let pass = cmd.beginOverlay(target)
+  pass.bindPipeline(a.shapePipeline)
+  pass.bindVertexBuffers([BufferBinding(buffer: a.shapeBuffer)])
+  cmd.pushVertexUniforms(0, ShapeUniforms(
+    viewport: vec4(width.float32, height.float32, 0, 0)))
+  pass.drawPrimitive(a.shapes2d.vertices.len.uint32)
+  pass.endRender()
+
+proc presentLayers(a: Artist3D, cmd: CommandBuffer, target: gpu.Texture,
+                   width, height: uint32) =
+  ## Everything laid over the scene, bottom to top: the backdrop picture,
+  ## the shapes, the overlay picture.
+  if a.backdrop.valid:
+    a.presentPicture(cmd, target, a.backdrop)
+  a.presentShapes(cmd, target, width, height)
+  if a.overlay.valid:
+    a.presentPicture(cmd, target, a.overlay)
 
 proc snapshot*(a: Artist3D, path: string) =
   ## Save the frame being built to `path` as a PNG once present() draws it.
@@ -625,8 +914,7 @@ proc snapshotScene(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
     let pass = frame.cmd.beginRender(a.snapshotTarget, clearColor, depth)
     a.drawScene(frame.cmd, pass)
     pass.endRender()
-  if a.overlayValid:
-    a.presentOverlay(frame.cmd, a.snapshotTarget)
+  a.presentLayers(frame.cmd, a.snapshotTarget, frame.width, frame.height)
   a.snapshotDownload = frame.cmd.stageDownload(a.snapshotTarget, frame.width, frame.height)
 
 proc saveSnapshot(a: Artist3D, path: string, width, height: uint32) =
@@ -645,12 +933,18 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
   if frame.valid:
     if a.splatStaged:
       a.uploadSplatAtlas(frame.cmd)
-    if a.batches.len > 0 or a.splatBatches.len > 0:
+    frame.cmd.upload(a.shapeBuffer, a.shapes2d.vertices)
+    if a.batches.len > 0 or a.splatBatches.len > 0 or a.waterBatches.len > 0 or
+        a.sky.enabled:
       a.refreshProjection(frame)
+      if a.sky.enabled:
+        a.syncSkybox(frame.cmd)
       frame.cmd.upload(a.vertexBuffer, a.vertices)
       frame.cmd.upload(a.indexBuffer, a.indices)
       frame.cmd.upload(a.splatVertexBuffer, a.splatVertices)
       frame.cmd.upload(a.splatIndexBuffer, a.splatIndices)
+      frame.cmd.upload(a.waterVertexBuffer, a.waterVertices)
+      frame.cmd.upload(a.waterIndexBuffer, a.waterIndices)
       if a.ssao.enabled:
         a.presentSsao(frame, clearColor)
       else:
@@ -662,8 +956,7 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
     else:
       frame.beginRender(clearColor)
       frame.pass.endRender()
-    if a.overlayValid:
-      a.presentOverlay(frame.cmd, frame.target)
+    a.presentLayers(frame.cmd, frame.target, frame.width, frame.height)
   frame.endFrame()
   a.reset()
   if frame.valid and not a.snapshotDownload.isNil:

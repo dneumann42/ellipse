@@ -27,7 +27,7 @@ void main() {
 
   mat3 normalMatrix = transpose(inverse(mat3(u.model)));
   vec3 n = normalize(normalMatrix * normal);
-  vec3 l = normalize(-u.light.xyz);
+  vec3 l = normalize(u.light.xyz); // toward the light: the artist sends it so
   float diffuse = max(dot(n, l), 0.0) * u.light.w;
   float specular = pow(max(dot(reflect(-l, n), normalize(-world.xyz)), 0.0), u.params.y) * u.params.z;
 

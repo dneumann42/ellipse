@@ -13,7 +13,7 @@ type
     resolutionRadius, projection, strengthBias: array[4, float32]
 
   DepthUniforms = object
-    nearFar: array[4, float32]
+    nearFar, fogFade: array[4, float32]
 
   SsaoPass* = ref object
     device: Device
@@ -115,8 +115,15 @@ proc beginDepth*(p: SsaoPass, cmd: CommandBuffer, depth: Texture): RenderPass =
   pass.bindPipeline(p.depthPipeline)
   pass
 
-func newDepthUniformPusher*(p: SsaoPass, cmd: CommandBuffer, near, far: float32): proc () =
-  let uniforms = DepthUniforms(nearFar: [near, far, 0.0f, 0.0f])
+func newDepthUniformPusher*(p: SsaoPass, cmd: CommandBuffer, near, far,
+                            fogFade: float32): proc () =
+  ## `fogFade` is the reach past which the scene has faded into the sky:
+  ## geometry beyond it is not drawn into the depth either, so occlusion
+  ## never darkens a haze the eye cannot see through.
+  let uniforms = DepthUniforms(
+    nearFar: [near, far, 0.0f, 0.0f],
+    fogFade: [fogFade, 0.0f, 0.0f, 0.0f],
+  )
   proc () = cmd.pushFragmentUniforms(0, uniforms)
 
 proc runOcclusion*(p: SsaoPass, cmd: CommandBuffer, options: SsaoOptions,

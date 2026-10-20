@@ -350,6 +350,56 @@ proc uploadPicture*(cmd: CommandBuffer, texture: Texture, data: pointer,
   uploadToGPUTexture(copyPass, addr source, addr destination, false)
   endGPUCopyPass(copyPass)
 
+proc newCubeTexture*(device: Device, size: uint32, format: TextureFormat): Texture =
+  ## A cube map of six square faces `size` pixels across: the sky's box.
+  ## Only the sampler ever reads it, so that is all it is made for.
+  var info = GPUTextureCreateInfo(
+    `type`: GPU_TEXTURETYPE_CUBE,
+    format: GPUTextureFormat(format.int32),
+    usage: uint32(GPU_TEXTUREUSAGE_SAMPLER),
+    width: size,
+    height: size,
+    layer_count_or_depth: 6,
+    num_levels: 1,
+    sample_count: GPU_SAMPLECOUNT_1,
+  )
+  let raw = createGPUTexture(device.raw, addr info)
+  if raw.isNil:
+    raiseSdlError("Failed to create cube texture")
+  Texture(device: device, raw: raw, owned: true)
+
+proc uploadCubeFaces*(cmd: CommandBuffer, texture: Texture, data: pointer,
+                     size: uint32) =
+  ## Copy six RGBA8 faces, laid one after another in CPU memory -- +X, -X,
+  ## +Y, -Y, +Z, -Z -- onto the faces of a cube texture. The first upload
+  ## cycles the texture; the rest write into that cycle.
+  let
+    faceSize = size * size * 4
+    total = faceSize * 6
+    transfer = pictureTransfer(cmd.device, total)
+    mapped = mapGPUTransferBuffer(cmd.device.raw, transfer, true)
+  if mapped.isNil:
+    raiseSdlError("Failed to map cube transfer buffer")
+  copyMem(mapped, data, total.int)
+  unmapGPUTransferBuffer(cmd.device.raw, transfer)
+  let copyPass = beginGPUCopyPass(cmd.raw)
+  for face in 0'u32 ..< 6:
+    var source = GPUTextureTransferInfo(
+      transfer_buffer: cast[ptr GPUTransferBuffer](transfer),
+      offset: face * faceSize,
+      pixels_per_row: size,
+      rows_per_layer: size,
+    )
+    var destination = GPUTextureRegion(
+      texture: cast[ptr GPUTexture](texture.raw),
+      layer: face,
+      w: size,
+      h: size,
+      d: 1,
+    )
+    uploadToGPUTexture(copyPass, addr source, addr destination, face == 0)
+  endGPUCopyPass(copyPass)
+
 proc newLayeredTexture*(device: Device, width, height, layers, levels: uint32,
                         format: TextureFormat): Texture =
   ## A 2D array texture of `layers` same-sized pictures, each with `levels`

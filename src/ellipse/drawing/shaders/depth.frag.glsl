@@ -4,6 +4,7 @@ layout(location = 0) out vec4 outColor;
 
 layout(set = 3, binding = 0) uniform Depth {
   vec4 uNearFar; // x = near, y = far
+  vec4 uFogFade; // x: metres past which geometry stops occluding
 };
 
 vec4 packDepth(float value) {
@@ -20,5 +21,10 @@ void main() {
   float near = uNearFar.x;
   float far = uNearFar.y;
   float linear = (near * far) / max(far - z * (far - near), 0.0001);
+  // Geometry the fog has already swallowed must not occlude: it would
+  // darken the sky the fading scene lets through.
+  if (linear >= uFogFade.x) {
+    discard;
+  }
   outColor = packDepth(linear / far);
 }
