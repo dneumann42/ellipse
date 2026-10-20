@@ -7,7 +7,7 @@ SHADERCROSS := shadercross
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
 
-.PHONY: build_owl run_owl test_owl test_repl install owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui
+.PHONY: build_owl run_owl test_owl test_repl install owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui test_atlas
 
 OWL_FLAGS := --outdir:bin/ --nimcache:build/nimcache -p:src -p:src/clay
 
@@ -95,6 +95,11 @@ test_gui:
 	  SDL_VIDEODRIVER=offscreen $(NIM) -r --outdir:bin/tests/ \
 	    --nimcache:build/nimcache-gui -p:src -p:src/clay c tests/gui/$$t || exit 1; \
 	done
+
+# Aseprite reading and atlas packing (owl metadata beside each atlas image).
+test_atlas:
+	@mkdir -p build
+	$(NIM) $(ELLIPSE_FLAGS) -r c tests/atlas_test.nim
 
 gui_clean:
 	rm -rf bin/tests build/nimcache-gui

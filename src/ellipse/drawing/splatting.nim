@@ -84,12 +84,13 @@ func layered*(atlas: TextureAtlas): seq[uint8] =
       copyMem(addr result[(cell * side + y) * row],
               unsafeAddr atlas.pixels[atlas.texelIndex(cell, 0, y)], row)
 
-proc readTextureAtlas*(path: string, columns, rows: int): TextureAtlas =
-  ## An atlas of `columns` by `rows` square cells from an image on disk (PNG
-  ## or anything else SDL_image reads), its alpha taken as the texel
-  ## heights: a fully opaque image blends its layers by weight alone. The
-  ## cell size comes from the image's width. Returns an atlas with a `cell`
-  ## of 0 when the file cannot be read or its cells would not be square.
+proc readTextureAtlas*(path: string, cell: int): TextureAtlas =
+  ## An atlas of square cells of `cell` pixels from an image on disk (PNG or
+  ## anything else SDL_image reads), its alpha taken as the texel heights: a
+  ## fully opaque image blends its layers by weight alone. The image may be
+  ## any whole number of cells across and down; that many cells it holds.
+  ## Returns an atlas with a `cell` of 0 when the file cannot be read or is
+  ## not a whole number of cells either way.
   let loaded = sdl3_image.load(path.cstring)
   if loaded.isNil:
     return
@@ -100,9 +101,9 @@ proc readTextureAtlas*(path: string, columns, rows: int): TextureAtlas =
   let
     width = rgba.w.int
     height = rgba.h.int
-    cell = width div max(columns, 1)
-  if cell > 0 and cell * columns == width and cell * rows == height:
-    result = newTextureAtlas(cell, columns, rows)
+  if cell > 0 and width > 0 and height > 0 and width mod cell == 0 and
+      height mod cell == 0:
+    result = newTextureAtlas(cell, width div cell, height div cell)
     for y in 0 ..< height:
       copyMem(addr result.pixels[y * width * 4],
               addr rgba.pixels[y * rgba.pitch.int], width * 4)

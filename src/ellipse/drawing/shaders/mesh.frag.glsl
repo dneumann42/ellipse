@@ -1,14 +1,19 @@
 #version 450
 
 // Meshes carry their colour from the vertex stage; the fragment stage only
-// sinks them into the fog: a haze that thickens with reach, fades out at
-// the limit, and past it lets the sky show through.
+// tints that colour by the mesh texture when the batch asked for one (the
+// vertex stage hands the atlas layer over in `fragmentCell`, 0 meaning
+// none), and sinks them into the fog: a haze that thickens with reach,
+// fades out at the limit, and past it lets the sky show through.
 
 layout(location = 0) in vec4 vertexColor;
 layout(location = 1) in vec2 fragmentUv;
 layout(location = 2) in vec3 worldPosition;
+layout(location = 3) in float fragmentCell;
 
 layout(location = 0) out vec4 outColor;
+
+layout(set = 2, binding = 0) uniform sampler2DArray uMeshTex;
 
 layout(set = 3, binding = 0) uniform Fog {
   vec4 uFogEye;   // xyz: the eye
@@ -35,7 +40,14 @@ void main() {
   if (visibility <= 0.001) {
     discard;
   }
+  vec3 colour = vertexColor.rgb;
+  if (fragmentCell > 0.5) {
+    // The cell rides in the batch's uniform, so every fragment of a
+    // textured draw takes this branch together and the implicit
+    // derivatives stay well defined.
+    colour *= texture(uMeshTex, vec3(fragmentUv, floor(fragmentCell - 0.5))).rgb;
+  }
   float amount = fogAmount(reach);
-  vec3 hazed = mix(vertexColor.rgb, mix(uFogNear.rgb, uFogFar.rgb, amount), amount);
+  vec3 hazed = mix(colour, mix(uFogNear.rgb, uFogFar.rgb, amount), amount);
   outColor = vec4(hazed, vertexColor.a * visibility);
 }

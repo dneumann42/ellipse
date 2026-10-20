@@ -113,6 +113,8 @@ type
     ## `ONE` on the source side instead of `SRC_ALPHA` (see `newPipeline`)
     cull*: CullMode = NoCulling
     depthWrite*: bool = true
+    instanced*: bool = false ## the attributes step once per instance, not
+    ## per vertex: the vertex stage builds its corners from `gl_VertexIndex`
 
   ClearColor* = tuple[r, g, b, a: float32]
 
@@ -496,16 +498,18 @@ proc generateMipmaps*(cmd: CommandBuffer, texture: Texture) =
   generateMipmapsForGPUTexture(cmd.raw, texture.raw)
 
 proc newSampler*(device: Device, repeat = false, mipmaps = false,
-                 anisotropy = 0.0f): Sampler =
+                 anisotropy = 0.0f, nearest = false): Sampler =
   ## Linear filtering, clamped at the edges unless `repeat` tiles the
   ## texture; `mipmaps` blends between mip levels, and an `anisotropy`
-  ## above 1 keeps surfaces seen at a grazing angle sharp.
+  ## above 1 keeps surfaces seen at a grazing angle sharp. `nearest` keeps
+  ## magnified texels square -- pixel art up close -- while minified ones
+  ## still filter.
   let address =
     if repeat: GPU_SAMPLERADDRESSMODE_REPEAT
     else: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE
   var info = GPUSamplerCreateInfo(
     min_filter: GPU_FILTER_LINEAR,
-    mag_filter: GPU_FILTER_LINEAR,
+    mag_filter: if nearest: GPU_FILTER_NEAREST else: GPU_FILTER_LINEAR,
     mipmap_mode:
       if mipmaps: GPU_SAMPLERMIPMAPMODE_LINEAR
       else: GPU_SAMPLERMIPMAPMODE_NEAREST,
@@ -603,7 +607,9 @@ proc newPipeline*(device: Device, desc: PipelineDesc): Pipeline =
   var bufferDescriptions = [GPUVertexBufferDescription(
     slot: 0,
     pitch: desc.stride,
-    input_rate: GPU_VERTEXINPUTRATE_VERTEX,
+    input_rate:
+      if desc.instanced: GPU_VERTEXINPUTRATE_INSTANCE
+      else: GPU_VERTEXINPUTRATE_VERTEX,
     instance_step_rate: 0,
   )]
   var attributeDescriptions: seq[GPUVertexAttribute] = @[]
