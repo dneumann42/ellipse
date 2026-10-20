@@ -82,6 +82,8 @@ type
     device: Device
     pipeline, depthPipeline: Pipeline
     sampler: Sampler
+    pixelSampler: Sampler ## no filter at all, for the retro look
+    pixelated*: bool ## sprites sampled through `pixelSampler` this frame
     texture: Texture
     staged: BillboardAtlas
     atlasStaged: bool
@@ -183,6 +185,7 @@ proc newBillboardPass*(device: Device, colorFormat: TextureFormat): BillboardPas
       colorFormat: Rgba8, depthFormat: Depth32,
     )),
     sampler: newSampler(device, mipmaps = true, nearest = true),
+    pixelSampler: newSampler(device, mipmaps = true, pixelated = true),
     options: newBillboardOptions(),
   )
 
@@ -260,7 +263,8 @@ proc uniformsFor(p: BillboardPass, view, viewProj: Mat4, eye, toLight: Vec3,
 proc drawRuns(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
               pipeline: Pipeline, base: BillboardUniforms, pushFragment: proc ()) =
   pass.bindPipeline(pipeline)
-  pass.bindFragmentSamplers([(texture: p.texture, sampler: p.sampler)])
+  let sampler = if p.pixelated: p.pixelSampler else: p.sampler
+  pass.bindFragmentSamplers([(texture: p.texture, sampler: sampler)])
   pushFragment()
   var
     uniforms = base

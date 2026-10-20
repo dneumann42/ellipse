@@ -248,26 +248,31 @@ proc acquireSwapchain*(cmd: CommandBuffer, window: Window): tuple[texture: Textu
     return (nil, 0'u32, 0'u32)
   (Texture(device: cmd.device, raw: raw, owned: false), width, height)
 
+proc newDepthTexture*(device: Device, width, height: uint32): Texture =
+  ## A depth target of its own, for a pass drawn at another size than the
+  ## window's: `depthTarget` keeps only the one, sized to the frame.
+  var info = GPUTextureCreateInfo(
+    `type`: GPU_TEXTURETYPE_2D,
+    format: GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT,
+    usage: uint32(GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET),
+    width: width,
+    height: height,
+    layer_count_or_depth: 1,
+    num_levels: 1,
+    sample_count: GPU_SAMPLECOUNT_1,
+  )
+  let raw = createGPUTexture(device.raw, addr info)
+  if raw.isNil:
+    raiseSdlError("Failed to create depth texture")
+  Texture(device: device, raw: raw, owned: true)
+
 proc depthTarget*(device: Device, width, height: uint32): Texture =
   if width == 0 or height == 0:
     return nil
   if device.depth.isNil or device.depthWidth != width or device.depthHeight != height:
     if not device.depth.isNil:
       device.freeTextures.add device.depth
-    var info = GPUTextureCreateInfo(
-      `type`: GPU_TEXTURETYPE_2D,
-      format: GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT,
-      usage: uint32(GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET),
-      width: width,
-      height: height,
-      layer_count_or_depth: 1,
-      num_levels: 1,
-      sample_count: GPU_SAMPLECOUNT_1,
-    )
-    let raw = createGPUTexture(device.raw, addr info)
-    if raw.isNil:
-      raiseSdlError("Failed to create depth texture")
-    device.depth = Texture(device: device, raw: raw, owned: true)
+    device.depth = newDepthTexture(device, width, height)
     device.depthWidth = width
     device.depthHeight = height
   device.depth
@@ -498,27 +503,33 @@ proc generateMipmaps*(cmd: CommandBuffer, texture: Texture) =
   generateMipmapsForGPUTexture(cmd.raw, texture.raw)
 
 proc newSampler*(device: Device, repeat = false, mipmaps = false,
-                 anisotropy = 0.0f, nearest = false): Sampler =
+                 anisotropy = 0.0f, nearest = false,
+                 pixelated = false): Sampler =
   ## Linear filtering, clamped at the edges unless `repeat` tiles the
   ## texture; `mipmaps` blends between mip levels, and an `anisotropy`
   ## above 1 keeps surfaces seen at a grazing angle sharp. `nearest` keeps
   ## magnified texels square -- pixel art up close -- while minified ones
-  ## still filter.
+  ## still filter. `pixelated` filters nothing at all: every texel is
+  ## square near and far, and with `mipmaps` the level is picked whole
+  ## rather than blended -- the hard-edged look of a console without a
+  ## texture filter.
   let address =
     if repeat: GPU_SAMPLERADDRESSMODE_REPEAT
     else: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE
+  let filtered = not pixelated
   var info = GPUSamplerCreateInfo(
-    min_filter: GPU_FILTER_LINEAR,
-    mag_filter: if nearest: GPU_FILTER_NEAREST else: GPU_FILTER_LINEAR,
+    min_filter: if filtered: GPU_FILTER_LINEAR else: GPU_FILTER_NEAREST,
+    mag_filter:
+      if nearest or pixelated: GPU_FILTER_NEAREST else: GPU_FILTER_LINEAR,
     mipmap_mode:
-      if mipmaps: GPU_SAMPLERMIPMAPMODE_LINEAR
+      if mipmaps and filtered: GPU_SAMPLERMIPMAPMODE_LINEAR
       else: GPU_SAMPLERMIPMAPMODE_NEAREST,
     address_mode_u: address,
     address_mode_v: address,
     address_mode_w: address,
     max_anisotropy: anisotropy,
     max_lod: if mipmaps: 1000.0f else: 0.0f,
-    enable_anisotropy: anisotropy > 1.0f,
+    enable_anisotropy: filtered and anisotropy > 1.0f,
   )
   let raw = createGPUSamplerRaw(device.raw, addr info)
   if raw.isNil:

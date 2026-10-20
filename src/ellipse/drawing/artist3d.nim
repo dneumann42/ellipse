@@ -4,6 +4,7 @@ import ../platform/[gpu, sdl]
 import billboards
 import fog
 import geometry
+import retro
 import shapes
 import sky
 import snapshot
@@ -14,6 +15,7 @@ import water
 export billboards
 export fog
 export geometry
+export retro
 export shapes
 export sky
 export snapshot
@@ -110,12 +112,14 @@ type
     splatOptions: SplatOptions
     splatTexture: gpu.Texture ## one array layer per atlas cell
     splatSampler: Sampler
+    splatPixelSampler: Sampler ## ... and unfiltered, for the retro look
     splatBytes: seq[uint8] ## an atlas staged for the next present, cell
     splatCell, splatCount: uint32 ## after cell, and its cells' size and number
     splatStaged: bool
     meshTexture: gpu.Texture ## the array the mesh pipeline samples when a
     ## batch asks for a texture; a white pixel while none has been staged
     meshSampler: Sampler
+    meshPixelSampler: Sampler
     meshBytes: seq[uint8] ## an atlas staged for the next present
     meshCell, meshCount: uint32
     meshStaged: bool
@@ -129,12 +133,18 @@ type
     waterOptions: WaterOptions
     skyPipeline: Pipeline
     skySampler: Sampler
+    skyPixelSampler: Sampler
     sky: SkyOptions
     skybox: SkyboxState ## the cube texture the sky samples, and what made it
     fog: FogOptions
     sprites: BillboardPass ## upright sprites by the hundred thousand
     aspect: float32 ## width over height of the frame last presented: the
     ## sky spreads its rays by it, so the dome matches the frustum
+    retro: RetroOptions
+    retroColor, retroDepth: gpu.Texture ## the small picture the scene is
+    ## drawn into while the retro look is on, and its depth
+    retroWidth, retroHeight: uint32
+    blowUpSampler: Sampler ## reads the small picture back pixel by pixel
 
 func uniformState(a: Artist3D, model, viewProj: Mat4): Uniforms =
   Uniforms(
@@ -241,7 +251,9 @@ proc newArtist*(app: App): Artist3D =
     splatIndexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
     splatOptions: newSplatOptions(),
     splatSampler: newSampler(device, repeat = true, mipmaps = true, anisotropy = 8),
+    splatPixelSampler: newSampler(device, repeat = true, mipmaps = true, pixelated = true),
     meshSampler: newSampler(device, repeat = true, mipmaps = true, anisotropy = 8),
+    meshPixelSampler: newSampler(device, repeat = true, mipmaps = true, pixelated = true),
     meshBytes: @[255'u8, 255'u8, 255'u8, 255'u8], # one white cell until an atlas comes
     meshCell: 1,
     meshCount: 1,
@@ -274,9 +286,12 @@ proc newArtist*(app: App): Artist3D =
       depthWrite: false,
     )),
     skySampler: newSampler(device),
+    skyPixelSampler: newSampler(device, pixelated = true),
     fog: newFogOptions(),
     sprites: newBillboardPass(device, app.gpuSwapchainFormat()),
     aspect: 1.0f,
+    retro: newRetroOptions(),
+    blowUpSampler: newSampler(device, pixelated = true),
   )
 
 proc reset*(a: Artist3D) =
@@ -356,6 +371,13 @@ proc setSky*(a: Artist3D, options: SkyOptions) =
   ## before the scene, and the skybox cube is rebuilt at the next present
   ## when `options.skybox` is a picture the artist has not seen.
   a.sky = options
+
+proc setRetro*(a: Artist3D, options: RetroOptions) =
+  ## Draw the scene small and blow it up, its textures unfiltered -- or,
+  ## with the look off, at the window's own resolution, filtered as ever.
+  ## Holds every frame until the next call (see `ellipse/drawing/retro`).
+  a.retro = options
+  a.sprites.pixelated = options.pixelatedTextures
 
 proc setFog*(a: Artist3D, options: FogOptions) =
   ## The haze the scene sinks into: it rides every scene shader -- meshes,
@@ -738,7 +760,9 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
   pass.bindVertexBuffers([BufferBinding(buffer: a.vertexBuffer)])
   pass.bindIndexBuffer(a.indexBuffer)
   if textured:
-    pass.bindFragmentSamplers([(texture: a.meshTexture, sampler: a.meshSampler)])
+    let sampler =
+      if a.retro.pixelatedTextures: a.meshPixelSampler else: a.meshSampler
+    pass.bindFragmentSamplers([(texture: a.meshTexture, sampler: sampler)])
   for batch in a.batches:
     cmd.pushVertexUniforms(0, batch.uniforms)
     if not pushFragment.isNil:
@@ -753,7 +777,9 @@ proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pip
   pass.bindVertexBuffers([BufferBinding(buffer: a.splatVertexBuffer)])
   pass.bindIndexBuffer(a.splatIndexBuffer)
   if textured:
-    pass.bindFragmentSamplers([(texture: a.splatTexture, sampler: a.splatSampler)])
+    let sampler =
+      if a.retro.pixelatedTextures: a.splatPixelSampler else: a.splatSampler
+    pass.bindFragmentSamplers([(texture: a.splatTexture, sampler: sampler)])
   for batch in a.splatBatches:
     cmd.pushVertexUniforms(0, batch.uniforms)
     pushFragment()
@@ -825,7 +851,9 @@ proc drawSky(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   cmd.pushVertexUniforms(0, uniforms)
   cmd.pushFragmentUniforms(0, uniforms)
   pass.bindPipeline(a.skyPipeline)
-  pass.bindFragmentSamplers([(texture: a.skybox.texture, sampler: a.skySampler)])
+  let sampler =
+    if a.retro.pixelatedTextures: a.skyPixelSampler else: a.skySampler
+  pass.bindFragmentSamplers([(texture: a.skybox.texture, sampler: sampler)])
   pass.drawPrimitive(3)
 
 proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
@@ -863,17 +891,59 @@ proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
     far, depthFogFade(a.fog))
   a.drawWater(cmd, pass, a.waterDepthPipeline, pushDepth)
 
-proc presentSsao(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
-  a.post.ensureSize(frame.width, frame.height)
-  let (near, far) = a.nearFar()
-  let scene = a.post.beginScene(frame.cmd, clearColor, frame.depth)
-  a.drawScene(frame.cmd, scene)
-  scene.endRender()
-  let depthPass = a.post.beginDepth(frame.cmd, frame.depth)
-  a.drawDepth(frame.cmd, depthPass)
-  depthPass.endRender()
-  a.post.runOcclusion(frame.cmd, a.ssao, near, far, a.fovTan)
-  a.post.runComposite(frame.cmd, frame.target)
+proc renderScene(a: Artist3D, cmd: CommandBuffer, target, depth: gpu.Texture,
+                 width, height: uint32, clearColor: ClearColor) =
+  ## The scene into `target`, `width` by `height`: through the occlusion
+  ## chain when it is on, straight in when it is not.
+  if a.ssao.enabled:
+    a.post.ensureSize(width, height)
+    let (near, far) = a.nearFar()
+    let scene = a.post.beginScene(cmd, clearColor, depth)
+    a.drawScene(cmd, scene)
+    scene.endRender()
+    let depthPass = a.post.beginDepth(cmd, depth)
+    a.drawDepth(cmd, depthPass)
+    depthPass.endRender()
+    a.post.runOcclusion(cmd, a.ssao, near, far, a.fovTan)
+    a.post.runComposite(cmd, target)
+  else:
+    let pass = cmd.beginRender(target, clearColor, depth)
+    a.drawScene(cmd, pass)
+    pass.endRender()
+
+proc ensureRetroTargets(a: Artist3D, width, height: uint32) =
+  if not a.retroColor.isNil and a.retroWidth == width and
+      a.retroHeight == height:
+    return
+  if not a.retroColor.isNil:
+    a.device.retire(a.retroColor)
+    a.device.retire(a.retroDepth)
+  a.retroColor = newColorTexture(a.device, width, height, a.colorFormat)
+  a.retroDepth = newDepthTexture(a.device, width, height)
+  a.retroWidth = width
+  a.retroHeight = height
+
+proc presentScene(a: Artist3D, frame: GpuFrame, target: gpu.Texture,
+                  clearColor: ClearColor) =
+  ## The scene onto `target`, the frame's size: at that size as ever, or,
+  ## with the retro look on, into the small picture first and blown up from
+  ## it -- one fullscreen pass sampling the nearest pixel, so each stays a
+  ## hard-edged block.
+  if not a.retro.enabled:
+    a.renderScene(frame.cmd, target, frame.depth, frame.width, frame.height,
+      clearColor)
+    return
+  let (width, height) = a.retro.pictureSize(frame.width, frame.height)
+  a.ensureRetroTargets(width, height)
+  a.renderScene(frame.cmd, a.retroColor, a.retroDepth, width, height,
+    clearColor)
+  let pass = frame.cmd.beginRender(target, clearColor)
+  pass.bindPipeline(a.overlayPipeline)
+  pass.bindFragmentSamplers([
+    (texture: a.retroColor, sampler: a.blowUpSampler),
+  ])
+  pass.drawPrimitive(3)
+  pass.endRender()
 
 proc stage(picture: var StagedPicture, width, height: int,
            pixels: openArray[uint8]) =
@@ -1025,32 +1095,17 @@ proc snapshot*(a: Artist3D, path: string) =
 proc snapshotScene(a: Artist3D, frame: GpuFrame, clearColor: ClearColor) =
   ## Re-renders the queued batches into an offscreen target and records a
   ## CPU readback in the same command buffer; bytes become readable after
-  ## the frame is submitted and its fence waited on. With the post chain
-  ## active (SSAO), the whole present sequence is replayed onto the
-  ## snapshot target -- composite and UI overlay included -- so the file
-  ## shows what the window shows, in the window's orientation.
+  ## the frame is submitted and its fence waited on. The whole present
+  ## sequence is replayed onto the snapshot target -- the occlusion
+  ## composite, the retro blow-up and the UI overlay included -- so the
+  ## file shows what the window shows, in the window's orientation.
   if a.snapshotTarget.isNil or a.snapshotWidth != frame.width or a.snapshotHeight != frame.height:
     if not a.snapshotTarget.isNil:
       a.device.retire(a.snapshotTarget)
     a.snapshotTarget = newColorTexture(a.device, frame.width, frame.height, a.colorFormat)
     a.snapshotWidth = frame.width
     a.snapshotHeight = frame.height
-  let depth = a.device.depthTarget(frame.width, frame.height)
-  if a.ssao.enabled:
-    a.post.ensureSize(frame.width, frame.height)
-    let (near, far) = a.nearFar()
-    let scene = a.post.beginScene(frame.cmd, clearColor, depth)
-    a.drawScene(frame.cmd, scene)
-    scene.endRender()
-    let depthPass = a.post.beginDepth(frame.cmd, depth)
-    a.drawDepth(frame.cmd, depthPass)
-    depthPass.endRender()
-    a.post.runOcclusion(frame.cmd, a.ssao, near, far, a.fovTan)
-    a.post.runComposite(frame.cmd, a.snapshotTarget)
-  else:
-    let pass = frame.cmd.beginRender(a.snapshotTarget, clearColor, depth)
-    a.drawScene(frame.cmd, pass)
-    pass.endRender()
+  a.presentScene(frame, a.snapshotTarget, clearColor)
   a.presentLayers(frame.cmd, a.snapshotTarget, frame.width, frame.height)
   a.snapshotDownload = frame.cmd.stageDownload(a.snapshotTarget, frame.width, frame.height)
 
@@ -1085,12 +1140,7 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
       frame.cmd.upload(a.splatIndexBuffer, a.splatIndices)
       frame.cmd.upload(a.waterVertexBuffer, a.waterVertices)
       frame.cmd.upload(a.waterIndexBuffer, a.waterIndices)
-      if a.ssao.enabled:
-        a.presentSsao(frame, clearColor)
-      else:
-        frame.beginRender(clearColor)
-        a.drawScene(frame.cmd, frame.pass)
-        frame.pass.endRender()
+      a.presentScene(frame, frame.target, clearColor)
       if snapshotPath.len > 0:
         a.snapshotScene(frame, clearColor)
     else:
