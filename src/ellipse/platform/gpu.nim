@@ -99,6 +99,10 @@ type
   CullMode* = enum
     NoCulling, CullFront, CullBack
 
+  FillMode* = enum
+    ## How a pipeline puts its triangles on the screen.
+    Solid, Wireframe
+
   PipelineDesc* = object
     vertex*: Shader
     fragment*: Shader
@@ -107,6 +111,10 @@ type
     kind*: PrimitiveKind = Triangles
     colorFormat*: TextureFormat
     depthFormat*: TextureFormat
+    fillMode*: FillMode = Solid ## `Wireframe`: each triangle's edges are drawn
+    ## and its interior left alone, so the geometry behind shows through.
+    ## Drivers that cannot rasterise lines fall back to filling them (SDL
+    ## does the fallback, not us), so a wireframe frame is never a broken one.
     hasDepth*: bool = true
     blend*: bool = false
     premultiplied*: bool = false ## blended sources carry their alpha already:
@@ -188,6 +196,11 @@ func toSdl(c: CullMode): GPUCullMode =
   of CullFront: GPU_CULLMODE_FRONT
   of CullBack: GPU_CULLMODE_BACK
 
+func toSdl(m: FillMode): GPUFillMode =
+  case m
+  of Solid: GPU_FILLMODE_FILL
+  of Wireframe: GPU_FILLMODE_LINE
+
 func bufferUsageFlags(u: set[BufferUsage]): uint32 =
   if VertexData in u:
     result = result or uint32(GPU_BUFFERUSAGE_VERTEX)
@@ -228,6 +241,12 @@ proc initDevice*(renderer: Renderer): Device =
   if raw.isNil:
     raiseSdlError("Failed to acquire GPU device")
   Device(raw: raw)
+
+proc forget*(device: Device) =
+  ## The renderer that owns the GPU device is about to free it, and every
+  ## resource with it: anything still holding `device` releases nothing.
+  if not device.isNil:
+    device.raw = nil
 
 proc acquireCommandBuffer*(device: Device): CommandBuffer =
   if not device.fence.isNil:
@@ -614,6 +633,12 @@ proc newShader*(
     raiseSdlError("Failed to create shader")
   Shader(device: device, raw: raw)
 
+func asWireframe*(desc: PipelineDesc): PipelineDesc =
+  ## `desc` with its triangles drawn as edges: the wireframe twin of a
+  ## pipeline's descriptor, everything else about it left as it was.
+  result = desc
+  result.fillMode = Wireframe
+
 proc newPipeline*(device: Device, desc: PipelineDesc): Pipeline =
   var bufferDescriptions = [GPUVertexBufferDescription(
     slot: 0,
@@ -667,7 +692,7 @@ proc newPipeline*(device: Device, desc: PipelineDesc): Pipeline =
     vertex_input_state: vertexInput,
     primitive_type: desc.kind.toSdl(),
     rasterizer_state: GPURasterizerState(
-      fill_mode: GPU_FILLMODE_FILL,
+      fill_mode: desc.fillMode.toSdl(),
       cull_mode: desc.cull.toSdl(),
       front_face: GPU_FRONTFACE_COUNTER_CLOCKWISE,
       enable_depth_clip: true,

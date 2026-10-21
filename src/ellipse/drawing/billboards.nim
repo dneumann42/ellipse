@@ -81,9 +81,12 @@ type
     ## GPU, and the runs asked for this frame.
     device: Device
     pipeline, depthPipeline: Pipeline
+    wireframePipeline: Pipeline ## the same sprites outlined, for the artist's
+    ## wireframe frames
     sampler: Sampler
     pixelSampler: Sampler ## no filter at all, for the retro look
     pixelated*: bool ## sprites sampled through `pixelSampler` this frame
+    wireframe*: bool ## sprites drawn as their edges instead of their picture
     texture: Texture
     staged: BillboardAtlas
     atlasStaged: bool
@@ -105,6 +108,7 @@ const
   billboardVertexSpv = staticRead("shaders/spv/billboard.vert.spv")
   billboardFragmentSpv = staticRead("shaders/spv/billboard.frag.spv")
   billboardDepthSpv = staticRead("shaders/spv/billboard_depth.frag.spv")
+  billboardWireSpv = staticRead("shaders/spv/billboard_wire.frag.spv")
 
 static:
   doAssert sizeof(BillboardInstance) == 32
@@ -160,6 +164,15 @@ proc newBillboardBuffer*(p: BillboardPass,
   if result.count > 0:
     p.uploads.add result
 
+proc restage*(p: BillboardPass, buffer: BillboardBuffer,
+              instances: sink seq[BillboardInstance]) =
+  ## Rewrite a standing set's instances: uploaded at the next present, for
+  ## billboards that move -- a wandering crowd, say.
+  buffer.count = instances.len
+  buffer.staged = instances
+  if instances.len > 0:
+    p.uploads.add buffer
+
 # The pass ----------------------------------------------------------------------
 
 proc newBillboardPass*(device: Device, colorFormat: TextureFormat): BillboardPass =
@@ -170,15 +183,23 @@ proc newBillboardPass*(device: Device, colorFormat: TextureFormat): BillboardPas
                          FragmentShader, numUniformBuffers = 1, numSamplers = 1)
     depth = newShader(device, billboardDepthSpv.toOpenArrayByte(0, billboardDepthSpv.high),
                       FragmentShader, numUniformBuffers = 1, numSamplers = 1)
+    wire = newShader(device, billboardWireSpv.toOpenArrayByte(0, billboardWireSpv.high),
+                     FragmentShader, numUniformBuffers = 1)
   # Blending only shows at the fog's limit, where the sprites fade into the
   # sky: everywhere else a texel is either cut away or fully opaque.
+  let spriteDesc = PipelineDesc(
+    vertex: vertex, fragment: fragment,
+    attributes: BillboardAttributes, stride: BillboardStride, instanced: true,
+    colorFormat: colorFormat, depthFormat: Depth32, blend: true,
+  )
+  # The outlining sprite draws no picture, so it binds no sampler: an edge
+  # through a cut-out sprite is mostly the transparent margin around it.
+  var outlineDesc = spriteDesc.asWireframe()
+  outlineDesc.fragment = wire
   BillboardPass(
     device: device,
-    pipeline: newPipeline(device, PipelineDesc(
-      vertex: vertex, fragment: fragment,
-      attributes: BillboardAttributes, stride: BillboardStride, instanced: true,
-      colorFormat: colorFormat, depthFormat: Depth32, blend: true,
-    )),
+    pipeline: newPipeline(device, spriteDesc),
+    wireframePipeline: newPipeline(device, outlineDesc),
     depthPipeline: newPipeline(device, PipelineDesc(
       vertex: vertex, fragment: depth,
       attributes: BillboardAttributes, stride: BillboardStride, instanced: true,
@@ -261,10 +282,14 @@ proc uniformsFor(p: BillboardPass, view, viewProj: Mat4, eye, toLight: Vec3,
   )
 
 proc drawRuns(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
-              pipeline: Pipeline, base: BillboardUniforms, pushFragment: proc ()) =
+              pipeline: Pipeline, base: BillboardUniforms, pushFragment: proc (),
+              textured: bool = true) =
   pass.bindPipeline(pipeline)
-  let sampler = if p.pixelated: p.pixelSampler else: p.sampler
-  pass.bindFragmentSamplers([(texture: p.texture, sampler: sampler)])
+  if textured:
+    # Only the pipelines that sample the atlas bind it: SDL counts the
+    # bindings against the samplers the pipeline declares.
+    let sampler = if p.pixelated: p.pixelSampler else: p.sampler
+    pass.bindFragmentSamplers([(texture: p.texture, sampler: sampler)])
   pushFragment()
   var
     uniforms = base
@@ -282,11 +307,13 @@ proc drawRuns(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
 proc drawColour*(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
                  view, viewProj: Mat4, eye, toLight: Vec3,
                  intensity, ambient: float32, fog: FogUniforms) =
-  ## Every run queued this frame, in colour, sunk into `fog`.
+  ## Every run queued this frame, in colour, sunk into `fog`. Wireframe frames
+  ## take the outlining pipeline: the sprite's quad, drawn without its picture.
   if not p.pending:
     return
   let fragment = BillboardFragmentUniforms(cut: vec4(p.options.cutoff, 0, 0, 0), fog: fog)
-  p.drawRuns(cmd, pass, p.pipeline,
+  p.drawRuns(cmd, pass,
+    if p.wireframe: p.wireframePipeline else: p.pipeline,
     p.uniformsFor(view, viewProj, eye, toLight, intensity, ambient, 1),
     proc () = cmd.pushFragmentUniforms(0, fragment))
 

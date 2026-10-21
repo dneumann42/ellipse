@@ -1,5 +1,6 @@
 import std/[math, times]
 
+import ellipse/platform/keyboard
 import ellipse/platform/sdl
 import ellipse/drawing/artist3d
 
@@ -61,6 +62,8 @@ proc main() =
     start = cpuTime()
     previous = start
     angle = 0'f32
+    wireframe = false
+    wireframeWasHeld = false
 
   while running:
     processEvents(running)
@@ -68,6 +71,13 @@ proc main() =
     let dt = (now - previous).float32
     previous = now
     angle += dt
+
+    # F: the scene's triangles as their edges, or filled again.
+    let held = keyHeld(keyF)
+    if held and not wireframeWasHeld:
+      wireframe = not wireframe
+      artist.setWireframe(wireframe)
+    wireframeWasHeld = held
 
     artist.setView(vec3(4, 3, 5), vec3(0, 0.5, 0), vec3(0, 1, 0))
     artist.setPerspective(degToRad(60.0).float32, 0.1, 50)

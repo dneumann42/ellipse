@@ -74,6 +74,7 @@ proc gpuFrame*(app: App): GpuFrame =
 
 proc `=copy`*(app: var App, source: App) {.error.}
 proc `=destroy`*(app: var App) =
+  app.device.forget() # resources outliving the app must not touch its device
   if not app.renderer.isNil:
     destroyRenderer(app.renderer)
     app.renderer = nil

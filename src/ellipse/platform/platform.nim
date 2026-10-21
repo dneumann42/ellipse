@@ -13,7 +13,7 @@ when withSdl:
   else:
     {.passL: "-lSDL3 -no-pie".}
 
-import std/[monotimes, strutils, envvars, base64]
+import std/[math, monotimes, strutils, envvars, base64]
 
 import ../logger
 import ../failure
@@ -81,6 +81,8 @@ when withSdl:
   const
     ButtonLeft = 1'u8          ## SDL_BUTTON_LEFT
     ButtonLeftMask = 1'u32     ## SDL_BUTTON_LMASK, the `state` bit for it
+    ButtonRight = 3'u8         ## SDL_BUTTON_RIGHT, the 3D views' look key
+    ButtonRightMask = 4'u32    ## SDL_BUTTON_RMASK, the `state` bit for it
 
   const
     ## SDL3 scancodes for the keys the UI edits with (USB HID usage page 0x07).
@@ -236,6 +238,16 @@ when withSdl:
   proc SDL_StartTextInput(win: ptr SDL_Window): bool {.importc: "SDL_StartTextInput", header: "<SDL3/SDL.h>".}
   proc SDL_StopTextInput(win: ptr SDL_Window): bool {.importc: "SDL_StopTextInput", header: "<SDL3/SDL.h>".}
   proc SDL_GetCurrentVideoDriver(): cstring {.importc: "SDL_GetCurrentVideoDriver", header: "<SDL3/SDL.h>".}
+  proc SDL_GetMouseFocus(): ptr SDL_Window {.
+    importc: "SDL_GetMouseFocus", header: "<SDL3/SDL.h>".}
+  proc SDL_SetWindowRelativeMouseMode(win: ptr SDL_Window; enabled: bool): bool {.
+    importc: "SDL_SetWindowRelativeMouseMode", header: "<SDL3/SDL.h>".}
+  proc SDL_SetWindowMouseGrab(win: ptr SDL_Window; enabled: bool): bool {.
+    importc: "SDL_SetWindowMouseGrab", header: "<SDL3/SDL.h>".}
+  proc SDL_WarpMouseInWindow(win: ptr SDL_Window; x, y: float32) {.
+    importc: "SDL_WarpMouseInWindow", header: "<SDL3/SDL.h>".}
+  proc SDL_HideCursor(): bool {.importc: "SDL_HideCursor", header: "<SDL3/SDL.h>".}
+  proc SDL_ShowCursor(): bool {.importc: "SDL_ShowCursor", header: "<SDL3/SDL.h>".}
   proc SDL_SetWindowTitle(win: ptr SDL_Window; title: cstring): bool {.
     importc: "SDL_SetWindowTitle", header: "<SDL3/SDL.h>".}
   proc SDL_GetClipboardText(): cstring {.
@@ -351,11 +363,11 @@ else:
 
 type
   PointerState* = object
-    ## Primary-pointer position (window pixels) and left-button state, as
-    ## last seen by `pumpEvents`. The UI's layout root is the window, so the
+    ## Primary-pointer position (window pixels) and button state, as last
+    ## seen by `pumpEvents`. The UI's layout root is the window, so the
     ## position is also clay-relative.
     x*, y*: float32
-    down*: bool
+    down*, rightDown*: bool
 
 type
   PlatformApplication* = object
@@ -371,6 +383,7 @@ type
     keyFrame: seq[KeyEvent]     ## the events `keyEvents()` hands to widgets
     wheelPending: tuple[x, y: float32]
     wheelFrame: tuple[x, y: float32]
+    motionPending: tuple[x, y: float32] ## pointer motion unread by a view
     doublePending: bool         ## a left-button click with SDL's click
     doubleFrame: bool           ## counter >= 2, per input frame
     vsync: bool                 ## presents are paced by the display
@@ -996,6 +1009,91 @@ when withSdl:
           result.kind = kevText
           result.text = utf8Of(cp)
 
+var mouseGrabbed = false
+var manualGrab = false
+  ## The backend declined the raw grab: motion accumulates as the
+  ## pointer's own displacement, and the cursor is hidden by hand.
+var manualSnap = false
+  ## ...and a client-side pointer warp is honoured (X11 and friends --
+  ## never Wayland, where only the compositor moves the pointer): the
+  ## platform keeps yanking the cursor back to the window centre, so a
+  ## sweep cannot stall on an edge (see the snap at `pumpSdlEvents`' end).
+
+when withSdl:
+  proc grabWindow(): ptr SDL_Window =
+    ## The window to ask: ours when platform made it (a UI app's), the
+    ## pointer's focus otherwise -- an app may build its own around this
+    ## module (beyond's game loop does), and its UI-overlay boot marks
+    ## the platform app offscreen without meaning there is no window.
+    if activeApp.window.raw != nil: activeApp.window.raw
+    else: SDL_GetMouseFocus()
+
+  proc videoCanWarp(): bool =
+    ## Whether asking SDL to teleport the pointer means anything: on
+    ## Wayland the pointer belongs to the compositor and a warp without
+    ## a lock (the lock we just failed to get) is silently refused.
+    let d = SDL_GetCurrentVideoDriver()
+    not d.isNil and cmpIgnoreStyle($d, "wayland") != 0
+
+proc setMouseGrab*(on: bool) =
+  ## Hide the cursor and report its motion as look deltas: what a 3D
+  ## view does while it owns the pointer (see `mouseDelta`). The
+  ## backend's own grab (relative mode -- raw deltas, a pointer the
+  ## compositor anchors) is asked for first; where it declines,
+  ## confinement plus a centre warp per pump do the same by hand, and
+  ## the cursor is hidden either way. The wish survives on terminal and
+  ## offscreen hosts, which own the pointer elsewhere.
+  mouseGrabbed = on
+  manualGrab = false
+  manualSnap = false
+  when withSdl:
+    if terminalMode():
+      return
+    let win = grabWindow()
+    if win != nil:
+      if on:
+        if not SDL_SetWindowRelativeMouseMode(win, true):
+          manualGrab = true
+          manualSnap = videoCanWarp() and SDL_SetWindowMouseGrab(win, true)
+      else:
+        discard SDL_SetWindowRelativeMouseMode(win, false)
+        discard SDL_SetWindowMouseGrab(win, false)
+    if on:
+      discard SDL_HideCursor()
+    else:
+      discard SDL_ShowCursor()
+    if inputDebug:
+      discard info("mouse-grab ", $on, " win=", if win.isNil: "none" else: "found",
+        " manual=", $manualGrab, " snap=", $manualSnap)
+
+proc mouseGrab*(): bool =
+  ## Whether the pointer is grabbed (see `setMouseGrab`).
+  mouseGrabbed
+
+proc mouseDelta*(): tuple[x, y: float32] =
+  ## Pointer motion in renderer pixels, accumulated by `pumpEvents` since
+  ## the last call -- look input a view polls once per update tick. Raw
+  ## deltas while grabbed, the pointer's own displacement while free; the
+  ## read clamps and clears, so a view that stopped listening cannot bank
+  ## a whip when it comes back.
+  result = activeApp.motionPending
+  result.x = result.x.clamp(-320'f32, 320'f32)
+  result.y = result.y.clamp(-320'f32, 320'f32)
+  activeApp.motionPending = (0'f32, 0'f32)
+
+proc mouseRightDown*(): bool =
+  ## Whether the right button is held, as of the most recent event pump
+  ## -- the fly view's hold-to-look. Tracked like `PointerState.down`
+  ## (which stays the UI's left button): motion events carry the held
+  ## mask and the button's own edges set and clear it, so a release
+  ## stops the turn the moment it happens.
+  when withSdl:
+    if terminalMode():
+      return false
+    activeApp.pointer.rightDown
+  else:
+    false
+
 when withSdl:
   proc pumpSdlEvents(app: var PlatformApplication) =
     ## Drain SDL's queue into the app state, and tell the pacer which events
@@ -1055,9 +1153,21 @@ when withSdl:
         wake()
       elif kind == EventMouseMotion:
         let e = cast[ptr SDL_MouseMotionEvent](addr event)[]
+        if mouseGrabbed and not manualGrab:
+          # grabbed for real: the position is the warp anchor, so the
+          # turn lives in the raw deltas the backend hands us.
+          app.motionPending.x += e.xrel
+          app.motionPending.y += e.yrel
+        elif app.pointer.x > -1.0e5 and app.pointer.y > -1.0e5:
+          # free, or a grab the backend declined: the pointer's own
+          # displacement, clamped so that leaving the window (the edge
+          # parked at -1e6) and rejoining cannot whip a listening view.
+          app.motionPending.x += (e.x - app.pointer.x).clamp(-80'f32, 80'f32)
+          app.motionPending.y += (e.y - app.pointer.y).clamp(-80'f32, 80'f32)
         app.pointer.x = e.x
         app.pointer.y = e.y
         app.pointer.down = (e.state and ButtonLeftMask) != 0
+        app.pointer.rightDown = (e.state and ButtonRightMask) != 0
         if not frameWanted(monoNow()) and
             motionWakes(e.x, e.y, app.pointer.down):
           wake()
@@ -1067,11 +1177,15 @@ when withSdl:
           app.pointer.down = true
           if e.clicks >= 2:
             app.doublePending = true
+        elif e.button == ButtonRight:
+          app.pointer.rightDown = true
         wake()
       elif kind == EventMouseButtonUp:
         let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
         if e.button == ButtonLeft:
           app.pointer.down = false
+        elif e.button == ButtonRight:
+          app.pointer.rightDown = false
         wake()
       elif kind == EventKeyDown:
         let e = cast[ptr SDL_KeyboardEvent](addr event)[]
@@ -1092,6 +1206,25 @@ when withSdl:
         app.wheelPending.x += e.x
         app.wheelPending.y += e.y
         wake()
+    if manualSnap:
+      # hand-rolled capture (see `setMouseGrab`): the backend declined
+      # the raw grab but honours confinement and warps, so keep yanking
+      # the cursor back to the window's centre -- a view can then turn
+      # without the pointer ever reaching an edge.
+      let win = grabWindow()
+      var pw, ph: int32
+      if win != nil and SDL_GetWindowSizeInPixels(win, addr pw, addr ph) and
+          pw > 0 and ph > 0:
+        let cx = pw.float32 / 2.0f
+        let cy = ph.float32 / 2.0f
+        if abs(app.pointer.x - cx) > 4 or abs(app.pointer.y - cy) > 4 or
+            app.pointer.x < 0:
+          SDL_WarpMouseInWindow(win, cx, cy)
+          # the warp echoes a motion event at the centre: land the
+          # tracked pointer there too, so the echo counts as nothing
+          # and never turns the view back on itself.
+          app.pointer.x = cx
+          app.pointer.y = cy
 
 when withSdl:
   proc pumpLayer(app: var PlatformApplication) =

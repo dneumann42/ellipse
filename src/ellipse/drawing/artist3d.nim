@@ -62,6 +62,7 @@ type
   Artist3D* = ref object
     device: Device
     pipeline: Pipeline
+    wireframePipeline: Pipeline ## the mesh batches' edges, for wireframe frames
     vertexBuffer: DynamicBuffer
     indexBuffer: DynamicBuffer
     vertices: seq[Vertex]
@@ -91,6 +92,7 @@ type
     face: seq[Vertex]
     post: SsaoPass
     ssao: SsaoOptions
+    wireframe: bool ## the scene's triangles drawn as their edges: `setWireframe`
     colorFormat: TextureFormat
     snapshotPath: string
     snapshotTarget: gpu.Texture
@@ -103,7 +105,7 @@ type
     shapePipeline: Pipeline
     shapeBuffer: DynamicBuffer
     shapes2d: Shapes
-    splatPipeline, splatDepthPipeline: Pipeline
+    splatPipeline, splatDepthPipeline, splatWireframePipeline: Pipeline
     splatVertexBuffer, splatIndexBuffer: DynamicBuffer
     splatVertices: seq[SplatVertex]
     splatIndices: seq[uint32]
@@ -124,7 +126,7 @@ type
     meshCell, meshCount: uint32
     meshStaged: bool
     meshCellIndex: int ## the layer the batches from here sample, -1: none
-    waterPipeline, waterDepthPipeline: Pipeline
+    waterPipeline, waterDepthPipeline, waterWireframePipeline: Pipeline
     waterVertexBuffer, waterIndexBuffer: DynamicBuffer
     waterVertices: seq[WaterVertex]
     waterIndices: seq[uint32]
@@ -192,7 +194,9 @@ proc newArtist*(app: App): Artist3D =
     skyVertex = newShader(device, skyVertexSpv.toOpenArrayByte(0, skyVertexSpv.high), VertexShader, numUniformBuffers = 1)
     skyFragment = newShader(device, skyFragmentSpv.toOpenArrayByte(0, skyFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
     post = newSsaoPass(device, vertexShader, app.gpuSwapchainFormat())
-    pipeline = newPipeline(device, PipelineDesc(
+    # Each scene pipeline is described once and built twice: filled as the
+    # world is meant to look, and as its own edges for the wireframe frames.
+    meshDesc = PipelineDesc(
       vertex: vertexShader,
       fragment: fragmentShader,
       attributes: VertexAttributes,
@@ -200,10 +204,35 @@ proc newArtist*(app: App): Artist3D =
       colorFormat: app.gpuSwapchainFormat(),
       depthFormat: Depth32,
       blend: true,
-    ))
+    )
+    splatDesc = PipelineDesc(
+      vertex: splatVertex,
+      fragment: splatFragment,
+      attributes: SplatAttributes,
+      stride: SplatStride,
+      colorFormat: app.gpuSwapchainFormat(),
+      depthFormat: Depth32,
+    )
+    # Water blends over the ground already drawn, and still writes depth: a
+    # river ribbon folding over itself on a bend, or running into a lake,
+    # covers what lies behind instead of doubling up on it.
+    waterDesc = PipelineDesc(
+      vertex: waterVertex,
+      fragment: waterFragment,
+      attributes: WaterAttributes,
+      stride: WaterStride,
+      colorFormat: app.gpuSwapchainFormat(),
+      depthFormat: Depth32,
+      blend: true,
+    )
+    pipeline = newPipeline(device, meshDesc)
+    wireframePipeline = newPipeline(device, meshDesc.asWireframe())
+    splatWireframePipeline = newPipeline(device, splatDesc.asWireframe())
+    waterWireframePipeline = newPipeline(device, waterDesc.asWireframe())
   result = Artist3D(
     device: device,
     pipeline: pipeline,
+    wireframePipeline: wireframePipeline,
     vertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
     indexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
     view: identity(),
@@ -238,14 +267,8 @@ proc newArtist*(app: App): Artist3D =
       premultiplied: true,
     )),
     shapeBuffer: newDynamicBuffer(device, {VertexData}, 4096),
-    splatPipeline: newPipeline(device, PipelineDesc(
-      vertex: splatVertex,
-      fragment: splatFragment,
-      attributes: SplatAttributes,
-      stride: SplatStride,
-      colorFormat: app.gpuSwapchainFormat(),
-      depthFormat: Depth32,
-    )),
+    splatPipeline: newPipeline(device, splatDesc),
+    splatWireframePipeline: splatWireframePipeline,
     splatDepthPipeline: post.newDepthPipeline(splatVertex, SplatAttributes, SplatStride),
     splatVertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
     splatIndexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
@@ -259,18 +282,8 @@ proc newArtist*(app: App): Artist3D =
     meshCount: 1,
     meshStaged: true,
     meshCellIndex: -1,
-    # Water blends over the ground already drawn, and still writes depth: a
-    # river ribbon folding over itself on a bend, or running into a lake,
-    # covers what lies behind instead of doubling up on it.
-    waterPipeline: newPipeline(device, PipelineDesc(
-      vertex: waterVertex,
-      fragment: waterFragment,
-      attributes: WaterAttributes,
-      stride: WaterStride,
-      colorFormat: app.gpuSwapchainFormat(),
-      depthFormat: Depth32,
-      blend: true,
-    )),
+    waterPipeline: newPipeline(device, waterDesc),
+    waterWireframePipeline: waterWireframePipeline,
     waterDepthPipeline: post.newDepthPipeline(waterVertex, WaterAttributes, WaterStride),
     waterVertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
     waterIndexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
@@ -365,6 +378,18 @@ proc setSsao*(a: Artist3D, options: SsaoOptions) =
   ## Enabled: the scene renders to offscreen targets and goes through the
   ## depth/occlusion/composite chain. Disabled: direct-to-swapchain as usual.
   a.ssao = options
+
+proc setWireframe*(a: Artist3D, enabled: bool) =
+  ## Draw the scene's triangles as their edges instead of their surfaces:
+  ## meshes, splatted ground, water and billboards all come out in outlines,
+  ## lit and textured and fogged as they were, and what lies behind a surface
+  ## shows through it. Holds every frame until the next call. The occlusion
+  ## pass stands down while this is on -- it shades solid surfaces, and there
+  ## are none to shade -- so the frame goes to the window as if `setSsao`
+  ## had been switched off. A driver that cannot rasterise lines fills the
+  ## triangles instead, and the frame simply looks as it did before.
+  a.wireframe = enabled
+  a.sprites.wireframe = enabled
 
 proc setSky*(a: Artist3D, options: SkyOptions) =
   ## What sky, if any, stands behind the frames to come: the dome is drawn
@@ -638,6 +663,12 @@ proc newBillboardBuffer*(a: Artist3D,
   ## present and are drawn from, run by run, with `drawBillboards` after.
   a.sprites.newBillboardBuffer(instances)
 
+proc updateBillboards*(a: Artist3D, buffer: BillboardBuffer,
+                       instances: sink seq[BillboardInstance]) =
+  ## Rewrite a standing set's instances -- for billboards that move: the
+  ## new set uploads at the next present.
+  a.sprites.restage(buffer, instances)
+
 proc drawBillboards*(a: Artist3D, buffer: BillboardBuffer, first, count: int,
                      grow = 1.0f) =
   ## Draw `count` of `buffer`'s instances from `first` this frame, each
@@ -856,14 +887,24 @@ proc drawSky(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   pass.bindFragmentSamplers([(texture: a.skybox.texture, sampler: sampler)])
   pass.drawPrimitive(3)
 
+func scenePipelines(a: Artist3D): tuple[mesh, splat, water: Pipeline] =
+  ## Which pipelines this frame's scene draws through: the outlining ones
+  ## while `setWireframe` is on, the filled ones while it is not.
+  if a.wireframe:
+    (a.wireframePipeline, a.splatWireframePipeline, a.waterWireframePipeline)
+  else:
+    (a.pipeline, a.splatPipeline, a.waterPipeline)
+
 proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   ## The sky first, then every batch in colour: meshes, then splatted
   ## ground, then the water blended over both -- all of them sinking into
-  ## the same fog.
+  ## the same fog. Wireframe frames take the outlining pipelines, and the
+  ## billboards outline themselves (see `setWireframe`).
   if a.sky.enabled:
     a.drawSky(cmd, pass)
+  let (mesh, splat, waterPipeline) = a.scenePipelines()
   let fog = fogUniforms(a.fog, a.eye)
-  a.drawBatches(cmd, pass, a.pipeline,
+  a.drawBatches(cmd, pass, mesh,
     proc () = cmd.pushFragmentUniforms(0, fog), textured = true)
   let uniforms = SplatUniforms(
     splat: vec4(
@@ -871,13 +912,13 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
       a.splatOptions.heightContrast, 0),
     fog: fog,
   )
-  a.drawSplats(cmd, pass, a.splatPipeline,
+  a.drawSplats(cmd, pass, splat,
     proc () = cmd.pushFragmentUniforms(0, uniforms), textured = true)
   a.sprites.drawColour(cmd, pass, a.view, a.projection * a.view, a.eye,
     vec3(-a.lightDir.x, -a.lightDir.y, -a.lightDir.z), a.lightIntensity,
     a.ambient, fog)
   let water = a.waterUniforms()
-  a.drawWater(cmd, pass, a.waterPipeline,
+  a.drawWater(cmd, pass, waterPipeline,
     proc () = cmd.pushFragmentUniforms(0, water))
 
 proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
@@ -894,8 +935,11 @@ proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
 proc renderScene(a: Artist3D, cmd: CommandBuffer, target, depth: gpu.Texture,
                  width, height: uint32, clearColor: ClearColor) =
   ## The scene into `target`, `width` by `height`: through the occlusion
-  ## chain when it is on, straight in when it is not.
-  if a.ssao.enabled:
+  ## chain when it is on, straight in when it is not. A wireframe frame
+  ## goes straight in whatever the occlusion pass is set to: edges leave no
+  ## surface for it to shade, and its depth would be read from geometry the
+  ## frame no longer fills.
+  if a.ssao.enabled and not a.wireframe:
     a.post.ensureSize(width, height)
     let (near, far) = a.nearFar()
     let scene = a.post.beginScene(cmd, clearColor, depth)
