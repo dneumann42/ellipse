@@ -4,6 +4,7 @@ import ../platform/[gpu, sdl]
 import billboards
 import fog
 import geometry
+import planes
 import retro
 import shapes
 import sky
@@ -15,6 +16,7 @@ import water
 export billboards
 export fog
 export geometry
+export planes
 export retro
 export shapes
 export sky
@@ -140,6 +142,7 @@ type
     skybox: SkyboxState ## the cube texture the sky samples, and what made it
     fog: FogOptions
     sprites: BillboardPass ## upright sprites by the hundred thousand
+    planes: PlanePass ## sprite planes: a held weapon, a painted sign
     aspect: float32 ## width over height of the frame last presented: the
     ## sky spreads its rays by it, so the dome matches the frustum
     retro: RetroOptions
@@ -302,6 +305,7 @@ proc newArtist*(app: App): Artist3D =
     skyPixelSampler: newSampler(device, pixelated = true),
     fog: newFogOptions(),
     sprites: newBillboardPass(device, app.gpuSwapchainFormat()),
+    planes: newPlanePass(device, app.gpuSwapchainFormat()),
     aspect: 1.0f,
     retro: newRetroOptions(),
     blowUpSampler: newSampler(device, pixelated = true),
@@ -322,12 +326,14 @@ proc reset*(a: Artist3D) =
   a.waterBatches.setLen(0)
   a.watering = false
   a.sprites.reset()
+  a.planes.reset()
   a.shapes2d.clearShapes()
 
 proc vertexCount*(a: Artist3D): int =
   ## Vertices queued for this frame: a proxy for the work the LOD keeps down.
   a.vertices.len + a.splatVertices.len + a.waterVertices.len +
-    a.sprites.queued * 6 # each billboard's six corners, built on the GPU
+    a.sprites.queued * 6 + # each billboard's six corners, built on the GPU
+    a.planes.queued
 
 proc setView*(a: Artist3D, eye, target, up: Vec3) =
   a.view = lookAt(eye, target, up)
@@ -403,6 +409,7 @@ proc setRetro*(a: Artist3D, options: RetroOptions) =
   ## Holds every frame until the next call (see `ellipse/drawing/retro`).
   a.retro = options
   a.sprites.pixelated = options.pixelatedTextures
+  a.planes.pixelated = options.pixelatedTextures
 
 proc setFog*(a: Artist3D, options: FogOptions) =
   ## The haze the scene sinks into: it rides every scene shader -- meshes,
@@ -679,6 +686,23 @@ proc billboardCount*(a: Artist3D): int =
   ## Billboards asked for this frame.
   a.sprites.queued
 
+proc setPlaneTexture*(a: Artist3D, width, height: int,
+                      pixels: openArray[uint8]) =
+  ## Stage the RGBA8 sheet sprite planes sample: uploaded at the next
+  ## present, and it serves every plane from then on until the next sheet
+  ## is staged.
+  a.planes.setTexture(width, height, pixels)
+
+proc setPlaneCutoff*(a: Artist3D, cutoff: float32) =
+  ## Opacity under which a plane's texel is cut away.
+  a.planes.cutoff = cutoff
+
+proc drawPlaneQuad*(a: Artist3D, corners: array[4, Vec3],
+                    uv: array[4, Vec2], color: Vec4 = vec4(1, 1, 1, 1)) =
+  ## Lay a sprite plane on the frame: world corners in winding order, the
+  ## sheet's uv at each, tinted by `color` and lit by nothing but it.
+  a.planes.queueQuad(corners, uv, color)
+
 proc setSplatOptions*(a: Artist3D, options: SplatOptions) =
   a.splatOptions = options
 
@@ -917,6 +941,7 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   a.sprites.drawColour(cmd, pass, a.view, a.projection * a.view, a.eye,
     vec3(-a.lightDir.x, -a.lightDir.y, -a.lightDir.z), a.lightIntensity,
     a.ambient, fog)
+  a.planes.drawColour(cmd, pass, a.projection * a.view, fog)
   let water = a.waterUniforms()
   a.drawWater(cmd, pass, waterPipeline,
     proc () = cmd.pushFragmentUniforms(0, water))
@@ -930,6 +955,8 @@ proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   a.drawSplats(cmd, pass, a.splatDepthPipeline, pushDepth, textured = false)
   a.sprites.drawDepth(cmd, pass, a.view, a.projection * a.view, a.eye, near,
     far, depthFogFade(a.fog))
+  a.planes.drawDepth(cmd, pass, a.projection * a.view, near, far,
+    depthFogFade(a.fog))
   a.drawWater(cmd, pass, a.waterDepthPipeline, pushDepth)
 
 proc renderScene(a: Artist3D, cmd: CommandBuffer, target, depth: gpu.Texture,
@@ -1172,9 +1199,10 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
     if a.meshStaged:
       a.uploadMeshAtlas(frame.cmd)
     a.sprites.upload(frame.cmd)
+    a.planes.upload(frame.cmd)
     frame.cmd.upload(a.shapeBuffer, a.shapes2d.vertices)
     if a.batches.len > 0 or a.splatBatches.len > 0 or a.waterBatches.len > 0 or
-        a.sprites.pending or a.sky.enabled:
+        a.sprites.pending or a.planes.pending or a.sky.enabled:
       a.refreshProjection(frame)
       if a.sky.enabled:
         a.syncSkybox(frame.cmd)

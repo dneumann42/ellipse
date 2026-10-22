@@ -240,6 +240,8 @@ when withSdl:
   proc SDL_GetCurrentVideoDriver(): cstring {.importc: "SDL_GetCurrentVideoDriver", header: "<SDL3/SDL.h>".}
   proc SDL_GetMouseFocus(): ptr SDL_Window {.
     importc: "SDL_GetMouseFocus", header: "<SDL3/SDL.h>".}
+  proc SDL_GetKeyboardFocus(): ptr SDL_Window {.
+    importc: "SDL_GetKeyboardFocus", header: "<SDL3/SDL.h>".}
   proc SDL_SetWindowRelativeMouseMode(win: ptr SDL_Window; enabled: bool): bool {.
     importc: "SDL_SetWindowRelativeMouseMode", header: "<SDL3/SDL.h>".}
   proc SDL_SetWindowMouseGrab(win: ptr SDL_Window; enabled: bool): bool {.
@@ -1020,13 +1022,21 @@ var manualSnap = false
   ## sweep cannot stall on an edge (see the snap at `pumpSdlEvents`' end).
 
 when withSdl:
+  var grabHeld: ptr SDL_Window = nil
+    ## The window the grab was last applied to. Nil while the wish is
+    ## pending: no window could be found when it was made (a boot straight
+    ## into a 3D view, before the pointer ever entered the window), so the
+    ## pump keeps retrying instead of leaving the cursor free for good.
+
   proc grabWindow(): ptr SDL_Window =
     ## The window to ask: ours when platform made it (a UI app's), the
     ## pointer's focus otherwise -- an app may build its own around this
     ## module (beyond's game loop does), and its UI-overlay boot marks
-    ## the platform app offscreen without meaning there is no window.
+    ## the platform app offscreen without meaning there is no window --
+    ## and the keyboard's focus while the pointer is outside it.
     if activeApp.window.raw != nil: activeApp.window.raw
-    else: SDL_GetMouseFocus()
+    elif SDL_GetMouseFocus() != nil: SDL_GetMouseFocus()
+    else: SDL_GetKeyboardFocus()
 
   proc videoCanWarp(): bool =
     ## Whether asking SDL to teleport the pointer means anything: on
@@ -1049,9 +1059,13 @@ proc setMouseGrab*(on: bool) =
   when withSdl:
     if terminalMode():
       return
-    let win = grabWindow()
+    let win = if on: grabWindow()
+              elif grabHeld != nil: grabHeld
+              else: grabWindow()
+    grabHeld = nil
     if win != nil:
       if on:
+        grabHeld = win
         if not SDL_SetWindowRelativeMouseMode(win, true):
           manualGrab = true
           manualSnap = videoCanWarp() and SDL_SetWindowMouseGrab(win, true)
@@ -1091,6 +1105,17 @@ proc mouseRightDown*(): bool =
     if terminalMode():
       return false
     activeApp.pointer.rightDown
+  else:
+    false
+
+proc mouseLeftDown*(): bool =
+  ## Whether the left button is held, as of the most recent event pump --
+  ## the same state the UI reads as `PointerState.down`, offered to hosts
+  ## that poll the pointer directly.
+  when withSdl:
+    if terminalMode():
+      return false
+    activeApp.pointer.down
   else:
     false
 
@@ -1206,6 +1231,9 @@ when withSdl:
         app.wheelPending.x += e.x
         app.wheelPending.y += e.y
         wake()
+    if mouseGrabbed and grabHeld == nil and not terminalMode() and
+        grabWindow() != nil:
+      setMouseGrab(true) # the wish found no window when made: apply it now
     if manualSnap:
       # hand-rolled capture (see `setMouseGrab`): the backend declined
       # the raw grab but honours confinement and warps, so keep yanking
