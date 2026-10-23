@@ -11,6 +11,7 @@ import sky
 import snapshot
 import splatting
 import ssao
+import underwater
 import water
 
 export billboards
@@ -23,6 +24,7 @@ export sky
 export snapshot
 export splatting
 export ssao
+export underwater
 export water
 
 type
@@ -60,7 +62,8 @@ type
     sun: Vec4 # toward the sun, intensity
     ambient: Vec4 # flat fill, then three unused
     fogNear, fogFar, fogLimit: Vec4 # the haze's colours, and where it ends
-    surf: Vec4 # wave height, seconds between waves, depth they rise from, unused
+    surf: Vec4 # wave height, seconds between waves, metres out they rise from, crest spacing
+    ground: Vec4 # the ground square's first sample x and z, metres between, samples across
 
   Artist3D* = ref object
     device: Device
@@ -136,6 +139,13 @@ type
     waterBatches: seq[Batch]
     watering: bool ## the batch being built is water
     waterOptions: WaterOptions
+    waterGround: gpu.Texture ## the heights under the water, one float a
+    ## texel; a single sample, unused, until a ground has been staged
+    waterGroundSampler: Sampler
+    waterGroundArea: Vec4 ## where the square lies: `WaterUniforms.ground`
+    waterGroundHeights: seq[float32] ## a square staged for the next present
+    waterGroundSize: uint32
+    waterGroundStaged: bool
     skyPipeline: Pipeline
     skySampler: Sampler
     skyPixelSampler: Sampler
@@ -151,6 +161,9 @@ type
     ## drawn into while the retro look is on, and its depth
     retroWidth, retroHeight: uint32
     blowUpSampler: Sampler ## reads the small picture back pixel by pixel
+    underwater: UnderwaterOptions
+    underwaterPass: UnderwaterPass ## the swaying, tinting pass the scene
+    ## goes through while the eye is under the water
 
 func uniformState(a: Artist3D, model, viewProj: Mat4): Uniforms =
   Uniforms(
@@ -194,7 +207,7 @@ proc newArtist*(app: App): Artist3D =
     splatVertex = newShader(device, splatVertexSpv.toOpenArrayByte(0, splatVertexSpv.high), VertexShader, numUniformBuffers = 1)
     splatFragment = newShader(device, splatFragmentSpv.toOpenArrayByte(0, splatFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
     waterVertex = newShader(device, waterVertexSpv.toOpenArrayByte(0, waterVertexSpv.high), VertexShader, numUniformBuffers = 1)
-    waterFragment = newShader(device, waterFragmentSpv.toOpenArrayByte(0, waterFragmentSpv.high), FragmentShader, numUniformBuffers = 1)
+    waterFragment = newShader(device, waterFragmentSpv.toOpenArrayByte(0, waterFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
     skyVertex = newShader(device, skyVertexSpv.toOpenArrayByte(0, skyVertexSpv.high), VertexShader, numUniformBuffers = 1)
     skyFragment = newShader(device, skyFragmentSpv.toOpenArrayByte(0, skyFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
     post = newSsaoPass(device, vertexShader, app.gpuSwapchainFormat())
@@ -292,6 +305,10 @@ proc newArtist*(app: App): Artist3D =
     waterVertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
     waterIndexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
     waterOptions: newWaterOptions(),
+    waterGroundSampler: newSampler(device, nearest = true),
+    waterGroundHeights: @[0.0f], # one sample until a ground comes
+    waterGroundSize: 1,
+    waterGroundStaged: true,
     # The sky neither tests nor writes anything the scene cares about: it
     # draws first, where the cleared depth lets every fragment through, and
     # writes none of it, so the world always lands on top of the dome.
@@ -310,6 +327,7 @@ proc newArtist*(app: App): Artist3D =
     aspect: 1.0f,
     retro: newRetroOptions(),
     blowUpSampler: newSampler(device, pixelated = true),
+    underwaterPass: newUnderwaterPass(device, app.gpuSwapchainFormat()),
   )
 
 proc reset*(a: Artist3D) =
@@ -411,6 +429,12 @@ proc setRetro*(a: Artist3D, options: RetroOptions) =
   a.retro = options
   a.sprites.pixelated = options.pixelatedTextures
   a.planes.pixelated = options.pixelatedTextures
+
+proc setUnderwater*(a: Artist3D, options: UnderwaterOptions) =
+  ## Whether the eye is under the water, and how far: the finished scene
+  ## sways, takes the water's colour, and dims and blurs with depth. Holds
+  ## every frame until the next call; `UnderwaterOptions()` turns it off.
+  a.underwater = options
 
 proc setFog*(a: Artist3D, options: FogOptions) =
   ## The haze the scene sinks into: it rides every scene shader -- meshes,
@@ -598,6 +622,55 @@ proc splatQuad*(a: Artist3D, v0, v1, v2, v3: SplatVertex) =
   a.splatVertices.add v3
   a.splatIndices.add [first, first + 1, first + 2, first, first + 2, first + 3]
 
+proc splatGrid*(a: Artist3D, vertices: openArray[SplatVertex], rows: int) =
+  ## A grid of splatted ground in one copy: `vertices` column after column,
+  ## `rows` to a column. Each cell is the quad a column's vertices `i`,
+  ## `i + 1` and the next column's `i + 1`, `i` make, in that winding.
+  if not a.splatting or rows < 2 or vertices.len < 2 * rows:
+    return
+  let
+    first = a.splatVertices.len
+    columns = vertices.len div rows
+  a.splatVertices.setLenUninit(first + columns * rows)
+  copyMem(addr a.splatVertices[first], unsafeAddr vertices[0],
+          columns * rows * sizeof(SplatVertex))
+  var k = a.splatIndices.len
+  a.splatIndices.setLenUninit(k + (columns - 1) * (rows - 1) * 6)
+  for j in 1 ..< columns:
+    for i in 0 ..< rows - 1:
+      let
+        c = uint32(first + (j - 1) * rows + i)
+        n = uint32(first + j * rows + i)
+      a.splatIndices[k] = c
+      a.splatIndices[k + 1] = c + 1
+      a.splatIndices[k + 2] = n + 1
+      a.splatIndices[k + 3] = c
+      a.splatIndices[k + 4] = n + 1
+      a.splatIndices[k + 5] = n
+      k += 6
+
+proc waterQuads*(a: Artist3D, vertices: openArray[WaterVertex]) =
+  ## `waterQuad` for each four vertices in turn, in one copy.
+  if not a.watering or vertices.len < 4:
+    return
+  let
+    first = a.waterVertices.len
+    count = vertices.len div 4 * 4
+  a.waterVertices.setLenUninit(first + count)
+  copyMem(addr a.waterVertices[first], unsafeAddr vertices[0],
+          count * sizeof(WaterVertex))
+  var k = a.waterIndices.len
+  a.waterIndices.setLenUninit(k + count div 4 * 6)
+  for q in 0 ..< count div 4:
+    let f = uint32(first + q * 4)
+    a.waterIndices[k] = f
+    a.waterIndices[k + 1] = f + 1
+    a.waterIndices[k + 2] = f + 2
+    a.waterIndices[k + 3] = f
+    a.waterIndices[k + 4] = f + 2
+    a.waterIndices[k + 5] = f + 3
+    k += 6
+
 proc beginWater*(a: Artist3D) =
   ## Open a batch of water under the current matrices: `waterQuad` adds to
   ## it, and `end` closes it. Water is drawn after everything else, blended
@@ -625,6 +698,18 @@ proc waterQuad*(a: Artist3D, v0, v1, v2, v3: WaterVertex) =
 
 proc setWaterOptions*(a: Artist3D, options: WaterOptions) =
   a.waterOptions = options
+
+proc setWaterGround*(a: Artist3D, ground: WaterGround) =
+  ## Stage the ground the water measures its depth against, pixel by
+  ## pixel (see `WaterGround`). Uploaded at the next present, and serves
+  ## every frame after until the next is staged; stage a new one when the
+  ## eye leaves this one or the ground under it changes.
+  if ground.size < 2 or ground.heights.len < ground.size * ground.size:
+    return
+  a.waterGroundHeights = ground.heights
+  a.waterGroundSize = ground.size.uint32
+  a.waterGroundStaged = true
+  a.waterGroundArea = vec4(ground.x, ground.z, ground.step, ground.size.float32)
 
 proc setSplatAtlas*(a: Artist3D, atlas: TextureAtlas) =
   ## Stage the layer textures splatted ground is drawn with: cell `i` of the
@@ -720,6 +805,15 @@ proc uploadSplatAtlas(a: Artist3D, cmd: CommandBuffer) =
   cmd.generateMipmaps(a.splatTexture)
   a.splatBytes = @[]
   a.splatStaged = false
+
+proc uploadWaterGround(a: Artist3D, cmd: CommandBuffer) =
+  if not a.waterGround.isNil:
+    a.device.retire(a.waterGround)
+  let size = a.waterGroundSize
+  a.waterGround = newPictureTexture(a.device, size, size, R32Float)
+  cmd.uploadPicture(a.waterGround, addr a.waterGroundHeights[0], size, size)
+  a.waterGroundHeights = @[]
+  a.waterGroundStaged = false
 
 proc uploadMeshAtlas(a: Artist3D, cmd: CommandBuffer) =
   if not a.meshTexture.isNil:
@@ -842,19 +936,22 @@ proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pip
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
 proc drawWater(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
-               pushFragment: proc ()) =
+               pushFragment: proc (); grounded: bool) =
+  ## `grounded`: the pipeline's fragment stage reads the ground's heights.
   if a.waterBatches.len == 0:
     return
   pass.bindPipeline(pipeline)
   pass.bindVertexBuffers([BufferBinding(buffer: a.waterVertexBuffer)])
   pass.bindIndexBuffer(a.waterIndexBuffer)
+  if grounded:
+    pass.bindFragmentSamplers([(texture: a.waterGround, sampler: a.waterGroundSampler)])
   let o = a.waterOptions
   for batch in a.waterBatches:
     # The vertex stage heaves the surf, by the same waves the fragment
-    # stage foams: seconds, height, period, reach; and fades the swell out
-    # with distance from the eye.
+    # stage foams: seconds, height, period, reach, and the crests' spacing
+    # beside the eye; and fades the swell out with distance from the eye.
     var uniforms = batch.uniforms
-    uniforms.color = vec4(a.eye.x, a.eye.y, a.eye.z, 0)
+    uniforms.color = vec4(a.eye.x, a.eye.y, a.eye.z, max(o.surfSpacing, 0.1f))
     uniforms.params = vec4(o.time, o.surfHeight, max(o.surfPeriod, 0.1f),
                            max(o.surfReach, 1e-3f))
     cmd.pushVertexUniforms(0, uniforms)
@@ -875,7 +972,9 @@ func waterUniforms(a: Artist3D): WaterUniforms =
     fogNear: vec4(fog.nearColor, fog.density),
     fogFar: vec4(fog.farColor, fog.falloff),
     fogLimit: vec4(fog.limit, 0, 0, 0),
-    surf: vec4(o.surfHeight, max(o.surfPeriod, 0.1f), max(o.surfReach, 1e-3f), 0),
+    surf: vec4(o.surfHeight, max(o.surfPeriod, 0.1f), max(o.surfReach, 1e-3f),
+               max(o.surfSpacing, 0.1f)),
+    ground: a.waterGroundArea,
   )
 
 proc syncSkybox(a: Artist3D, cmd: CommandBuffer) =
@@ -954,7 +1053,7 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   a.planes.drawColour(cmd, pass, a.projection * a.view, fog)
   let water = a.waterUniforms()
   a.drawWater(cmd, pass, waterPipeline,
-    proc () = cmd.pushFragmentUniforms(0, water))
+    proc () = cmd.pushFragmentUniforms(0, water), grounded = true)
 
 proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   ## Every batch again, packing linear depth for the occlusion pass.
@@ -967,10 +1066,10 @@ proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
     far, depthFogFade(a.fog))
   a.planes.drawDepth(cmd, pass, a.projection * a.view, near, far,
     depthFogFade(a.fog))
-  a.drawWater(cmd, pass, a.waterDepthPipeline, pushDepth)
+  a.drawWater(cmd, pass, a.waterDepthPipeline, pushDepth, grounded = false)
 
-proc renderScene(a: Artist3D, cmd: CommandBuffer, target, depth: gpu.Texture,
-                 width, height: uint32, clearColor: ClearColor) =
+proc renderSceneOnto(a: Artist3D, cmd: CommandBuffer, target, depth: gpu.Texture,
+                     width, height: uint32, clearColor: ClearColor) =
   ## The scene into `target`, `width` by `height`: through the occlusion
   ## chain when it is on, straight in when it is not. A wireframe frame
   ## goes straight in whatever the occlusion pass is set to: edges leave no
@@ -991,6 +1090,18 @@ proc renderScene(a: Artist3D, cmd: CommandBuffer, target, depth: gpu.Texture,
     let pass = cmd.beginRender(target, clearColor, depth)
     a.drawScene(cmd, pass)
     pass.endRender()
+
+proc renderScene(a: Artist3D, cmd: CommandBuffer, target, depth: gpu.Texture,
+                 width, height: uint32, clearColor: ClearColor) =
+  ## `renderSceneOnto`, and with the eye under the water, into the
+  ## underwater pass's target first and through that pass onto `target`.
+  if not a.underwater.enabled:
+    a.renderSceneOnto(cmd, target, depth, width, height, clearColor)
+    return
+  a.underwaterPass.ensureSize(width, height)
+  a.renderSceneOnto(cmd, a.underwaterPass.scene, depth, width, height,
+    clearColor)
+  a.underwaterPass.run(cmd, target, a.underwater)
 
 proc ensureRetroTargets(a: Artist3D, width, height: uint32) =
   if not a.retroColor.isNil and a.retroWidth == width and
@@ -1208,6 +1319,8 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
       a.uploadSplatAtlas(frame.cmd)
     if a.meshStaged:
       a.uploadMeshAtlas(frame.cmd)
+    if a.waterGroundStaged:
+      a.uploadWaterGround(frame.cmd)
     a.sprites.upload(frame.cmd)
     a.planes.upload(frame.cmd)
     frame.cmd.upload(a.shapeBuffer, a.shapes2d.vertices)

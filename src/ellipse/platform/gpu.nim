@@ -171,6 +171,9 @@ const
   Rgba8* = TextureFormat(ord(GPU_TEXTUREFORMAT_B8G8R8A8_UNORM).int32)
   R8G8B8A8* = TextureFormat(ord(GPU_TEXTUREFORMAT_R8G8B8A8_UNORM).int32)
     ## Bytes in red, green, blue, alpha order, as CPU-made images hold them.
+  R32Float* = TextureFormat(ord(GPU_TEXTUREFORMAT_R32_FLOAT).int32)
+    ## One 32-bit float a texel: four bytes, so `uploadPicture` takes it
+    ## as it takes RGBA8. Read it with `texelFetch`; it need not filter.
 
 proc swapchainFormat*(device: Device, window: Window): TextureFormat =
   TextureFormat(ord(getGPUSwapchainTextureFormat(device.raw, window)).int32)

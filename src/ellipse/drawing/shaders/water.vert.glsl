@@ -5,28 +5,31 @@
 // single triangle. Only surf moves the surface itself. A swell of a few long
 // waves rolls across it, gathering the water toward each crest, and dies out
 // over deep water and away from the eye, where the mesh grows too coarse to
-// carry it. Nearer the beach each breaking wave lifts the water more the
-// shallower it runs, and at the shore pushes the waterline up the beach and
-// lets it slide back. The fragment stage works out the same breakers to lay
+// carry it. Within reach of the beach each breaking wave lifts the water
+// more the nearer the shore it runs, and at the shore pushes the waterline
+// up the beach and lets it slide back. Crests ride the distance out from the
+// shore, not the depth: a seabed's depths wander, a coastline's offsets run
+// parallel to it. The fragment stage works out the same breakers to lay
 // foam on them.
 
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec4 stream; // xy: flow over x and z, z: depth, w: foam
 layout(location = 3) in float surf;  // 0 sheltered .. 1 open sea
+layout(location = 4) in float shore; // metres out from the shore
 
 layout(set = 1, binding = 0) uniform Uniforms {
   mat4 model;
   mat4 viewProj;
-  vec4 color; // xyz: the eye
+  vec4 color; // xyz: the eye; w: metres between crests
   vec4 light;
-  vec4 params; // x: seconds; y: wave height; z: seconds between waves; w: depth they rise from
+  vec4 params; // x: seconds; y: wave height; z: seconds between waves; w: metres out they rise from
 } u;
 
 layout(location = 0) out vec3 worldPosition;
 layout(location = 1) out vec3 worldNormal;
 layout(location = 2) out vec4 water; // as `stream`, but depth under the heaved surface
-layout(location = 3) out vec2 surfing; // x: surf; y: depth under the still surface
+layout(location = 3) out vec4 surfing; // x: surf; y: depth under the still surface; z: lift; w: shore
 
 // A well-mixed integer hash of a lattice point: no float rounding, so the
 // noise stays as fine-grained far from the origin as near it.
@@ -76,12 +79,12 @@ vec3 swell(vec2 xz, float time, out vec2 slope) {
 }
 
 // Where a wave is at this spot: 0 as its crest passes, rising to 1 as the
-// next crest comes. Crests run toward shallower water; stretches of shore
-// tens of metres apart take them at different moments. Matches the fragment
-// stage's.
-float wavePhase(vec2 xz, float depth, float time, float period, float reach) {
+// next crest comes. Crests run in toward the shore, `spacing` metres apart;
+// stretches of shore tens of metres apart take them at different moments.
+// Matches the fragment stage's.
+float wavePhase(vec2 xz, float shore, float time, float period, float spacing) {
   float offset = valueNoise(xz / 70.0) * 1.3 + valueNoise(xz / 23.0) * 0.25;
-  return fract(time / period + offset + depth / reach);
+  return fract(time / period + offset + shore / spacing);
 }
 
 void main() {
@@ -100,11 +103,11 @@ void main() {
     lift = offset.y * height;
     normalOut = normalize(normalOut - vec3(slope.x, 0.0, slope.y) * height);
   }
-  if (surf > 0.0 && depth < reach) {
-    float v = wavePhase(world.xz, depth, u.params.x, u.params.z, reach);
+  if (surf > 0.0 && shore < reach) {
+    float v = wavePhase(world.xz, shore, u.params.x, u.params.z, u.color.w);
     // A quick rise as the crest arrives, a slow fall as it drains back.
     float rise = smoothstep(0.82, 1.0, v) + 1.0 - smoothstep(0.0, 0.5, v);
-    float shoal = 1.0 - smoothstep(0.15 * reach, reach, depth);
+    float shoal = 1.0 - smoothstep(0.15 * reach, reach, shore);
     lift += u.params.y * rise * shoal * surf;
     // Mesh past the waterline may lift only to the ground it stands over,
     // so the water's edge always meets the beach rather than the mesh's end.
@@ -117,5 +120,5 @@ void main() {
   worldPosition = world.xyz;
   worldNormal = normalOut;
   water = vec4(stream.xy, depth + lift, stream.w);
-  surfing = vec2(surf, depth);
+  surfing = vec4(surf, depth, lift, shore);
 }

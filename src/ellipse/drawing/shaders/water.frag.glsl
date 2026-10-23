@@ -16,7 +16,7 @@
 layout(location = 0) in vec3 worldPosition;
 layout(location = 1) in vec3 worldNormal;
 layout(location = 2) in vec4 water; // xy: flow over x and z, z: depth, w: foam
-layout(location = 3) in vec2 surfing; // x: surf; y: depth under the still surface
+layout(location = 3) in vec4 surfing; // x: surf; y: depth under the still surface; z: lift; w: shore
 
 layout(location = 0) out vec4 outColor;
 
@@ -30,8 +30,31 @@ layout(set = 3, binding = 0) uniform Water {
   vec4 uFogNear; // rgb: the haze at the edge of sight; a: density
   vec4 uFogFar;  // rgb: the haze far in; a: falloff
   vec4 uFogLimit; // x: metres past which the world stops
-  vec4 uSurf;     // x: wave height; y: seconds between waves; z: depth they rise from
+  vec4 uSurf;     // x: wave height; y: seconds between waves; z: metres out they rise from; w: metres between crests
+  vec4 uGroundArea; // xy: x and z of the ground's first height; z: metres between; w: heights across
 };
+
+layout(set = 2, binding = 0) uniform sampler2D uGround; // one float a texel: the ground's height
+
+// The ground's height under `xz`, blended from the four heights round it --
+// fetched and blended here, as a float texture need not filter. False
+// outside the square the heights cover.
+bool groundAt(vec2 xz, out float height) {
+  height = 0.0;
+  float size = uGroundArea.w;
+  vec2 f = (xz - uGroundArea.xy) / max(uGroundArea.z, 1e-3);
+  if (size < 2.0 || any(lessThan(f, vec2(0.0))) || any(greaterThanEqual(f, vec2(size - 1.0)))) {
+    return false;
+  }
+  ivec2 i = ivec2(floor(f));
+  vec2 t = f - vec2(i);
+  float h00 = texelFetch(uGround, i, 0).r;
+  float h10 = texelFetch(uGround, i + ivec2(1, 0), 0).r;
+  float h01 = texelFetch(uGround, i + ivec2(0, 1), 0).r;
+  float h11 = texelFetch(uGround, i + ivec2(1, 1), 0).r;
+  height = mix(mix(h00, h10, t.x), mix(h01, h11, t.x), t.y);
+  return true;
+}
 
 const float Cycle = 2.0; // seconds one flow layer lives before it is reset
 
@@ -115,26 +138,27 @@ float valueNoise(vec2 x) {
 
 // Where a wave is at this spot: 0 as its crest passes, rising to 1 as the
 // next crest comes. Matches the vertex stage's, which heaves the surface by it.
-float wavePhase(vec2 xz, float depth, float time, float period, float reach) {
+float wavePhase(vec2 xz, float shore, float time, float period, float spacing) {
   float offset = valueNoise(xz / 70.0) * 1.3 + valueNoise(xz / 23.0) * 0.25;
-  return fract(time / period + offset + depth / reach);
+  return fract(time / period + offset + shore / spacing);
 }
 
 // How white the surf is here: the crest's lip and the foam spilling behind
 // it once it breaks, then a lace left on the beach while the wash runs back.
-// Also how much the crest glows where it stands up unbroken.
-vec2 surfFoam(vec2 xz, float stillDepth, float time) {
+// Also how much the crest glows where it stands up unbroken. `shore` is
+// metres out from the shore.
+vec2 surfFoam(vec2 xz, float shore, float time) {
   float reach = max(uSurf.z, 1e-3);
-  if (stillDepth >= reach) {
+  if (shore >= reach) {
     return vec2(0.0);
   }
-  float v = wavePhase(xz, stillDepth, time, max(uSurf.y, 0.1), reach);
-  float breaking = 1.0 - smoothstep(0.3 * reach, 0.65 * reach, stillDepth);
+  float v = wavePhase(xz, shore, time, max(uSurf.y, 0.1), max(uSurf.w, 0.1));
+  float breaking = 1.0 - smoothstep(0.3 * reach, 0.65 * reach, shore);
   float front = smoothstep(0.9, 1.0, v);
   float crest = max(front * front, 1.0 - smoothstep(0.0, 0.06 + 0.3 * breaking, v));
-  float lace = (1.0 - smoothstep(0.15 * reach, 0.35 * reach, stillDepth)) *
+  float lace = (1.0 - smoothstep(0.15 * reach, 0.35 * reach, shore)) *
                (1.0 - smoothstep(0.1, 0.6, v)) * 0.6;
-  float fade = 1.0 - smoothstep(0.8 * reach, reach, stillDepth);
+  float fade = 1.0 - smoothstep(0.8 * reach, reach, shore);
   return vec2(max(crest * breaking, lace), front * (1.0 - breaking)) * fade;
 }
 
@@ -147,10 +171,17 @@ void main() {
   float rippleMeters = max(uDeep.a, 1e-3);
   float time = uEye.w;
   vec2 flow = water.xy;
+  // Depth to the ground under this very pixel where its heights are known:
+  // the depths at the corners blend in a straight line across a triangle,
+  // and a bank curves, so they put the waterline metres off where it is.
   float depth = water.z;
+  float ground;
+  if (groundAt(worldPosition.xz, ground)) {
+    depth = worldPosition.y - ground;
+  }
   float churn = clamp(water.w, 0.0, 1.0);
   float speed = length(flow);
-  vec2 surf = surfing.x > 0.0 ? surfFoam(worldPosition.xz, surfing.y, time) * surfing.x
+  vec2 surf = surfing.x > 0.0 ? surfFoam(worldPosition.xz, surfing.w, time) * surfing.x
                               : vec2(0.0);
 
   vec2 p = worldPosition.xz / rippleMeters;
