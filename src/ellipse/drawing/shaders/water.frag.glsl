@@ -8,11 +8,15 @@
 // tilted surface reflects the sky and the sun by Fresnel, and lets the
 // bottom through by depth: clear and pale over the shallows, dark and opaque
 // out deep. White water is noise thresholded by how broken the surface is,
-// carried along with the flow.
+// carried along with the flow. Surf -- the sea where it runs onto a beach --
+// breaks: crests the vertex stage heaves toward the shore go white as they
+// reach the shallows, spill foam behind them, and leave a lace of it on the
+// sand as the wash drains back.
 
 layout(location = 0) in vec3 worldPosition;
 layout(location = 1) in vec3 worldNormal;
 layout(location = 2) in vec4 water; // xy: flow over x and z, z: depth, w: foam
+layout(location = 3) in vec2 surfing; // x: surf; y: depth under the still surface
 
 layout(location = 0) out vec4 outColor;
 
@@ -26,6 +30,7 @@ layout(set = 3, binding = 0) uniform Water {
   vec4 uFogNear; // rgb: the haze at the edge of sight; a: density
   vec4 uFogFar;  // rgb: the haze far in; a: falloff
   vec4 uFogLimit; // x: metres past which the world stops
+  vec4 uSurf;     // x: wave height; y: seconds between waves; z: depth they rise from
 };
 
 const float Cycle = 2.0; // seconds one flow layer lives before it is reset
@@ -42,27 +47,48 @@ float fogVisibility(float reach) {
   return 1.0 - smoothstep(limit * 0.82, limit, reach);
 }
 
-float hash(vec2 p) {
-  p = fract(p * vec2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
+// A well-mixed integer hash of a lattice point: no float rounding, so the
+// noise stays as fine-grained far from the origin as near it.
+uint hash(ivec2 cell) {
+  uvec2 v = uvec2(cell) * 1664525u + 1013904223u;
+  v.x += v.y * 1664525u;
+  v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  v.x += v.y * 1664525u;
+  v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  return v.x ^ v.y;
 }
 
-// Value noise and its two partial derivatives, in x, y, z.
+float random(ivec2 cell) {
+  return float(hash(cell) >> 8u) / 16777216.0;
+}
+
+vec2 gradient(ivec2 cell) {
+  float angle = float(hash(cell)) * (6.2831853 / 4294967296.0);
+  return vec2(cos(angle), sin(angle));
+}
+
+// Gradient noise, roughly -0.7 .. 0.7, and its two partial derivatives, in
+// x, y, z. Unlike value noise it has no creases along the lattice, which
+// ripples tilted by its slope would show as straight lines.
 vec3 noised(vec2 x) {
-  vec2 i = floor(x);
+  ivec2 i = ivec2(floor(x));
   vec2 f = fract(x);
   vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
   vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
-  float a = hash(i);
-  float b = hash(i + vec2(1.0, 0.0));
-  float c = hash(i + vec2(0.0, 1.0));
-  float d = hash(i + vec2(1.0, 1.0));
-  float k1 = b - a;
-  float k2 = c - a;
-  float k3 = a - b - c + d;
-  return vec3(a + k1 * u.x + k2 * u.y + k3 * u.x * u.y,
-              du * vec2(k1 + k3 * u.y, k2 + k3 * u.x));
+  vec2 ga = gradient(i);
+  vec2 gb = gradient(i + ivec2(1, 0));
+  vec2 gc = gradient(i + ivec2(0, 1));
+  vec2 gd = gradient(i + ivec2(1, 1));
+  float va = dot(ga, f);
+  float vb = dot(gb, f - vec2(1.0, 0.0));
+  float vc = dot(gc, f - vec2(0.0, 1.0));
+  float vd = dot(gd, f - vec2(1.0, 1.0));
+  float k = va - vb - vc + vd;
+  return vec3(va + u.x * (vb - va) + u.y * (vc - va) + u.x * u.y * k,
+              ga + u.x * (gb - ga) + u.y * (gc - ga) + u.x * u.y * (ga - gb - gc + gd) +
+              du * (u.yx * k + vec2(vb, vc) - va));
 }
 
 // The slope of three octaves of ripples, each rotated off the last so their
@@ -79,8 +105,41 @@ vec2 ripples(vec2 p) {
   return slope / 2.6;
 }
 
+float valueNoise(vec2 x) {
+  ivec2 i = ivec2(floor(x));
+  vec2 f = fract(x);
+  vec2 s = f * f * (3.0 - 2.0 * f);
+  return mix(mix(random(i), random(i + ivec2(1, 0)), s.x),
+             mix(random(i + ivec2(0, 1)), random(i + ivec2(1, 1)), s.x), s.y);
+}
+
+// Where a wave is at this spot: 0 as its crest passes, rising to 1 as the
+// next crest comes. Matches the vertex stage's, which heaves the surface by it.
+float wavePhase(vec2 xz, float depth, float time, float period, float reach) {
+  float offset = valueNoise(xz / 70.0) * 1.3 + valueNoise(xz / 23.0) * 0.25;
+  return fract(time / period + offset + depth / reach);
+}
+
+// How white the surf is here: the crest's lip and the foam spilling behind
+// it once it breaks, then a lace left on the beach while the wash runs back.
+// Also how much the crest glows where it stands up unbroken.
+vec2 surfFoam(vec2 xz, float stillDepth, float time) {
+  float reach = max(uSurf.z, 1e-3);
+  if (stillDepth >= reach) {
+    return vec2(0.0);
+  }
+  float v = wavePhase(xz, stillDepth, time, max(uSurf.y, 0.1), reach);
+  float breaking = 1.0 - smoothstep(0.3 * reach, 0.65 * reach, stillDepth);
+  float front = smoothstep(0.9, 1.0, v);
+  float crest = max(front * front, 1.0 - smoothstep(0.0, 0.06 + 0.3 * breaking, v));
+  float lace = (1.0 - smoothstep(0.15 * reach, 0.35 * reach, stillDepth)) *
+               (1.0 - smoothstep(0.1, 0.6, v)) * 0.6;
+  float fade = 1.0 - smoothstep(0.8 * reach, reach, stillDepth);
+  return vec2(max(crest * breaking, lace), front * (1.0 - breaking)) * fade;
+}
+
 float foamNoise(vec2 p) {
-  return noised(p).x * 0.65 + noised(p * 2.7 + 9.3).x * 0.35;
+  return 0.5 + noised(p).x * 0.6 + noised(p * 2.7 + 9.3).x * 0.3;
 }
 
 void main() {
@@ -91,6 +150,8 @@ void main() {
   float depth = water.z;
   float churn = clamp(water.w, 0.0, 1.0);
   float speed = length(flow);
+  vec2 surf = surfing.x > 0.0 ? surfFoam(worldPosition.xz, surfing.y, time) * surfing.x
+                              : vec2(0.0);
 
   vec2 p = worldPosition.xz / rippleMeters;
   // Ripples finer than a pixel only shimmer: fade them by the footprint.
@@ -108,7 +169,7 @@ void main() {
                     ripples(p - carried * phase1 + vec2(0.37, 0.71)),
                     abs(2.0 * phase0 - 1.0));
   vec2 slope = mix(still, moving * 1.4, clamp(speed * 1.5, 0.0, 1.0));
-  float strength = uSky.a * detail * (1.0 + 1.5 * churn);
+  float strength = uSky.a * detail * (1.0 + 1.5 * max(churn, surf.x));
 
   vec3 base = normalize(worldNormal);
   vec3 n = normalize(base - vec3(slope.x, 0.0, slope.y) * strength);
@@ -132,6 +193,8 @@ void main() {
   // Broken water carries air: paler and cloudier than the same water still,
   // but still water-coloured, not white.
   body = mix(body, vec3(0.62, 0.72, 0.76) * light, churn * 0.35);
+  // A crest standing up before it breaks lets the light through, greener.
+  body = mix(body, vec3(0.3, 0.68, 0.62) * light, surf.y * 0.45);
 
   // White water: streaks of it wherever the flow breaks up, and a thin band
   // along the shore, carried downstream the same way the ripples are. Even
@@ -139,6 +202,7 @@ void main() {
   // laced with foam rather than as a white sheet.
   float shore = 1.0 - smoothstep(0.0, 0.35, depth);
   float broken = max(churn * 0.55, shore * 0.45 * (1.0 - churn));
+  broken = max(broken, surf.x * 0.9);
   vec2 q = worldPosition.xz * 0.9;
   vec2 drift = flow * 0.9 * Cycle;
   float carriedFoam = mix(foamNoise(q - drift * phase0),

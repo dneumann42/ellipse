@@ -34,6 +34,7 @@ type
     shade*: float32 ## brightness, 1 as painted: variety between neighbours
     phase*: float32 ## 0 .. 1, where in its sway it starts; 0 sways not at all
     ## when the sprite should stand still (a stone)
+    blink*: float32 ## damage-flash intensity 0..1, applied as a red tint
 
   BillboardAtlas* = object
     ## Sprites one to a layer, each standing on its layer's bottom middle,
@@ -102,6 +103,7 @@ const
     Attribute(location: 2, offset: 20, format: Float32),
     Attribute(location: 3, offset: 24, format: Float32),
     Attribute(location: 4, offset: 28, format: Float32),
+    Attribute(location: 5, offset: 32, format: Float32),
   ]
   BillboardStride* = uint32 sizeof(BillboardInstance)
 
@@ -111,7 +113,7 @@ const
   billboardWireSpv = staticRead("shaders/spv/billboard_wire.frag.spv")
 
 static:
-  doAssert sizeof(BillboardInstance) == 32
+  doAssert sizeof(BillboardInstance) == 36
 
 func newBillboardOptions*(wind = 0.25f, cutoff = 0.5f): BillboardOptions =
   BillboardOptions(wind: wind, cutoff: cutoff)

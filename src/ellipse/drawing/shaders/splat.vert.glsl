@@ -7,6 +7,7 @@ layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec4 low;
 layout(location = 3) in vec4 high;
+layout(location = 4) in float extra;
 
 layout(set = 1, binding = 0) uniform Uniforms {
   mat4 model;
@@ -19,6 +20,7 @@ layout(set = 1, binding = 0) uniform Uniforms {
 layout(location = 0) out vec3 worldPosition;
 layout(location = 1) out vec4 weightsLow;
 layout(location = 2) out vec4 weightsHigh;
+layout(location = 4) out float weightsExtra;
 layout(location = 3) out vec4 lighting; // rgb: ambient + diffuse, a: specular
 
 void main() {
@@ -34,5 +36,6 @@ void main() {
   worldPosition = world.xyz;
   weightsLow = low;
   weightsHigh = high;
+  weightsExtra = extra;
   lighting = vec4(u.color.rgb * (u.params.x + diffuse), specular);
 }

@@ -1,12 +1,14 @@
 #version 450
 
 // A billboard's texel: cut away under the cutoff, solid above it, lit as the
-// vertex stage found, and sunk into the same fog every scene shader uses.
+// vertex stage found, tinted red by the per-instance damage flash
+// (fragmentBlink, 0..1), and fogged like every other scene shader.
 
 layout(location = 0) in vec2 fragmentUv;
 layout(location = 1) in float fragmentLayer;
 layout(location = 2) in vec3 fragmentLight;
 layout(location = 3) in vec3 worldPosition;
+layout(location = 4) in float fragmentBlink; // damage-flash intensity 0..1
 
 layout(location = 0) out vec4 outColor;
 
@@ -43,6 +45,9 @@ void main() {
     discard;
   }
   vec3 colour = texel.rgb * fragmentLight;
+  // damage flash: blend toward bright red by fragmentBlink
+  colour = mix(colour, vec3(1.4, 0.35, 0.25) * fragmentLight,
+              clamp(fragmentBlink, 0.0, 1.0));
   float amount = fogAmount(reach);
   vec3 hazed = mix(colour, mix(uFogNear.rgb, uFogFar.rgb, amount), amount);
   outColor = vec4(hazed, visibility);

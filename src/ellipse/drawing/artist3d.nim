@@ -60,6 +60,7 @@ type
     sun: Vec4 # toward the sun, intensity
     ambient: Vec4 # flat fill, then three unused
     fogNear, fogFar, fogLimit: Vec4 # the haze's colours, and where it ends
+    surf: Vec4 # wave height, seconds between waves, depth they rise from, unused
 
   Artist3D* = ref object
     device: Device
@@ -847,8 +848,16 @@ proc drawWater(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipe
   pass.bindPipeline(pipeline)
   pass.bindVertexBuffers([BufferBinding(buffer: a.waterVertexBuffer)])
   pass.bindIndexBuffer(a.waterIndexBuffer)
+  let o = a.waterOptions
   for batch in a.waterBatches:
-    cmd.pushVertexUniforms(0, batch.uniforms)
+    # The vertex stage heaves the surf, by the same waves the fragment
+    # stage foams: seconds, height, period, reach; and fades the swell out
+    # with distance from the eye.
+    var uniforms = batch.uniforms
+    uniforms.color = vec4(a.eye.x, a.eye.y, a.eye.z, 0)
+    uniforms.params = vec4(o.time, o.surfHeight, max(o.surfPeriod, 0.1f),
+                           max(o.surfReach, 1e-3f))
+    cmd.pushVertexUniforms(0, uniforms)
     pushFragment()
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
@@ -866,6 +875,7 @@ func waterUniforms(a: Artist3D): WaterUniforms =
     fogNear: vec4(fog.nearColor, fog.density),
     fogFar: vec4(fog.farColor, fog.falloff),
     fogLimit: vec4(fog.limit, 0, 0, 0),
+    surf: vec4(o.surfHeight, max(o.surfPeriod, 0.1f), max(o.surfReach, 1e-3f), 0),
   )
 
 proc syncSkybox(a: Artist3D, cmd: CommandBuffer) =

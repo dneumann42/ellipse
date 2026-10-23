@@ -143,6 +143,136 @@ proc strokeCircle*(s: var Shapes, center: Vec2, radius, width: float32,
              center + d0 * r1, colors[band], colors[band], colors[band + 1],
              colors[band + 1])
 
+func winding(points: openArray[Vec2]): float32 =
+  ## +1 or -1: which way the corner list turns.
+  var area = 0.0f
+  for i in 0 ..< points.len:
+    let (p, q) = (points[i], points[(i + 1) mod points.len])
+    area += p.x * q.y - q.x * p.y
+  if area > 0: 1.0f else: -1.0f
+
+func cross(o, a, b: Vec2): float32 =
+  (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+
+func hurt(a, b, c, p: Vec2, side: float32): bool =
+  ## Whether the corner `p` stabs the triangle `a, b, c`, whose winding is
+  ## `side`. Corners exactly on an edge do not count.
+  if side > 0:
+    cross(a, b, p) > 1e-6f and cross(b, c, p) > 1e-6f and cross(c, a, p) > 1e-6f
+  else:
+    cross(a, b, p) < -1e-6f and cross(b, c, p) < -1e-6f and cross(c, a, p) < -1e-6f
+
+proc edgeNormals(points: openArray[Vec2], side: float32): seq[Vec2] =
+  ## The outward unit normal of each edge, given the winding.
+  let n = points.len
+  result.setLen(n)
+  for i in 0 ..< n:
+    let
+      d = points[(i + 1) mod n] - points[i]
+      l = max(sqrt(d.x * d.x + d.y * d.y), 1e-6f)
+    result[i] = vec2(d.y / l * side, -d.x / l * side)
+
+proc mitered(points: openArray[Vec2], normals: openArray[Vec2],
+             dist: float32): seq[Vec2] =
+  ## Each corner moved `dist` along the normal bisector, so the offset edges
+  ## still meet. A sharp corner's miter is capped, like `fillConvex`'s.
+  let n = points.len
+  result.setLen(n)
+  for i in 0 ..< n:
+    let
+      a = normals[(i + n - 1) mod n]
+      b = normals[i]
+      cosine = max(a.x * b.x + a.y * b.y, -0.8f)
+      miter = (a + b) * (dist / (1.0f + cosine))
+    result[i] = points[i] + miter
+
+proc fillPolygon*(s: var Shapes, points: openArray[Vec2], color: Vec4) =
+  ## A simple polygon, concave or convex, filled in `color` with its outer
+  ## edge smoothed. It must not cross itself; holes want a ring path, not a
+  ## repeat. The interior is cut into triangles here, on the CPU.
+  let n = points.len
+  if n < 3:
+    return
+  let side = winding(points)
+  # Ear clipping: a corner whose turn follows the winding, and which holds no
+  # other corner in its triangle, is an ear -- snip it and go around again.
+  var left: seq[int]
+  for i in 0 ..< n:
+    left.add i
+  var snipped = 0
+  while left.len > 3 and snipped <= n * n:
+    var ear = -1
+    for t in 0 ..< left.len:
+      let
+        a = points[left[(t + left.len - 1) mod left.len]]
+        b = points[left[t]]
+        c = points[left[(t + 1) mod left.len]]
+      if cross(a, b, c) * side <= 1e-6f:
+        continue # a hollow corner: no ear here
+      var clear = true
+      for u in 0 ..< left.len:
+        if u == t or (u + 1) mod left.len == t or
+            (u + left.len - 1) mod left.len == t:
+          continue
+        if hurt(a, b, c, points[left[u]], side):
+          clear = false
+          break
+      if clear:
+        ear = t
+        break
+    if ear < 0: # crossed or degenerate: fan what's left and be done
+      for t in 1 ..< left.len - 1:
+        s.triangle(points[left[0]], points[left[t]], points[left[t + 1]],
+                   color, color, color)
+      left.setLen(0)
+      break
+    s.triangle(points[left[(ear + left.len - 1) mod left.len]],
+               points[left[ear]], points[left[(ear + 1) mod left.len]],
+               color, color, color)
+    left.delete(ear)
+    inc snipped
+  if left.len == 3:
+    s.triangle(points[left[0]], points[left[1]], points[left[2]],
+               color, color, color)
+  # The fringe only along the border: solid up to each edge, clear a half
+  # pixel out.
+  let
+    rim = color.clear
+    normals = edgeNormals(points, side)
+    outer = mitered(points, normals, feather)
+  for i in 0 ..< n:
+    let j = (i + 1) mod n
+    s.quad(points[i], points[j], outer[j], outer[i], color, color, rim, rim)
+
+proc strokePolygon*(s: var Shapes, points: openArray[Vec2], width: float32,
+                    color: Vec4) =
+  ## A ring `width` pixels thick following the closed polygon, its corners
+  ## mitred so the stroke bends with the outline instead of doubling up.
+  let n = points.len
+  if n < 3 or width <= 0:
+    return
+  let
+    side = winding(points)
+    half = width * 0.5f
+    # Four offsets out from the centre line: clear, solid, solid, clear. A
+    # ring thinner than its fringe keeps a hairline core, dimmed to its width.
+    core = max(half - feather, 0.0f)
+    solid = if half < feather: vec4(color.x, color.y, color.z,
+                                    color.w * width / (2.0f * feather))
+            else: color
+    offsets = [-(half + feather), -core, core, half + feather]
+    colors = [color.clear, solid, solid, color.clear]
+    normals = edgeNormals(points, side)
+  var rings: array[4, seq[Vec2]]
+  for r in 0 .. 3:
+    rings[r] = mitered(points, normals, offsets[r])
+  for i in 0 ..< n:
+    let j = (i + 1) mod n
+    for band in 0 .. 2:
+      s.quad(rings[band][i], rings[band][j], rings[band + 1][j],
+             rings[band + 1][i], colors[band], colors[band],
+             colors[band + 1], colors[band + 1])
+
 proc line*(s: var Shapes, a, b: Vec2, width: float32, color: Vec4) =
   ## A straight stroke from `a` to `b`, `width` pixels across, square-ended.
   let

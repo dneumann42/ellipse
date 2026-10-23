@@ -12,6 +12,7 @@ layout(location = 1) in vec2 iSize;     // metres across and tall
 layout(location = 2) in float iLayer;
 layout(location = 3) in float iShade;
 layout(location = 4) in float iPhase;
+layout(location = 5) in float iBlink;   // damage-flash intensity 0..1
 
 layout(set = 1, binding = 0) uniform Uniforms {
   mat4 viewProj;
@@ -26,6 +27,7 @@ layout(location = 0) out vec2 fragmentUv;
 layout(location = 1) out float fragmentLayer;
 layout(location = 2) out vec3 fragmentLight;
 layout(location = 3) out vec3 worldPosition;
+layout(location = 4) out float fragmentBlink;
 
 const vec2 corners[6] = vec2[](
   vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
@@ -56,4 +58,5 @@ void main() {
   float foot = mix(0.62, 1.0, smoothstep(0.0, 0.55, c.y));
   fragmentLight = vec3((u.params.x + sun) * iShade * foot);
   worldPosition = world;
+  fragmentBlink = iBlink;
 }

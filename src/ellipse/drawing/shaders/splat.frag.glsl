@@ -1,6 +1,6 @@
 #version 450
 
-// Blends up to eight tiling layers by the weights painted at the vertices.
+// Blends up to nine tiling layers by the weights painted at the vertices.
 // Each texel's alpha is its height: where two layers share a spot, the one
 // standing higher (its weight plus its height) wins, and `blendDepth` sets
 // how far below the winner another layer may still show through. Weights
@@ -11,6 +11,7 @@ layout(location = 0) in vec3 worldPosition;
 layout(location = 1) in vec4 weightsLow;
 layout(location = 2) in vec4 weightsHigh;
 layout(location = 3) in vec4 lighting;
+layout(location = 4) in float weightsExtra;
 
 layout(location = 0) out vec4 outColor;
 
@@ -24,7 +25,7 @@ layout(set = 3, binding = 0) uniform Splat {
   vec4 uFogLimit; // x: metres past which the world stops
 };
 
-const int Layers = 8;
+const int Layers = 9;
 const float Present = 0.002; // weights below this are not sampled at all
 
 float fogAmount(float reach) {
@@ -42,7 +43,8 @@ float fogVisibility(float reach) {
 void main() {
   float weights[Layers] = float[Layers](
     weightsLow.x, weightsLow.y, weightsLow.z, weightsLow.w,
-    weightsHigh.x, weightsHigh.y, weightsHigh.z, weightsHigh.w);
+    weightsHigh.x, weightsHigh.y, weightsHigh.z, weightsHigh.w,
+    weightsExtra);
   float total = 0.0;
   for (int i = 0; i < Layers; i++) {
     total += weights[i];

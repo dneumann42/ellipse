@@ -13,14 +13,15 @@ import ../platform/gpu
 import geometry
 
 const
-  SplatLayers* = 8 ## textures a splatted surface can blend between
+  SplatLayers* = 9 ## textures a splatted surface can blend between
 
 type
   SplatVertex* = object
     position*: Vec3
     normal*: Vec3
     low*: Vec4 ## weights of layers 0 to 3
-    high*: Vec4 ## and of layers 4 to 7; all eight sum to 1
+    high*: Vec4 ## and of layers 4 to 7
+    extra*: float32 ## and of layer 8; all nine sum to 1
 
   TextureAtlas* = object
     ## Square cells of `cell` pixels, `columns` across and `rows` down, in
@@ -43,6 +44,7 @@ const
     Attribute(location: 1, offset: 12, format: Float3),
     Attribute(location: 2, offset: 24, format: Float4),
     Attribute(location: 3, offset: 40, format: Float4),
+    Attribute(location: 4, offset: 56, format: Float32),
   ]
   SplatStride* = uint32 sizeof(SplatVertex)
 
