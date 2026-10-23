@@ -85,7 +85,7 @@ type
     wireframePipeline: Pipeline ## the same sprites outlined, for the artist's
     ## wireframe frames
     sampler: Sampler
-    pixelSampler: Sampler ## no filter at all, for the retro look
+    pixelSampler: Sampler ## square texels, levels blended, for the retro look
     pixelated*: bool ## sprites sampled through `pixelSampler` this frame
     wireframe*: bool ## sprites drawn as their edges instead of their picture
     texture: Texture
@@ -124,6 +124,71 @@ func newBillboardAtlas*(width, height: int): BillboardAtlas =
   ## An empty atlas of `width` by `height` pixel layers.
   BillboardAtlas(width: width, height: height)
 
+proc bleedColour(pixels: var seq[uint8], base, width, height: int) =
+  ## Give every clear texel of one layer the colour of its nearest opaque
+  ## texel, its opacity left at zero. The mip levels average colour and
+  ## opacity alike, so without this a sprite's edges and every level below
+  ## the first darken toward the black of the clear texels around it.
+  var
+    filled = newSeq[bool](width * height)
+    queue = newSeqOfCap[int](width * height)
+  for i in 0 ..< width * height:
+    if pixels[base + i * 4 + 3] > 0:
+      filled[i] = true
+      queue.add i
+  var head = 0
+  while head < queue.len:
+    let
+      i = queue[head]
+      x = i mod width
+      y = i div width
+    inc head
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+      let (nx, ny) = (x + dx, y + dy)
+      if nx < 0 or ny < 0 or nx >= width or ny >= height:
+        continue
+      let n = ny * width + nx
+      if filled[n]:
+        continue
+      filled[n] = true
+      copyMem(addr pixels[base + n * 4], addr pixels[base + i * 4], 3)
+      queue.add n
+
+func halved(pixels: seq[uint8], width, height, layers: int): seq[uint8] =
+  ## The next mip level down, layer by layer: each texel the four above it,
+  ## their colour weighted by their opacity so a clear texel adds none of
+  ## its own. Four clear texels keep the colour bled into them.
+  let
+    w = max(width div 2, 1)
+    h = max(height div 2, 1)
+  result = newSeq[uint8](w * h * 4 * layers)
+  for layer in 0 ..< layers:
+    let
+      source = layer * width * height * 4
+      target = layer * w * h * 4
+    for y in 0 ..< h:
+      for x in 0 ..< w:
+        var
+          weighted: array[3, int]
+          plain: array[3, int]
+          alpha = 0
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)]:
+          let
+            sx = min(x * 2 + dx, width - 1)
+            sy = min(y * 2 + dy, height - 1)
+            i = source + (sy * width + sx) * 4
+            a = pixels[i + 3].int
+          for c in 0 .. 2:
+            weighted[c] += pixels[i + c].int * a
+            plain[c] += pixels[i + c].int
+          alpha += a
+        let o = target + (y * w + x) * 4
+        for c in 0 .. 2:
+          result[o + c] = uint8(
+            if alpha > 0: (weighted[c] + alpha div 2) div alpha
+            else: (plain[c] + 2) div 4)
+        result[o + 3] = uint8((alpha + 2) div 4)
+
 proc addSprite*(atlas: var BillboardAtlas, width, height: int,
                 pixels: openArray[uint8]): int =
   ## Stand a `width` by `height` RGBA8 sprite on the bottom middle of a new
@@ -145,6 +210,7 @@ proc addSprite*(atlas: var BillboardAtlas, width, height: int,
   for y in 0 ..< h:
     copyMem(addr atlas.pixels[base + ((top + y) * atlas.width + left) * 4],
             unsafeAddr pixels[((srcTop + y) * width + srcLeft) * 4], w * 4)
+  atlas.pixels.bleedColour(base, atlas.width, atlas.height)
   atlas.rects.add vec4(
     left.float32 / atlas.width.float32, top.float32 / atlas.height.float32,
     (left + w).float32 / atlas.width.float32, 1.0f)
@@ -208,7 +274,8 @@ proc newBillboardPass*(device: Device, colorFormat: TextureFormat): BillboardPas
       colorFormat: Rgba8, depthFormat: Depth32,
     )),
     sampler: newSampler(device, mipmaps = true, nearest = true),
-    pixelSampler: newSampler(device, mipmaps = true, pixelated = true),
+    pixelSampler: newSampler(device, mipmaps = true, pixelated = true,
+                             levelsBlended = true),
     options: newBillboardOptions(),
   )
 
@@ -250,9 +317,19 @@ proc upload*(p: BillboardPass, cmd: CommandBuffer) =
       inc levels
     p.texture = newLayeredTexture(p.device, p.staged.width.uint32,
       p.staged.height.uint32, p.staged.layers.uint32, levels, R8G8B8A8)
-    cmd.uploadLayers(p.texture, addr p.staged.pixels[0], p.staged.width.uint32,
-      p.staged.height.uint32, p.staged.layers.uint32)
-    cmd.generateMipmaps(p.texture)
+    # The levels are halved here rather than by the GPU, whose blit would
+    # average in the colour of the clear texels around every sprite.
+    var
+      pixels = p.staged.pixels
+      width = p.staged.width
+      height = p.staged.height
+    for level in 0'u32 ..< levels:
+      if level > 0:
+        pixels = halved(pixels, width, height, p.staged.layers)
+        width = max(width div 2, 1)
+        height = max(height div 2, 1)
+      cmd.uploadLayers(p.texture, addr pixels[0], width.uint32, height.uint32,
+        p.staged.layers.uint32, level)
     p.staged = BillboardAtlas()
     p.atlasStaged = false
   for buffer in p.uploads:

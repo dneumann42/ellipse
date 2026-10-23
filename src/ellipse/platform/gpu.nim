@@ -490,9 +490,10 @@ proc newLayeredTexture*(device: Device, width, height, layers, levels: uint32,
   Texture(device: device, raw: raw, owned: true)
 
 proc uploadLayers*(cmd: CommandBuffer, texture: Texture, data: pointer,
-                   width, height, layers: uint32) =
+                   width, height, layers: uint32, level = 0'u32) =
   ## Copy `layers` RGBA8 pictures of `width` x `height`, one after another in
-  ## CPU memory, into the top mip level of a layered texture.
+  ## CPU memory, into mip `level` of a layered texture: the top one unless
+  ## told otherwise, and `width` by `height` must be that level's size.
   let
     layerSize = width * height * 4
     size = layerSize * layers
@@ -512,6 +513,7 @@ proc uploadLayers*(cmd: CommandBuffer, texture: Texture, data: pointer,
     )
     var destination = GPUTextureRegion(
       texture: cast[ptr GPUTexture](texture.raw),
+      mip_level: level,
       layer: layer,
       w: width,
       h: height,
@@ -526,7 +528,7 @@ proc generateMipmaps*(cmd: CommandBuffer, texture: Texture) =
 
 proc newSampler*(device: Device, repeat = false, mipmaps = false,
                  anisotropy = 0.0f, nearest = false,
-                 pixelated = false): Sampler =
+                 pixelated = false, levelsBlended = false): Sampler =
   ## Linear filtering, clamped at the edges unless `repeat` tiles the
   ## texture; `mipmaps` blends between mip levels, and an `anisotropy`
   ## above 1 keeps surfaces seen at a grazing angle sharp. `nearest` keeps
@@ -534,7 +536,8 @@ proc newSampler*(device: Device, repeat = false, mipmaps = false,
   ## still filter. `pixelated` filters nothing at all: every texel is
   ## square near and far, and with `mipmaps` the level is picked whole
   ## rather than blended -- the hard-edged look of a console without a
-  ## texture filter.
+  ## texture filter -- unless `levelsBlended` still blends the levels,
+  ## each texel square but no hard step where one level gives way.
   let address =
     if repeat: GPU_SAMPLERADDRESSMODE_REPEAT
     else: GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE
@@ -544,7 +547,7 @@ proc newSampler*(device: Device, repeat = false, mipmaps = false,
     mag_filter:
       if nearest or pixelated: GPU_FILTER_NEAREST else: GPU_FILTER_LINEAR,
     mipmap_mode:
-      if mipmaps and filtered: GPU_SAMPLERMIPMAPMODE_LINEAR
+      if mipmaps and (filtered or levelsBlended): GPU_SAMPLERMIPMAPMODE_LINEAR
       else: GPU_SAMPLERMIPMAPMODE_NEAREST,
     address_mode_u: address,
     address_mode_v: address,
