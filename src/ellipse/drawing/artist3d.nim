@@ -36,6 +36,20 @@ type
     firstIndex, indexCount: uint32
     uniforms: Uniforms
 
+  StaticMesh* = ref object
+    ## Geometry recorded once between `beginRecording` and `endRecording`,
+    ## kept in GPU buffers of its own and drawn again by `drawStatic`
+    ## without being rebuilt or uploaded each frame.
+    vertexBuffer, indexBuffer: DynamicBuffer
+    vertices: seq[Vertex] ## held until the first present uploads them
+    indices: seq[uint32]
+    batches: seq[Batch] ## firstIndex counts from the mesh's own indices
+    uploaded: bool
+    vertexTotal: int
+
+  Recording = object
+    vertexStart, indexStart, batchStart: int
+
   SplatUniforms = object
     splat: Vec4 # metres per repeat, blend depth, height contrast, unused
     fog: FogUniforms
@@ -75,6 +89,8 @@ type
     indices: seq[uint32]
     batches: seq[Batch]
     pending: Batch
+    statics: seq[StaticMesh] ## recorded meshes drawn this frame
+    record: Recording
     view: Mat4
     eye: Vec3 ## where `setView` last put the eye: water reflects toward it
     projection: Mat4
@@ -334,6 +350,7 @@ proc reset*(a: Artist3D) =
   a.vertices.setLen(0)
   a.indices.setLen(0)
   a.batches.setLen(0)
+  a.statics.setLen(0)
   a.face.setLen(0)
   a.building = false
   a.splatVertices.setLen(0)
@@ -350,7 +367,10 @@ proc reset*(a: Artist3D) =
 
 proc vertexCount*(a: Artist3D): int =
   ## Vertices queued for this frame: a proxy for the work the LOD keeps down.
-  a.vertices.len + a.splatVertices.len + a.waterVertices.len +
+  var recorded = 0
+  for mesh in a.statics:
+    recorded += mesh.vertexTotal
+  a.vertices.len + recorded + a.splatVertices.len + a.waterVertices.len +
     a.sprites.queued * 6 + # each billboard's six corners, built on the GPU
     a.planes.queued
 
@@ -879,6 +899,55 @@ proc render*(a: Artist3D, mesh: Mesh, model: Mat4) =
   a.render(mesh)
   a.popMatrix()
 
+proc beginRecording*(a: Artist3D) =
+  ## Mesh geometry from here until `endRecording` goes into a `StaticMesh`
+  ## instead of this frame. Splats, water and billboards are not recorded.
+  if a.building:
+    a.`end`()
+  a.record = Recording(vertexStart: a.vertices.len,
+                       indexStart: a.indices.len,
+                       batchStart: a.batches.len)
+
+proc endRecording*(a: Artist3D): StaticMesh =
+  ## The geometry since `beginRecording`, taken out of this frame. Each
+  ## batch keeps its model matrix, material colour and mesh cell; the view,
+  ## light and shading come from the frame it is drawn in.
+  if a.building:
+    a.`end`()
+  let r = a.record
+  result = StaticMesh()
+  result.vertices = a.vertices[r.vertexStart .. ^1]
+  result.indices = newSeq[uint32](a.indices.len - r.indexStart)
+  for i in 0 ..< result.indices.len:
+    result.indices[i] = a.indices[r.indexStart + i] - r.vertexStart.uint32
+  for i in r.batchStart ..< a.batches.len:
+    var batch = a.batches[i]
+    batch.firstIndex -= r.indexStart.uint32
+    result.batches.add batch
+  result.vertexTotal = result.vertices.len
+  a.vertices.setLen(r.vertexStart)
+  a.indices.setLen(r.indexStart)
+  a.batches.setLen(r.batchStart)
+
+proc drawStatic*(a: Artist3D, mesh: StaticMesh) =
+  ## Draw a recorded mesh this frame.
+  if not mesh.isNil and mesh.batches.len > 0:
+    a.statics.add mesh
+
+proc uploadStatics(a: Artist3D, cmd: CommandBuffer) =
+  for mesh in a.statics:
+    if mesh.uploaded:
+      continue
+    mesh.vertexBuffer = newDynamicBuffer(a.device, {VertexData},
+      max(mesh.vertices.len * sizeof(Vertex), 1).uint32)
+    mesh.indexBuffer = newDynamicBuffer(a.device, {IndexData},
+      max(mesh.indices.len * sizeof(uint32), 1).uint32)
+    cmd.upload(mesh.vertexBuffer, mesh.vertices)
+    cmd.upload(mesh.indexBuffer, mesh.indices)
+    mesh.vertices = @[]
+    mesh.indices = @[]
+    mesh.uploaded = true
+
 proc refreshProjection(a: Artist3D, frame: GpuFrame) =
   if frame.width > 0 and frame.height > 0:
     a.aspect = frame.width.float32 / frame.height.float32
@@ -918,6 +987,21 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
     if not pushFragment.isNil:
       pushFragment()
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+  if a.statics.len == 0:
+    return
+  let frameState = a.uniformState(a.model, a.projection * a.view)
+  for mesh in a.statics:
+    pass.bindVertexBuffers([BufferBinding(buffer: mesh.vertexBuffer)])
+    pass.bindIndexBuffer(mesh.indexBuffer)
+    for batch in mesh.batches:
+      var uniforms = frameState
+      uniforms.model = batch.uniforms.model
+      uniforms.color = batch.uniforms.color
+      uniforms.params.w = batch.uniforms.params.w # the mesh cell
+      cmd.pushVertexUniforms(0, uniforms)
+      if not pushFragment.isNil:
+        pushFragment()
+      pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
 proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
                 pushFragment: proc (); textured: bool) =
@@ -1324,7 +1408,9 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
     a.sprites.upload(frame.cmd)
     a.planes.upload(frame.cmd)
     frame.cmd.upload(a.shapeBuffer, a.shapes2d.vertices)
-    if a.batches.len > 0 or a.splatBatches.len > 0 or a.waterBatches.len > 0 or
+    a.uploadStatics(frame.cmd)
+    if a.batches.len > 0 or a.statics.len > 0 or a.splatBatches.len > 0 or
+        a.waterBatches.len > 0 or
         a.sprites.pending or a.planes.pending or a.sky.enabled:
       a.refreshProjection(frame)
       if a.sky.enabled:

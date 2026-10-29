@@ -103,6 +103,17 @@ proc spawn*(self: var EntityManager): EntityId =
   self.entities.add(result)
   self.refreshViews(result)
 
+proc adopt*(self: var EntityManager, entityId: EntityId): bool =
+  ## Take in an entity by a known id — the load half of a save that keeps
+  ## its ids stable, so components and scene state that name an id still
+  ## find their entity. False when the roster already holds it; the id
+  ## gets no second copy and no views change.
+  if self.entities.contains(entityId):
+    return false
+  self.entities.add(entityId)
+  self.refreshViews(entityId)
+  return true
+
 proc add*[T](self: var EntityManager, entityId: EntityId, component: T) =
   if not self.componentBuffers.hasKey(name(T)):
     self.componentBuffers[name(T)] = AbstractComponentBuffer(ComponentBuffer[T]())
