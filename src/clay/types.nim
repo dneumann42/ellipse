@@ -366,8 +366,13 @@ func grow*(min, max: float32 = 0.0): SizingAxis =
   ## Fill leftover space along this axis.
   SizingAxis(kind: grow, min: min, max: max)
 
-func fixedPx*(pixels: float32): SizingAxis =
+func fixed*(pixels: float32): SizingAxis =
+  ## Exactly `pixels` along this axis.
   SizingAxis(kind: fixed, min: pixels, max: pixels)
+
+func fixedPx*(pixels: float32): SizingAxis =
+  ## Alias of `fixed`.
+  fixed(pixels)
 
 func pct*(fraction: float32): SizingAxis =
   ## A fraction (0-1) of the parent's inner content size on this axis.
