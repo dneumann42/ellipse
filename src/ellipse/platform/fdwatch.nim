@@ -33,6 +33,7 @@ when defined(windows):
   proc useDirectWait*() = discard
   proc waitFds*(ns: int64) = discard
   proc runReadyFds*() = discard
+  proc fdsReady*(): bool = false
 else:
   {.compile: "fdwatch.c".}
 
@@ -42,6 +43,7 @@ else:
     importc: "ellipse_fdwatch_take".}
   proc ellipse_fdwatch_rearm(fd: int32) {.importc: "ellipse_fdwatch_rearm".}
   proc ellipse_fdwatch_wait(ns: int64): int32 {.importc: "ellipse_fdwatch_wait".}
+  proc ellipse_fdwatch_ready(): cint {.importc: "ellipse_fdwatch_ready".}
 
   var direct = false
 
@@ -69,6 +71,14 @@ else:
     ## The loop sleeps in `waitFds` itself (the terminal backend): no helper
     ## thread is started.
     direct = true
+
+  proc fdsReady*(): bool =
+    ## Whether a watched descriptor has fired and its callback waits to run.
+    ## Threaded mode: the wake thread marks it, so this answers without
+    ## touching SDL's queue. Direct mode: look first, then answer.
+    if direct:
+      discard ellipse_fdwatch_wait(0)
+    ellipse_fdwatch_ready() != 0
 
   proc waitFds*(ns: int64) =
     ## Direct mode: sleep until a watched descriptor is readable or `ns`

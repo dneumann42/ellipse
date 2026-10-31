@@ -3,11 +3,15 @@
 ## `run`. See `documentation/nim-tutorial.md` §12 (The app shell and its
 ## hooks) and `documentation/README.md` for the two quick starts.
 
-import std/envvars
+import std/[envvars, syncio]
+when defined(posix):
+  import std/posix
 
 import clay
 import ellipse/hotload
+export hotload
 import ellipse/logger
+import ellipse/platform/display
 import ellipse/platform/platform
 import ellipse/platform/renderer
 import ./ui
@@ -24,6 +28,11 @@ type
     window*: WindowConfig      ## title, size, or a docked layer-shell bar
     debugMode*: bool = true    ## F1 toggles the debug overlay
     log*: bool = true          ## install the standard stdout logger
+    hotApp*: bool = false      ## watch src/, rebuild on save, re-exec over
+                               ## this process (whole-app hot-loading; the
+                               ## display server's window survives it)
+    buildCommand*: string = "" ## what `hotApp` runs to rebuild (default
+                               ## "make build")
     prepare*: AppFn        ## first, in every process (dialogs too)
     setup*: AppFn          ## once, after `bootup` (main process only)
     input*: InputHook      ## every frame, inside `updateUI`
@@ -36,8 +45,11 @@ var current: App
 proc frame*()  =
   ## One update pass of the launched app: input, hooks, layout. The loop
   ## runs this every paced frame; a `script` drives it by hand.
+  pumpProjectWakes()
+  syncAttachedSurface()
   updateUI()
   updateDialogs()
+  checkProjectSettled()
   let before = current.before
   if before != nil:
     before()
@@ -64,7 +76,13 @@ proc launch*(app: App)  =
   if prepare != nil:
     prepare()
   bootup(app.window)
-  startHotLoading()
+  if app.hotApp:
+    # whole-app reload: watch src/, rebuild on a save, become the new binary
+    # (see `ellipse/hotload.startProjectWatching`); nothing is rebuilt or
+    # swapped unless this process was asked to watch at all
+    startProjectWatching(app.buildCommand)
+  else:
+    startHotLoading()
   if app.debugMode:
     installDebugMode()
   let input = app.input
@@ -103,13 +121,45 @@ proc shotScript(path: string): AppFn =
     if not saveScreenshot(path, bg = activeTheme.palette.bg):
       discard error("could not write the screenshot ", path)
 
+proc relaunch*(): bool =
+  ## Replace this process with a freshly built copy of itself, in place:
+  ## same pid, new image, and (attached or not) the window is simply taken
+  ## over again. The whole-app hot loader calls it after a successful
+  ## rebuild; an app can also bind it to a key. A successful call never
+  ## returns -- false means the restart could not happen and the old build
+  ## keeps serving.
+  when defined(posix):
+    saveRestartArgs()
+    if restartArgs.len == 0 or restartArgs[0].len == 0:
+      return false
+    var argv = newSeq[cstring](restartArgs.len + 1)
+    var held = newSeq[string](restartArgs.len)
+    for i in 0 ..< restartArgs.len:
+      held[i] = restartArgs[i] & ""   # deep copy, pinned until execv returns:
+      argv[i] = held[i].cstring       # a `cstring` is just a pointer
+    argv[restartArgs.len] = nil
+    discard execv(restartArgs[0].cstring, cast[cstringArray](addr argv[0]))
+    # execv only returns on failure: keep the old build serving
+    false
+
+
 proc run*(app: App; script: AppFn = nil) =
   ## `launch` the app and hand it to the paced loop until the window
   ## closes. With a `script` the loop is skipped and the script runs
   ## instead, driving `frame` itself -- the headless screenshot/test seam
   ## (`SDL_VIDEODRIVER=offscreen`). Startup errors end the program quietly,
-  ## like every hand-written `main` before this did.
+  ## like every hand-written `main` before this did. A whole-app reload
+  ## that rebuilt successfully ends the loop through `takeRestart`; this is
+  ## where the old image becomes the new one (see `relaunch`).
   try:
+    if displayServeRequested():
+      # `--display-serve`: this run *is* the dev window every attached app
+      # mirrors into -- no UI, no loop, it never returns (see
+      # `platform/display.serveDisplay`). An attached app raises one from its
+      # own image when nothing answers the socket, so `make hot` alone keeps
+      # the window through reloads.
+      when not defined(windows):
+        serveDisplay(app.window.title, app.window.width, app.window.height)
     if isDialogProcess():
       runDialogProcess(app)
       return
@@ -121,6 +171,23 @@ proc run*(app: App; script: AppFn = nil) =
       shotScript(shot)()
     else:
       start(frame, render)
-  except CatchableError:
-    discard
+  except CatchableError as exc:
+    stderr.writeLine("ellipse: " & exc.msg)
+    quit(1)
+  if takeRestart():
+    ## Nothing of this build must survive into the next frame of the user's
+    ## session: become the freshly compiled program, in place -- *before* any
+    ## shutdown. The display server keeps its window and slot through an
+    ## execv; a close-on-exec socket dies with the image quietly, while
+    ## teardown code that touches it (or SDL) can fail or hang first. The new
+    ## image dials fresh. If the exec fails outright, fall through to the
+    ## normal shutdown so the old build keeps serving gracefully.
+    stderr.writeLine("hot: restarting application")
+    if not relaunch():
+      stderr.writeLine("hot: restart failed")
   shutdownDialogs()
+  if takeRestart():
+    # something killed the loop between the first attempt and here: one last
+    # try at becoming the new image before exiting for real
+    if not relaunch():
+      quit(1)

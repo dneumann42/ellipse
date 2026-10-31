@@ -591,6 +591,17 @@ when withSdl:
 
 ## --- public API ----------------------------------------------------------------------
 
+proc releaseTextEngine() =
+  when withSdl:
+    # Text and textures must be released before their renderer is destroyed.
+    for _, cached in texts:
+      if cached.text != nil:
+        TTF_DestroyText(cached.text)
+    texts.clear()
+    if not textEngine.isNil:
+      TTF_DestroyRendererTextEngine(textEngine)
+      textEngine = nil
+
 proc initializeRenderer*()  =
   ## Prepare fonts + text engine on the platform's renderer. Call after
   ## `platform.initialize()` and before the first frame. Nothing to do in
@@ -600,12 +611,7 @@ proc initializeRenderer*()  =
   when withSdl:
     if not TTF_Init():
       raise Failure()
-    if not textEngine.isNil:
-      TTF_DestroyRendererTextEngine(textEngine)
-      for _, cached in texts:
-        if cached.text != nil:
-          TTF_DestroyText(cached.text)
-      texts.clear()
+    releaseTextEngine()
     textEngine = TTF_CreateRendererTextEngine(sdlRenderer())
     if textEngine == nil:
       raise Failure()
@@ -817,11 +823,21 @@ proc resizeOffscreen*(width, height: int32) =
   ## bound to it, and a full repaint demanded so the next `readPicture`
   ## sees nothing stale.
   when withSdl:
+    dropRetained()
+    releaseTextEngine()
     platform.resizeOffscreen(width, height)
     initializeRenderer()
-    dropRetained()
     invalidateFrame()
     requestFullRedraw()
+
+proc syncAttachedSurface*() =
+  ## Resize the actual canvas before layout and rendering use the new bounds.
+  when withSdl:
+    if displayAttached():
+      let (w, h) = windowPixelSize()
+      let old = offscreenPixelSize()
+      if w > 0 and h > 0 and (int32(w) != old.width or int32(h) != old.height):
+        resizeOffscreen(int32(w), int32(h))
 
 proc readPicture*(bytes: var seq[uint8]): tuple[width, height: int32] =
   ## Copy the offscreen picture into `bytes`: ARGB8888 (memory B, G, R, A;

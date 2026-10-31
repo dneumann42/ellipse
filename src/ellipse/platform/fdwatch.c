@@ -164,6 +164,19 @@ int ellipse_fdwatch_take(int *out, int cap) {
   return n;
 }
 
+int ellipse_fdwatch_ready(void) {
+  /* Whether any watched descriptor has fired and waits to be run: the peek
+     a host loop takes before sleeping in its event system (see
+     `platform.waitForWakes`), so an fd wake-up never sleeps past itself. */
+  int ready = 0;
+  pthread_mutex_lock(&lock);
+  for (int i = 0; i < count; i++)
+    if (entries[i].fired)
+      ready = 1;
+  pthread_mutex_unlock(&lock);
+  return ready;
+}
+
 void ellipse_fdwatch_rearm(int fd) {
   pthread_mutex_lock(&lock);
   for (int i = 0; i < count; i++)

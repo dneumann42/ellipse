@@ -4,8 +4,8 @@
 ## The game loop, the draw commands and all state live in the *application*
 ## process; the window lives in the *display server*, which mirrors the app's
 ## frames onto the screen. Both halves talk over one Unix socket
-## (`$XDG_RUNTIME_DIR/ellipse-display.sock`, or `ELLIPSE_DISPLAY_SOCKET`),
-## exchanging length-prefixed JSON messages:
+## (`$XDG_RUNTIME_DIR/ellipse-display.sock`, or `ELLIPSE_DISPLAY_SOCKET`).
+## Control messages use length-prefixed JSON; UI frames use raw pixel bytes:
 ##
 ##   - An attached game app (see `platform/sdl.initApp`) still creates its
 ##     own SDL "gpu" renderer -- on a hidden window it never presents -- so
@@ -27,11 +27,14 @@
 ##     cycle hot-loading needs.
 ##   - `serveDisplay` opens a window of its own and serves attach requests
 ##     forever; `ellipse.nim` checks `--display-serve` before the game loop
-##     starts. A game sets `cfg.displayMode = DisplayAttached` (or runs with
-##     `--display-attach`) to connect instead of opening a window.
+##     starts (the GUI kit's `run` honours it too, so any app's own image can
+##     host the window). `ensureDisplayServer` raises that server from the
+##     app's executable when an attached run finds nobody listening -- one
+##     terminal is enough for hot-loading.
 ##     `make run_display` / `run_attached` wrap both sides.
-##   - GUI-kit apps (ellipse_ui) keep their own window for now: this seam is
-##     the game kit's.
+##   - GUI-kit apps (`ellipse_ui.run`) use the same server: they take no
+##     canvas at all, painting offscreen and mirroring snapshots (see
+##     `initAttachedUi`).
 ##
 ## One slot: one window, one attached app at a time; a second attach takes
 ## over -- exactly what a relaunched game wants. With nobody attached the
@@ -40,7 +43,7 @@
 ## POSIX only (the sockets here are Unix-domain); on Windows attached mode
 ## falls back to local windows and `connectDisplay` returns nil.
 
-import std/[json, os, envvars, strutils, base64, options]
+import std/[json, os, envvars, strutils, base64, options, syncio, times]
 
 when not defined(windows):
   # `-no-pie`, which every windowed ellipse build already links with (see
@@ -52,6 +55,7 @@ import ./errors
 
 when not defined(windows):
   import std/posix
+  var MSG_DONTWAIT {.importc, header: "<sys/socket.h>".}: cint
   type Fd* = posix.SocketHandle
     ## A socket descriptor, in the currency std/posix's calls speak.
 else:
@@ -65,7 +69,7 @@ type
 
   WireMsg* = object
     ## One message on the wire. Flat fields carry everything: numbers ride
-    ## in `num/num2/num3`, packed floats and base64 pixels in `data`.
+    ## in `num/num2/num3`, packed floats and frame pixels in `data`.
     ## `kind` says how to read the rest.
     kind*: MsgKind
     text*: string   ## hello: the app title; detach: a reason
@@ -80,6 +84,8 @@ type
     gone*: bool      ## the peer closed: stop sending, treat input as done
     width*, height*: int32
     title*: string
+    refreshNs*: int64
+    rawFrames = true
     windowId: WindowID ## this side's canvas window, to stamp forwarded events
     pendings = 0     ## client-side: frames sent whose tick has not come back
     sizeDirty = false ## a forwarded resize moved the server's window since
@@ -101,6 +107,18 @@ proc displaySocketPath*(): string =
     "/tmp/ellipse-display.sock"
   else:
     "/tmp/ellipse-display-" & $getuid() & ".sock"
+
+proc displayServeRequested*(): bool =
+  ## `--display-serve` / `ELLIPSE_DISPLAY_SERVE=1`: this run is the display
+  ## server itself -- open the window, answer attach requests, never enter
+  ## the app loop (see `serveDisplay`).
+  let e = getEnv("ELLIPSE_DISPLAY_SERVE")
+  if e.len > 0 and e != "0" and e != "false" and e != "no":
+    return true
+  for i in 1 .. paramCount():
+    if paramStr(i) == "--display-serve":
+      return true
+  false
 
 proc attachedUiRequested*(): bool =
   ## `--display-attach` / `ELLIPSE_DISPLAY_ATTACH=1`: a GUI-kit app should
@@ -151,10 +169,16 @@ proc fromJson(j: JsonNode): WireMsg =
 
 when not defined(windows):
   # std/posix spells the socket calls in terms of its own handle type.
-  proc writeAll(fd: SocketHandle; bytes: openArray[byte]): bool =
+  proc writeAll(fd: SocketHandle; bytes: openArray[byte]; wait = true): bool =
+    ## Push every byte out. `wait` false: a full kernel buffer is a drop, not
+    ## a stall -- send what fits and report the rest unwritten (a big frame to
+    ## a busy server must never freeze the sender). Partial writes still mean
+    ## the stream is out of sync, so callers that use this path treat false as
+    ## gone and re-handshake by reconnecting.
     var done = 0
     while done < bytes.len:
-      let n = send(fd, unsafeAddr bytes[done], bytes.len - done, MSG_NOSIGNAL.cint)
+      let n = send(fd, unsafeAddr bytes[done], bytes.len - done,
+        (if wait: MSG_NOSIGNAL else: 0x4000 or 0x40).cint)
       if n <= 0:
         return false
       inc done, int(n)
@@ -165,20 +189,34 @@ when not defined(windows):
     ## has closed for good.
     var buf = newSeq[byte](1 shl 17)
     while true:
-      let n = recv(fd, addr buf[0], buf.len, 0)
+      let n = recv(fd, addr buf[0], buf.len, MSG_DONTWAIT)
       if n == 0:
         return false # clean EOF
       if n < 0:
         return true # EAGAIN: drained
-      for i in 0 ..< int(n):
-        sink.add char(buf[i])
+      let offset = sink.len
+      sink.setLen(offset + int(n))
+      copyMem(addr sink[offset], addr buf[0], int(n))
       if int(n) < buf.len:
         return true
 
-  proc pollIn(fd: SocketHandle; ms: int): bool =
+  proc pollIn*(fd: Fd; ms: int): bool =
+    ## Whether `fd` is readable within `ms` (-1: wait, 0: just look). The seam
+    ## a host loop uses to sleep on the display server's socket (see
+    ## `platform.waitForWakes`).
     var pfd = TPollfd(fd: cint(fd), events: POLLIN.cshort)
     discard poll(addr pfd, Tnfds(1), cint(ms))
     (pfd.revents and POLLIN.cshort) != 0'i16
+
+proc socketFd*(disp: DisplayServer): int32 = int32(disp.fd)
+
+proc frameTransport*(disp: DisplayServer): string =
+  if disp.rawFrames: "raw pixels"
+  else: "legacy JSON/base64; restart the display to enable raw pixels"
+
+proc attachedReadable*(disp: DisplayServer): bool =
+  ## Whether the server has sent something since the last drain.
+  not disp.gone and pollIn(disp.fd, 0)
 
 proc takeMsgAt(fd: SocketHandle, buffer: var string, gone: var bool): Option[WireMsg] =
   while true:
@@ -187,7 +225,25 @@ proc takeMsgAt(fd: SocketHandle, buffer: var string, gone: var bool): Option[Wir
       if buffer.len > MaxMessage:
         gone = true
       return none(WireMsg)
-    let size = try: parseInt(buffer[0 ..< nl]) except: -1
+    let header = buffer[0 ..< nl]
+    let raw = header.startsWith("F ")
+    var size = -1
+    var frame: WireMsg
+    if raw:
+      let fields = header.splitWhitespace()
+      if fields.len == 5:
+        try:
+          frame = WireMsg(kind: msgFrame, text: "raw", num: parseInt(fields[1]),
+            num2: parseInt(fields[2]), num3: parseInt(fields[3]))
+          size = parseInt(fields[4])
+          if frame.num <= 0 or frame.num2 <= 0 or
+              frame.num > MaxMessage div 4 or frame.num2 > MaxMessage div 4 or
+              frame.num * frame.num2 * 4 != size:
+            size = -1
+        except ValueError:
+          discard
+    else:
+      size = try: parseInt(header) except: -1
     if size < 0 or size > MaxMessage:
       gone = true
       return none(WireMsg)
@@ -195,13 +251,16 @@ proc takeMsgAt(fd: SocketHandle, buffer: var string, gone: var bool): Option[Wir
       return none(WireMsg)
     let body = buffer[nl + 1 ..< nl + 1 + size]
     buffer.delete(0 .. nl + size)
+    if raw:
+      frame.data = body
+      return some(frame)
     try:
       return some(fromJson(parseJson(body)))
     except:
       gone = true
       return none(WireMsg)
 
-proc sendMsg(disp: DisplayServer, m: WireMsg): bool =
+proc sendMsg(disp: DisplayServer, m: WireMsg, wait = true): bool =
   ## One framed message out: decimal body length, newline, JSON body.
   when defined(windows):
     false
@@ -214,8 +273,8 @@ proc sendMsg(disp: DisplayServer, m: WireMsg): bool =
     for c in body:
       bytes[pos] = byte(c); inc pos
     bytes.setLen(pos)
-    let ok = writeAll(disp.fd, bytes)
-    if not ok:
+    let ok = writeAll(disp.fd, bytes, wait)
+    if not ok and wait:
       disp.gone = true
     ok
 
@@ -230,6 +289,12 @@ proc recvMsg*(disp: DisplayServer, timeoutMs: int = 0): Option[WireMsg] =
       let m = takeMsgAt(disp.fd, disp.buffer, disp.gone)
       if m.isSome or disp.gone:
         return m
+      if pollIn(disp.fd, 0):
+        if not readSome(disp.fd, disp.buffer):
+          disp.gone = true
+        let queued = takeMsgAt(disp.fd, disp.buffer, disp.gone)
+        if queued.isSome or disp.gone:
+          return queued
       if timeoutMs >= 0 and waited >= timeoutMs:
         return none(WireMsg)
       let budget = if timeoutMs < 0: 50 else: min(timeoutMs - waited, 50)
@@ -290,6 +355,82 @@ proc acceptOne(fd: Fd): Fd =
       discard fcntl(c, F_SETFD, FD_CLOEXEC)
     c
 
+proc displayServerRunning*(): bool =
+  ## Whether a display server actually answers on the socket right now.
+  ## A leftover socket file from a dead server cannot be connected to;
+  ## a live one can, so the dial itself is the liveness test.
+  let fd = dialUnix(displaySocketPath())
+  result = int(fd) >= 0
+  when not defined(windows):
+    if result:
+      discard close(fd)
+
+proc displayServerLog*(): string =
+  ## Where a self-spawned display server sends its output (see
+  ## `ensureDisplayServer`) -- beside the socket it listens on.
+  let sock = displaySocketPath()
+  let dir = sock.parentDir
+  if dir.len == 0: "ellipse-display.log"
+  else: dir / "ellipse-display.log"
+
+proc spawnDisplayServer(): bool =
+  ## Raise `this executable --display-serve` detached: a double fork so the
+  ## server is never waited on and outlives this app's hot-reload execv as
+  ## well as its terminal -- the app's own image is the natural server, both
+  ## kits honour the flag (`ellipse_ui.run`, the game kit's `start`).
+  when defined(windows):
+    false
+  else:
+    let exe = paramStr(0)
+    if exe.len == 0:
+      return false
+    let logPath = displayServerLog()
+    var args: array[0 .. 2, cstring]
+    args[0] = exe.cstring
+    args[1] = "--display-serve".cstring
+    let mid = fork()
+    if mid < 0:
+      return false
+    if mid == 0:
+      let kid = fork()
+      if kid == 0:
+        discard setsid()  # own session: signals to the app's terminal miss it
+        let fd = open(logPath.cstring, O_WRONLY or O_CREAT or O_TRUNC, Mode(0o600))
+        if fd >= 0:
+          discard dup2(fd, 1'i32)
+          discard dup2(fd, 2'i32)
+          if fd > 2:
+            discard close(fd)
+        discard execv(args[0], cast[cstringArray](addr args[0]))
+        exitnow(127'i32)
+      exitnow(0'i32)  # the middle dies at once: init reaps it, never the app
+    var status = 0'i32
+    discard waitpid(mid, status, 0'i32)
+    true
+
+proc ensureDisplayServer*(waitMs = 3000): bool =
+  ## Guarantee a server to attach to: answer to it when one is already up,
+  ## else raise one from this executable and wait for it to come on screen.
+  ## The dev window then survives every hot-reload restart without anyone
+  ## remembering a second terminal to run `make display` in. False when
+  ## nothing answers within `waitMs`: callers fall back to a window of their
+  ## own (which whole-app reload *will* close and reopen -- the attached
+  ## path is what makes it invisible).
+  when defined(windows):
+    displayServerRunning()
+  else:
+    if displayServerRunning():
+      return true
+    if not spawnDisplayServer():
+      return false
+    var waited = 0
+    while waited < waitMs:
+      if displayServerRunning():
+        return true
+      sleep(100)
+      inc waited, 100
+    false
+
 proc connectDisplay*(): DisplayServer =
   ## Reach the display server, or nil when none is listening.
   let fd = dialUnix(displaySocketPath())
@@ -310,6 +451,8 @@ proc handshake*(disp: DisplayServer, title: string): bool =
   disp.width = int32(max(m.num, 0))
   disp.height = int32(max(m.num2, 0))
   disp.title = m.text
+  disp.refreshNs = m.num3
+  disp.rawFrames = m.data == "raw-v1"
   true
 
 proc pixelSize*(disp: DisplayServer): tuple[w, h: int32] =
@@ -401,7 +544,7 @@ proc pushWireEvent(ev: WireMsg, windowId: WindowID) =
   of evButton:
     let f = unpackFloats(ev.data)
     e.`type` = if ev.num2 != 0: EVENT_MOUSE_BUTTON_DOWN else: EVENT_MOUSE_BUTTON_UP
-    e.button.windowID = WindowID(uint32((ev.num3 shr 16) and 0xFFFF_FFFF))
+    e.button.windowID = windowId
     e.button.button = uint8(ev.num)
     e.button.down = ev.num2 != 0
     e.button.clicks = uint8(ev.num3 and 0xFF)
@@ -440,6 +583,7 @@ proc beginServedFrame*(disp: DisplayServer): ServedFrame =
     of evKey, evKeyUp, evMotion, evButton, evWheel:
       pushWireEvent(ev, disp.windowId)
     of evResize:
+      if ev.num3 > 0: disp.refreshNs = ev.num3
       disp.noteSize(int32(ev.num), int32(ev.num2))
       acc.width = uint32(ev.num)
       acc.height = uint32(ev.num2)
@@ -506,25 +650,65 @@ proc pumpEvents*(disp: DisplayServer): bool =
   var stop = false
   for ev in disp.pollInput():
     case ev.kind
-    of evKey, evKeyUp, evMotion, evButton, evWheel, evResize:
+    of evResize:
+      if ev.num3 > 0: disp.refreshNs = ev.num3
+      disp.noteSize(int32(ev.num), int32(ev.num2))
+      pushWireEvent(ev, disp.windowId)
+    of evKey, evKeyUp, evMotion, evButton, evWheel:
       pushWireEvent(ev, disp.windowId)
     of evQuit:
       stop = true
+    of msgTick:
+      # a tick left over from the paced path (or an earlier life): settle it,
+      # or `pendings` would block `beginServedFrame` forever after a swap
+      disp.noteTick()
     of msgDetach:
       stop = true
     else:
       discard
   disp.gone or stop
 
+proc sendSurfaceSnapshot*(disp: DisplayServer; pixels: pointer; pitch: int;
+                          w, h: uint32): bool =
+  ## Pixels travel as binary, with only a small ASCII header. Read directly
+  ## from the flushed surface; no base64, JSON, or intermediate frame copy.
+  when defined(windows):
+    false
+  else:
+    let row = int(w) * 4
+    let size = row * int(h)
+    if disp.gone or pixels == nil or w == 0 or h == 0 or
+        size > MaxMessage or pitch < row:
+      return false
+    if not disp.rawFrames:
+      # Keep connections to an older, already-running display working.
+      var packed = newString(size)
+      for y in 0 ..< int(h):
+        copyMem(addr packed[y * row],
+          cast[pointer](cast[uint](pixels) + uint(y * pitch)), row)
+      return disp.sendMsg(WireMsg(kind: msgFrame, num: int64(w), num2: int64(h),
+        num3: int64(PIXELFORMAT_ARGB8888), data: base64.encode(packed)))
+    let header = "F " & $w & " " & $h & " " & $int64(PIXELFORMAT_ARGB8888) &
+      " " & $size & "\n"
+    template writeBytes(p: pointer; count: int): bool =
+      writeAll(disp.fd, cast[ptr UncheckedArray[byte]](p).toOpenArray(0, count - 1))
+    var ok = writeBytes(unsafeAddr header[0], header.len)
+    if ok:
+      if pitch == row:
+        ok = writeBytes(pixels, size)
+      else:
+        for y in 0 ..< int(h):
+          if not writeBytes(cast[pointer](cast[uint](pixels) + uint(y * pitch)), row):
+            ok = false
+            break
+    if not ok:
+      disp.gone = true
+    ok
+
 proc sendSnapshot*(disp: DisplayServer, rgba: openArray[uint8], w, h: uint32): bool =
-  ## Mirror one finished picture. Unlike the paced path, no tick is owed: a
-  ## windowless client drives its frames from the pacer, not from waits.
-  if int(w) * int(h) * 4 != rgba.len or disp.gone:
+  if rgba.len == 0 or int(w) * int(h) * 4 != rgba.len:
     return false
-  var bytes = newString(rgba.len)
-  copyMem(addr bytes[0], unsafeAddr rgba[rgba.low], rgba.len)
-  disp.sendMsg(WireMsg(kind: msgFrame, num: int64(w), num2: int64(h),
-    data: base64.encode(bytes)))
+  disp.sendSurfaceSnapshot(unsafeAddr rgba[0], int(w) * 4, w, h)
 
 proc noteUiSize*(disp: DisplayServer): tuple[w, h: int32, changed: bool] =
   ## The size the server last reported, and whether it moved since the
@@ -547,7 +731,11 @@ type
     title: string
     listenFd: Fd
     client: DisplayServer
+    framesSeen = 0   ## frames received since this slot's client was attached
     quitAsked: bool
+    texture: Texture
+    textureW, textureH: int
+    textureFormat: PixelFormat
 
 var serverSlot: DisplaySlot
 
@@ -562,26 +750,46 @@ proc paintWaiting(s: DisplaySlot) =
   discard renderPresent(s.renderer)
 
 proc mirrorFrame(s: DisplaySlot, m: WireMsg) =
-  ## Put one mirrored picture on the window: upload the decoded RGBA8 as a
-  ## streaming texture, stretch it across, present, forget it.
+  ## Upload into a reusable streaming texture and present at native size.
   let pixels =
-    try: base64.decode(m.data)
-    except: ""
+    if m.text == "raw": m.data
+    else:
+      try: base64.decode(m.data)
+      except: ""
   let w = int(m.num)
   let h = int(m.num2)
   if w <= 0 or h <= 0 or pixels.len < w * h * 4:
     return
-  let tex = createTexture(s.renderer, PIXELFORMAT_RGBA8888, TEXTUREACCESS_STREAMING,
-                          int32(w), int32(h))
-  if tex == nil:
-    return
-  defer: destroyTexture(tex)
+  let format = if m.num3 == int64(PIXELFORMAT_ARGB8888):
+    PIXELFORMAT_ARGB8888 else: PIXELFORMAT_RGBA8888
+  if s.texture == nil or s.textureW != w or s.textureH != h or s.textureFormat != format:
+    if s.texture != nil:
+      destroyTexture(s.texture)
+    s.texture = createTexture(s.renderer, format, TEXTUREACCESS_STREAMING, int32(w), int32(h))
+    s.textureW = w
+    s.textureH = h
+    s.textureFormat = format
+    if s.texture == nil:
+      return
+    discard setTextureScaleMode(s.texture, SCALE_MODE_NEAREST)
+  let tex = s.texture
   if not updateTexture(tex, nil, cast[ptr uint8](pixels[0].addr), cint(w * 4)):
     return
-  discard setTextureScaleMode(tex, SCALE_MODE_NEAREST)
   discard setRenderTarget(s.renderer, nil)
-  discard renderTexture(s.renderer, tex, nil, nil)
+  # Keep pixels at their native size while the client catches up with a resize.
+  # Stretching an old frame disguises a missing client resize and distorts text.
+  discard setRenderDrawColor(s.renderer, 18'u8, 20'u8, 26'u8, 255'u8)
+  discard renderClear(s.renderer)
+  var dest = FRect(x: 0, y: 0, w: float32(w), h: float32(h))
+  discard renderTexture(s.renderer, tex, nil, addr dest)
   discard renderPresent(s.renderer)
+
+proc displayRefreshNs(s: DisplaySlot): int64 =
+  let mode = getCurrentDisplayMode(getDisplayForWindow(s.window))
+  if mode != nil and mode.refresh_rate > 1:
+    int64(1_000_000_000.0 / float64(mode.refresh_rate))
+  else:
+    16_666_667'i64
 
 proc attachClient(s: DisplaySlot, fd: Fd): bool =
   ## Handshake with a fresh client; false (socket closed) when misbehaving.
@@ -597,14 +805,15 @@ proc attachClient(s: DisplaySlot, fd: Fd): bool =
       discard close(s.client.fd)
     s.client = nil
   s.client = tmp
+  s.framesSeen = 0    # this client's ledger starts clean
   s.title = hello.get().text
   discard setWindowTitle(s.window, ("Ellipse display · " & s.title).cstring)
   var w, h: cint
   discard getWindowSizeInPixels(s.window, w, h)
   s.width = int32(w)
   s.height = int32(h)
-  discard tmp.sendMsg(WireMsg(kind: msgHelloReply, text: s.title,
-    num: int64(s.width), num2: int64(s.height)))
+  discard tmp.sendMsg(WireMsg(kind: msgHelloReply, text: s.title, data: "raw-v1",
+    num: int64(s.width), num2: int64(s.height), num3: s.displayRefreshNs()))
   true
 
 proc forwardEvent(s: DisplaySlot, ev: Event) =
@@ -614,6 +823,11 @@ proc forwardEvent(s: DisplaySlot, ev: Event) =
   let c = s.client
   if c == nil or c.gone:
     return
+  # SDL pointer events use window coordinates; the client lays out in pixels.
+  var logicalW, logicalH: cint
+  discard getWindowSize(s.window, logicalW, logicalH)
+  let sx = if logicalW > 0: float32(s.width) / float32(logicalW) else: 1'f32
+  let sy = if logicalH > 0: float32(s.height) / float32(logicalH) else: 1'f32
   case ev.`type`
   of EVENT_KEY_DOWN, EVENT_KEY_UP:
     let flags = int64(if ev.key.down: 1 else: 0) or
@@ -625,12 +839,12 @@ proc forwardEvent(s: DisplaySlot, ev: Event) =
       num3: flags))
   of EVENT_MOUSE_MOTION:
     discard c.sendMsg(WireMsg(kind: evMotion,
-      data: packFloats([ev.motion.x, ev.motion.y, ev.motion.state.float32])))
+      data: packFloats([ev.motion.x * sx, ev.motion.y * sy, ev.motion.state.float32])))
   of EVENT_MOUSE_BUTTON_DOWN, EVENT_MOUSE_BUTTON_UP:
     discard c.sendMsg(WireMsg(kind: evButton, num: int64(ev.button.button),
       num2: int64(if ev.button.down: 1 else: 0),
       num3: (int64(ev.button.windowID.uint32) shl 16) or int64(ev.button.clicks),
-      data: packFloats([ev.button.x, ev.button.y])))
+      data: packFloats([ev.button.x * sx, ev.button.y * sy])))
   of EVENT_MOUSE_WHEEL:
     discard c.sendMsg(WireMsg(kind: evWheel,
       data: packFloats([ev.wheel.x, ev.wheel.y])))
@@ -653,15 +867,20 @@ proc pumpClientFrames(s: DisplaySlot) =
     case m.get().kind
     of msgFrame:
       latest = m
+      inc s.framesSeen
     of msgDetach:
       s.client.gone = true
     else:
       discard
   if latest.isSome:
     s.mirrorFrame(latest.get())
-  if s.client != nil and not s.client.gone and owedTick(s.client):
+  if s.client != nil and not s.client.gone and (owedTick(s.client) or s.framesSeen > 0):
     # The client waits on a tick for every frame it sent; answer once per
     # pass so at most one picture is in flight, but the loop always turns.
+    # `framesSeen` keeps that promise even when mirroring declined the
+    # picture (a bad size, no GPU texture): an owed answer is owed whatever
+    # happened to its pixels -- otherwise the paced client blocks forever.
+    s.framesSeen = 0
     discard s.client.sendMsg(WireMsg(kind: msgTick))
   if s.client != nil and s.client.gone:
     when not defined(windows):
@@ -678,17 +897,26 @@ proc stepServerOnce(s: DisplaySlot, timeoutMs: int) =
         (lfds[0].revents and POLLIN.cshort) != 0'i16:
       let c = acceptOne(s.listenFd)
       if int(c) >= 0:
-        discard s.attachClient(c)
+        let ok = s.attachClient(c)
+        discard ok
     s.pumpClientFrames()
   var ev = default(Event)
   while pollEvent(ev):
     case ev.`type`
+    of EVENT_WINDOW_DISPLAY_CHANGED, EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+      var w, h: cint
+      discard getWindowSizeInPixels(s.window, w, h)
+      s.width = w
+      s.height = h
+      if s.client != nil and not s.client.gone:
+        discard s.client.sendMsg(WireMsg(kind: evResize, num: int64(w),
+          num2: int64(h), num3: s.displayRefreshNs()))
     of EVENT_WINDOW_PIXEL_SIZE_CHANGED:
       s.width = ev.window.data1
       s.height = ev.window.data2
       if s.client != nil and not s.client.gone:
         discard s.client.sendMsg(WireMsg(kind: evResize, num: int64(s.width),
-          num2: int64(s.height)))
+          num2: int64(s.height), num3: s.displayRefreshNs()))
     of EVENT_MOUSE_MOTION, EVENT_MOUSE_BUTTON_DOWN, EVENT_MOUSE_BUTTON_UP,
        EVENT_MOUSE_WHEEL, EVENT_KEY_DOWN, EVENT_KEY_UP:
       s.forwardEvent(ev)
@@ -705,6 +933,13 @@ proc serveDisplay*(title: string; width, height: int32) {.noreturn.} =
   ## Open the dev window and serve it forever: attach requests, mirrored
   ## frames, forwarded input. Called instead of the game loop when the app
   ## runs as `--display-serve`; the window then hosts any game that attaches.
+  when not defined(windows):
+    # Acquire ownership before opening a window or replacing the socket.
+    proc flock(fd, operation: cint): cint {.importc, header: "<sys/file.h>".}
+    let lockFd = open((displaySocketPath() & ".lock").cstring,
+      O_CREAT or O_RDWR or O_CLOEXEC, Mode(0o600))
+    if lockFd < 0 or flock(lockFd, 2 or 4) != 0:
+      quit(0)
   if getEnv("WAYLAND_DISPLAY").len > 0 and
       getEnv("SDL_VIDEODRIVER").len == 0 and
       getEnv("SDL_VIDEO_DRIVER").len == 0:
@@ -717,9 +952,10 @@ proc serveDisplay*(title: string; width, height: int32) {.noreturn.} =
     WINDOW_RESIZABLE or WINDOW_HIGH_PIXEL_DENSITY)
   if win.isNil:
     raiseSdlError("display server: window")
-  let ren = createRenderer(win, cstring("gpu"))
+  let ren = createRenderer(win, nil)
   if ren.isNil:
     raiseSdlError("display server: renderer")
+  discard setRenderVSync(ren, 1)
   discard showWindow(win)
   var w, h: cint
   discard getWindowSizeInPixels(win, w, h)
@@ -731,11 +967,18 @@ proc serveDisplay*(title: string; width, height: int32) {.noreturn.} =
       raise EllipseError.newException(
         "display server: cannot listen on " & displaySocketPath())
   echo "ellipse display: serving on ", displaySocketPath()
+  flushFile(stdout)
+  serverSlot.paintWaiting()
   while not serverSlot.quitAsked:
-    serverSlot.stepServerOnce(if serverSlot.client == nil: 60 else: 8)
-    if serverSlot.client == nil:
-      serverSlot.paintWaiting()
-      sdl3.delay(16'u32)
+    serverSlot.stepServerOnce(0)
+    # SDL input is serviced every millisecond; frame arrivals wake poll early.
+    when not defined(windows):
+      var pending = [TPollfd(fd: cint(serverSlot.listenFd), events: POLLIN.cshort),
+        TPollfd(fd: (if serverSlot.client == nil: -1 else: cint(serverSlot.client.fd)),
+                events: POLLIN.cshort)]
+      discard poll(addr pending[0], Tnfds(2), 1)
+    else:
+      sdl3.delay(1'u32)
   echo "ellipse display: closed"
   sdl3.quit()
   quit(0)

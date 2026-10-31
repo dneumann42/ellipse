@@ -338,6 +338,13 @@ when withSdl:
 
   proc SDL_WaitEventTimeout(event: ptr SDL_Event; timeoutMS: int32): bool {.
     importc: "SDL_WaitEventTimeout", header: "<SDL3/SDL.h>".}
+  const
+    SdlPeek = 1 ## `SDL_EVENT_PEEK`: the `SDL_PeepEvents` action that looks
+                ## at the queue without taking anything out of it
+
+  proc SDL_PeepEvents(event: ptr SDL_Event; numevents: cint; action: cint;
+      minType, maxType: uint32): cint {.importc: "SDL_PeepEvents",
+    header: "<SDL3/SDL.h>".}
   proc SDL_DelayNS(ns: uint64) {.importc: "SDL_DelayNS", header: "<SDL3/SDL.h>".}
   proc SDL_SetRenderVSync(ren: ptr SDL_Renderer; vsync: int32): bool {.
     importc: "SDL_SetRenderVSync", header: "<SDL3/SDL.h>".}
@@ -461,6 +468,17 @@ when withSdl:
     ## `ellipse/platform/renderer`). Only valid inside the main loop.
     activeApp.renderer.raw
 
+  proc SDL_FlushRenderer(ren: ptr SDL_Renderer): bool {.
+    importc: "SDL_FlushRenderer", header: "<SDL3/SDL.h>".}
+
+  proc flushOffscreen*() =
+    ## Surface pixels are readable only after queued drawing has completed.
+    if activeApp.offscreen:
+      sdlHandle(SDL_FlushRenderer(activeApp.renderer.raw), "SDL_FlushRenderer()")
+
+  proc offscreenPixelSize*(): tuple[width, height: int32] =
+    (activeApp.surfaceWidth, activeApp.surfaceHeight)
+
   proc offscreenSurface*(): pointer =
     ## The offscreen picture's `SDL_Surface*` (see `initializeOffscreen`),
     ## nil when the app has a window of its own. The renderer paints
@@ -468,6 +486,13 @@ when withSdl:
     if activeApp.offscreen: activeApp.surface else: nil
 
 var quitSignaled = false
+var externalQuitAsk = false
+  ## Whole-app reload's own ask: `shutdown` clears `quitSignaled`, and a
+  ## scripted host must still see the request after it runs.
+
+proc askToQuitExternally*() =
+  ## Flag the ask that outlives `shutdown` (used by `ellipse/hotload`).
+  externalQuitAsk = true
   ## Set once anything asked the app to close: a quit or window-close event,
   ## a signal, `quit()`. The host loop reads it through `quitAsked`.
 
@@ -827,11 +852,17 @@ when withSdl:
     ## window then.
     if terminalMode() or not attachedUiRequested():
       return false
-    let disp = initAttachedUi(cfg.title, cfg.width, cfg.height)
+    var disp = initAttachedUi(cfg.title, cfg.width, cfg.height)
+    if disp == nil and ensureDisplayServer():
+      # Nobody was serving: this app raised its own display server (see
+      # `platform/display.ensureDisplayServer`) and it answers -- the dev
+      # workflow never needs a second terminal, and a hot-reload restart
+      # never has to open or close a window of its own.
+      disp = initAttachedUi(cfg.title, cfg.width, cfg.height)
     if disp == nil:
-      info "no display server on ", displaySocketPath(),
-        ": opening a window of our own"
-      return false
+      raise newException(IOError, "cannot connect to display server on " &
+        displaySocketPath())
+    info "display transport: ", disp.frameTransport()
     # SDL must be up before a surface can be made; the wake thread keeps
     # watched descriptors reaching the paced loop, exactly as in a window.
     sdlHandle(SDL_SetAppMetadata("ellipse".cstring, "0.1.0".cstring,
@@ -839,6 +870,9 @@ when withSdl:
     sdlHandle(SDL_Init(Video or Audio), "SDL_Init()")
     fdWakeType = ellipse_sdl_fdwake_start()
     activeApp.attached = disp
+    # Wake SDL immediately when the display sends input, rather than polling
+    # the socket at 50 ms intervals while the UI is idle.
+    discard watchFd(disp.socketFd(), proc() = discard)
     activeApp.offscreen = true
     activeApp.visible = false
     activeApp.vsync = false
@@ -925,6 +959,10 @@ proc updateRefreshPeriod(app: PlatformApplication) =
   ## Pace to the refresh rate of the display the window is on (60 Hz when
   ## the driver does not say).
   when withSdl:
+    if app.attached != nil:
+      if app.attached.refreshNs > 0:
+        setRefreshPeriod(app.attached.refreshNs)
+      return
     if app.window.raw == nil:
       return
     let mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(app.window.raw))
@@ -1339,6 +1377,8 @@ when withSdl:
     ## the loop; the server's window outlives this process either way.
     let disp = app.attached
     var stop = disp.pumpEvents()
+    if disp.refreshNs > 0:
+      setRefreshPeriod(disp.refreshNs)
     let size = disp.noteUiSize()
     if size.changed and size.w > 0 and size.h > 0 and
         (float32(size.w) != app.width or float32(size.h) != app.height):
@@ -1430,6 +1470,16 @@ proc quit*() =
   ## End the `start` loop at the next iteration -- an app's File > Exit.
   activeApp.running = false
   quitSignaled = true
+
+proc askedToQuit*(): bool =
+  ## Whether a close was ever asked — and this process is still around to
+  ## honour it: `quit()` ends the `start` loop, but a host that drives
+  ## `frame` by hand (a script, a test) reads this instead. Whole-app reload
+  ## sets its own ask through `askToQuitExternally`, so the request survives
+  ## `shutdown`'s reset of `quitSignaled`: the paced loop takes its orders
+  ## from `running`, while the flag alone would vanish with the old image's
+  ## shutdown and leave a scripted host running forever on the new one.
+  quitSignaled or externalQuitAsk
 
 proc windowPixelSize*(): tuple[width, height: float32] =
   ## The window's drawable size in renderer pixels, as of the most recent
@@ -1639,41 +1689,17 @@ proc drawFrame(app: var PlatformApplication; render: FrameFn): bool  =
   when withSdl:
     if app.attached != nil:
       if presentRequested():
+        flushOffscreen()
         let surf = cast[ptr SdlSurfaceView](app.surface)
         if not surf.isNil and surf.w > 0 and surf.h > 0:
-          let
-            wpx = surf.w.int
-            hpx = surf.h.int
-          var bytes = newSeq[uint8](wpx * hpx * 4)
-          var y = 0'i32
-          while y < surf.h:
-            copyMem(addr bytes[y * wpx * 4],
-                    cast[pointer](cast[uint](surf.pixels) + uint(y) * uint(surf.pitch)),
-                    wpx * 4)
-            inc y
-          discard sendSnapshot(app.attached, bytes, uint32(wpx), uint32(hpx))
+          discard sendSurfaceSnapshot(app.attached, surf.pixels, int(surf.pitch),
+            uint32(surf.w), uint32(surf.h))
         return true
       return false
     if presentRequested() and app.visible:
       sdlHandle(SDL_RenderPresent(app.renderer.raw), "SDL_RenderPresent()")
       return true
   return false
-
-proc waitFor(app: PlatformApplication; ns: int64) =
-  ## Sleep until an event arrives or `ns` passes (`Never`: until an event).
-  ## The event stays queued for the next `pumpEvents`. In the terminal the
-  ## events are the watched descriptors turning readable (see `fdwatch`).
-  if terminalMode():
-    waitFds(if ns == Never: -1'i64 else: ns)
-    return
-  when withSdl:
-    if ns == Never:
-      discard SDL_WaitEventTimeout(nil, -1'i32)
-    elif ns >= 2_000_000'i64:
-      # ms granularity: wake a little early and finish on the precise delay
-      discard SDL_WaitEventTimeout(nil, int32((ns - 1_000_000'i64) div 1_000_000'i64))
-    elif ns > 0:
-      SDL_DelayNS(uint64(ns))
 
 proc pumpEvents(app: var PlatformApplication) =
   ## Take in what arrived since the last pump: the descriptors that turned
@@ -1691,13 +1717,102 @@ proc pumpEvents(app: var PlatformApplication) =
     pumpSdlEvents(app)
     pumpLayer(app)
 
-proc pumpEvents*() =
-  ## The game loop's seam: drain SDL's queue into the platform app once per
-  ## frame -- pointer, keys, wheel, resizes, close requests -- without the
-  ## `start` loop. Paired with `quitAsked` and, offscreen, the
-  ## `initializeOffscreen` picture; a host that owns window and present
-  ## pumps this instead of polluting the queue with a second reader.
-  pumpEvents(activeApp)
+when withSdl:
+  proc pumpEvents*() =
+    ## The game loop's seam: drain SDL's queue into the platform app once per
+    ## frame -- pointer, keys, wheel, resizes, close requests -- without the
+    ## `start` loop. Paired with `quitAsked` and, offscreen, the
+    ## `initializeOffscreen` picture; a host that owns window and present
+    ## pumps this instead of polluting the queue with a second reader.
+    pumpEvents(activeApp)
+
+when withSdl:
+  proc displayAttached*(): bool =
+    ## This process is an attached client (see `initAttachedWindow`): the
+    ## display server owns the screen, and its socket lives outside SDL's
+    ## queue -- a host loop that sleeps in `SDL_WaitEventTimeout` must add
+    ## it to its own wait (see `waitForWakes`).
+    activeApp.attached != nil
+
+  proc attachedDied*(): bool =
+    ## The connection to the display server broke: the host loop ends itself;
+    ## the server's window outlives this process either way.
+    activeApp.attached != nil and activeApp.attached.gone
+
+  proc attachedReadable*(): bool =
+    ## Whether the display server has sent something since the last pump --
+    ## a zero-timeout look, for a host deciding whether it may sleep.
+    activeApp.attached != nil and activeApp.attached.attachedReadable()
+
+  proc sdlEventQueued(): bool =
+    ## Anything inside SDL's queue, without dequeuing it: `SDL_WaitEventTimeout`
+    ## would *take* what it finds (and presenting to the display server waits
+    ## for a tick that event carries), so a peek is the only safe look before
+    ## sleeping.
+    SDL_PeepEvents(nil, 0'i32, SdlPeek, 0'u32, high(uint32)) > 0
+
+proc waitForWakes*(ns: int64) =
+  ## Sleep until an event arrives, a watched descriptor turns readable, or
+  ## `ns` nanoseconds pass (`Never`: until something does). For hosts that
+  ## drive `pumpEvents` from their own loop: an attached app's display
+  ## socket lives outside SDL's queue and `fdwatch`'s descriptors live
+  ## outside both, so sleeping in SDL alone would let forwarded input,
+  ## resizes, quits and file-change notices sit unread on the wire. The wait
+  ## runs in short slices -- each one ends at the slice or the remaining
+  ## budget, whichever comes first -- so nothing can ever strand here; the
+  ## caller's next `pumpEvents` takes what arrived. It must not dequeue
+  ## events itself: presenting to the server waits for the server's answer,
+  ## and draining during that wait would swallow the very event the answer
+  ## rides in (the server only sends once it sees the frame).
+  if terminalMode():
+    waitFds(ns)
+    return
+  when withSdl:
+    var ms = if ns < 0 or ns == Never: -1
+      else: int((ns + 999_999'i64) div 1_000_000'i64)
+    let sliceMs = 50
+    while true:
+      let step = if ms < 0: sliceMs else: min(ms, sliceMs)
+      # the fd watcher answers this directly: no event to lose, run what is
+      # ready now (this is how a hot-reload change reaches its callback)
+      if fdsReady():
+        runReadyFds()
+        return
+      if sdlEventQueued():
+        return
+      if activeApp.attached != nil and attachedReadable():
+        return
+      if step == 0:
+        return
+      discard SDL_WaitEventTimeout(nil, cint(step))
+      if ms > step:
+        dec ms, step
+      elif ms >= 0:
+        return
+      # ms < 0: no budget, keep waiting (a stray dequeued event is taken by
+      # the caller's next pump anyway)
+
+
+proc waitFor(app: PlatformApplication; ns: int64) =
+  ## Sleep until an event arrives or `ns` passes (`Never`: until an event).
+  ## The event stays queued for the next `pumpEvents`. In the terminal the
+  ## events are the watched descriptors turning readable (see `fdwatch`).
+  if terminalMode():
+    waitFds(if ns == Never: -1'i64 else: ns)
+    return
+  when withSdl:
+    # attached apps route through `waitForWakes`: the display server's socket
+    # is not part of SDL's queue, and that path wakes on it directly
+    if activeApp.attached != nil:
+      waitForWakes(ns)
+      return
+    if ns == Never:
+      discard SDL_WaitEventTimeout(nil, -1'i32)
+    elif ns >= 2_000_000'i64:
+      # ms granularity: wake a little early and finish on the precise delay
+      discard SDL_WaitEventTimeout(nil, int32((ns - 1_000_000'i64) div 1_000_000'i64))
+    elif ns > 0:
+      SDL_DelayNS(uint64(ns))
 
 var statsDebug = getEnv("ELLIPSE_FRAME_STATS") != ""
   ## When set, the loop logs once per second what the pacer did: frames,

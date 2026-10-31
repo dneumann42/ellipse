@@ -92,6 +92,10 @@ proc initApp*(cfg: AppConfig): App =
     # `platform/display`). A fresh attach starts from that side: ask the
     # server for its size and draw at it; otherwise keep the configured one.
     var disp = connectDisplay()
+    if disp.isNil and ensureDisplayServer():
+      # nothing was serving: raise the dev window from this game's own image
+      # (its `start` honours `--display-serve`) and dial the fresh server
+      disp = connectDisplay()
     if disp.isNil:
       raise EllipseError.newException(
         "no ellipse display server on " & displaySocketPath() &

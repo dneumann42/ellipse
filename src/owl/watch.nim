@@ -122,7 +122,7 @@ else:
     inIgnored = 0x00008000'u32
     deleteSelf = 0x00000400'u32
     watchMask = inCloseWrite or inCloseNowrite or inModify or inAttrib or
-      inCreate or inDelete or inMoveTo or inMoveFrom
+      inCreate or inDelete or inMoveTo or inMoveFrom or inIgnored
 
     inNonblock = 0x00000800'i32
     inCloexec = 0x00080000'i32
@@ -263,7 +263,18 @@ proc poll*(w: FileWatch): seq[WatchEvent] =
         let stop = pos + hdr + int(e.len)
         if stop > n:
           break
-        if (e.mask and inIgnored) == 0:
+        if (e.mask and inIgnored) != 0:
+          # the watch died (the directory was removed, or renamed away); drop
+          # its key so a later `watchDir` for the same path adds it fresh
+          var k = 0
+          while k < w.keys.len and w.keys[k] != e.wd:
+            inc k
+          if k < w.keys.len:
+            w.dirs.delete k
+            w.keys.delete k
+        else:
+          # a nameless event (a bare IN_ATTRIB on the watched directory itself,
+          # which `touch` leaves behind) names no file and wakes nothing
           var name = ""
           var k = 0
           while k < int(e.len) and buf.bytes[pos + hdr + k] != '\0':

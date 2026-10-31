@@ -43,7 +43,7 @@
 ## generated call sites answer with a placeholder panel.
 
 import std/[syncio, os, dirs, strutils, envvars, osproc, sha1]
-import ./platform/[fdwatch, pacing]
+import ./platform/[fdwatch, pacing, platform]
 
 {.passL: "-Wl,--export-dynamic".}
 {.emit: "int hot_invoke(void* fn, void* args){ return ((int(*)(void*))fn)(args); }".}
@@ -113,6 +113,9 @@ when not defined(windows):
   proc dlopenLib(path: cstring; mode: cint): pointer {.importc: "dlopen".}
   proc dlsymSym(handle: pointer; name: cstring): pointer {.importc: "dlsym".}
 
+when defined(posix):
+  import std/posix
+
 proc hotMsg(a: string = ""; b: string = ""; c: string = "") =
   ## Report straight to stderr: `dlopen` runs the library's module inits,
   ## which re-create the (interposed, shared) syncio stream buffers and drop
@@ -129,6 +132,291 @@ proc hotMsg(a: string = ""; b: string = ""; c: string = "") =
     discard rawWrite(2'i32, s.cstring, int32(s.len))
 
 proc hotEnabled*: bool = enabled
+
+# --- whole-app reload: watch, build, become -----------------------------------
+## Hot-loading a `widget hot` module swaps code into the running process.
+## That covers what a `.so` can hold; it cannot cover the app's own main,
+## its data layouts or anything outside a marked module. For those, a host
+## loop (`ellipse_ui.run`'s) watches the sources itself: when one changes,
+## rebuild the *program* and re-exec over this process (see
+## `restartProcess`). The window lives in the display server, so nothing on
+## screen blinks -- the new image dials the same socket and takes over.
+
+var
+  watchingWholeApp = false
+  restartRequested = false
+  restartArgs*: seq[string] = @[]   ## how this process was launched, for a restart
+  buildCmd = ""
+  srcDirs: seq[string] = @[]      ## directories under watch, re-walked for
+                                  ## subdirectories created since we started
+  lastSourceChangeNs = 0'i64      ## monotonic ns of the newest change event
+  quietNs = (if getEnv("ELLIPSE_HOT_QUIET").len > 0:
+               parseInt(getEnv("ELLIPSE_HOT_QUIET")) * 1_000_000'i64
+             else: 400_000_000'i64)  ## this long with no news means the editor
+                                  ## settled: build now
+  projectWatchFd = -1'i32         ## the whole-app watcher's descriptor
+  restarting = false              ## a rebuild landed; re-exec at the next
+                                  ## safe moment (the host loop reads it)
+  restartedAlready = false        ## set when `takeRestart` is honoured, stays
+  buildStartedOnce = false          ## a rebuild has begun (a test's seam)
+
+when not defined(windows):
+  const
+    inMaskAdd = 0x00004000'u32    ## merge into a pending event, do not queue
+                                  ## another: a burst of saves is still one
+                                  ## quiet settle at the end of them all
+    wholeWatchMask = inCloseWrite or inMovedTo or inCreate or inMaskAdd
+
+proc stampNowNs(): int64 =
+  ## Monotonic nanoseconds, through the pacer's clock: two saves in the same
+  ## second are still two moments apart.
+  pacing.monoNow()
+
+proc noteSourceChange() =
+  lastSourceChangeNs = stampNowNs()
+
+proc dirTail(path: string): string =
+  ## The last part of a directory path, for the hidden-name test.
+  let at = path.rfind('/')
+  if at >= 0: path.substr(at + 1) else: path
+
+proc projectEntryFile(): string =
+  ## The program to rebuild. An ellipse project has `project.owl` naming it
+  ## (`main = "nest"`); failing that, the single `.nim` directly under
+  ## `src/`; failing that, nothing to rebuild and the watcher stays off.
+  var main = ""
+  if fileExists("project.owl"):
+    let text = try: readFile("project.owl") except: ""
+    main = "main"
+    for line in text.splitLines():
+      let t = line.strip()
+      if t.startsWith("main"):
+        let eq = t.find('=')
+        if eq >= 0:
+          var name = t.substr(eq + 1).strip()
+          if name.len > 1 and (name[0] == '"' or name[0] == '\''):
+            name = name.substr(1, name.high - 1)
+          if name.len > 0: main = name
+  let guess = "src/" & (if main.len > 0: main else: "") & ".nim"
+  if main.len > 0 and fileExists(guess):
+    return guess
+  var found = ""
+  if dirExists("src"):
+    for kind, full in walkDir("src"):
+      if kind == pcFile and full.endsWith(".nim"):
+        if found.len > 0:
+          return ""               # more than one entry candidate: don't guess
+        found = full
+  found
+
+proc copyParam(s: string): string =
+  ## A fresh heap copy of an argument. Under ARC, `paramStr` can hand back a
+  ## view whose payload dies with the temporary; `execv` then dials whatever
+  ## bytes survived -- observed as ENOENT against a path that exists.
+  result = s & ""
+
+proc saveRestartArgs*() =
+  ## Remember how this process was launched, so a restart replays it exactly
+  ## (the display-attach flag included) under the new image.
+  if restartArgs.len == 0:
+    restartArgs.add(copyParam(paramStr(0)))
+    for i in 1 .. paramCount():
+      restartArgs.add(copyParam(paramStr(i)))
+
+proc addSrcWatch(fd: int32, dir: string) =
+  ## Watch `dir`, and every visible directory below it.
+  if dir.len == 0 or not dirExists(dir):
+    return
+  discard inotifyAdd(fd, dir.cstring, wholeWatchMask)
+  if dir notin srcDirs:
+    srcDirs.add dir
+  var fresh: seq[string] = @[]
+  for kind, full in walkDir(dir):
+    if kind == pcDir and dirTail(full)[0] != '.' and full notin srcDirs:
+      fresh.add full
+  for f in fresh:
+    addSrcWatch(fd, f)
+
+proc onProjectWatchReady()
+  ## Forward declaration; the body follows below.
+
+proc startProjectWatching*(command: string = "") =
+  ## Arm the whole-app watcher: inotify over `src/` (hidden names skipped),
+  ## fed to `fdwatch` like the widget loader's, plus the rebuild recipe.
+  ## `command` defaults to `make build`; whatever it is, it runs in the
+  ## project root. Call once at startup (the shell does, behind `--hot-app`
+  ## or an explicit request); events land between frames, where rebuilding
+  ## is safe.
+  when defined(windows):
+    discard command
+    hotMsg("whole-app reload needs inotify; not supported on Windows")
+  else:
+    if getEnv("ELLIPSE_HOT", "") == "0":
+      hotMsg("disabled (ELLIPSE_HOT=0)")
+      return
+    let entry = projectEntryFile()
+    if entry.len == 0:
+      hotMsg("no single src/<name>.nim entry to rebuild: not watching ",
+             "(add `widget hot` modules instead)")
+      return
+    buildCmd = if command.len > 0: command else: "make build"
+    saveRestartArgs()
+    let fd = inotifyInit(cint(0x800 or 0x80000))  # O_NONBLOCK | O_CLOEXEC
+    if fd < 0:
+      hotMsg("could not open inotify")
+      return
+    projectWatchFd = fd
+    addSrcWatch(fd, "src")
+    if not watchFd(fd, proc () = onProjectWatchReady()):
+      hotMsg("could not watch for file changes")
+      return
+    watchingWholeApp = true
+    hotMsg("watching src/ (fd " & $fd & "), will run `" & buildCmd & "` on a change")
+
+proc onProjectWatchReady() =
+  ## The watcher's callback: mark the moment, and come back soon to see
+  ## whether the project has gone quiet. Events are hints; the deadline
+  ## decides, so one burst of saves (an editor's temp-file dance across
+  ## several files) builds once. A directory created since the last look
+  ## gets watched too -- new source folders join without a restart.
+  when not defined(windows):
+    var buf = default(array[8192, char])
+    let n = readFd(projectWatchFd, addr buf[0], int32(buf.len))
+    if n <= 0:
+      noteSourceChange()
+    else:
+      const hdr = int(sizeof(InotifyEvent))
+      var pos = 0
+      var touchedName = false
+      while pos + hdr <= int(n):
+        let e = cast[ptr InotifyEvent](addr buf[pos])[]
+        var name = ""
+        let nameStart = pos + hdr
+        var k = 0
+        while k < int(e.len) and buf[nameStart + k] != '\0':
+          name.add buf[nameStart + k]
+          inc k
+        pos += int(e.len) + hdr
+        if name.len > 0 and not name.startsWith(".") and
+            (e.mask and (inCloseWrite or inMovedTo or inCreate)) != 0:
+          touchedName = true
+      if touchedName:
+        noteSourceChange()
+      var fresh: seq[string] = @[]
+      for d in srcDirs:
+        for kind, full in walkDir(d):
+          if kind == pcDir and dirTail(full)[0] != '.' and full notin srcDirs:
+            fresh.add full
+      for f in fresh:
+        addSrcWatch(projectWatchFd, f)
+    # ask for a frame soon: its pump checks whether the project settled;
+    # `wake` first so the loop even looks at the deadline instead of sleeping
+    # past every timer until some other event turns up
+    pacing.wake()
+    pacing.requestFrameIn(quietNs)
+
+proc rebuildProject(): bool =
+  ## Run the build recipe. Success means the binary on disk is new code;
+  ## failure prints the tail of the compiler's noise and returns false, so
+  ## this process keeps serving until the next save.
+  hotMsg("rebuilding: ", buildCmd)
+  buildStartedOnce = true
+  let (outp, code) = try: execCmdEx(buildCmd & " 2>&1") except: ("", 1)
+  if code != 0:
+    hotMsg("build failed, keeping this build alive")
+    var why = outp.strip()
+    let lines = why.splitLines()
+    let first = max(0, lines.len - 5)
+    for i in first ..< lines.len:
+      hotMsg("  | ", lines[i])
+    return false
+  true
+
+proc pumpProjectWakes*() =
+  ## The attached app's other beat: the display server's socket is outside
+  ## SDL's queue, and `SDL_WaitEventTimeout` never sees it -- without this,
+  ## an idle attached app stops pumping entirely once its deadlines run out.
+  ## Draining the socket (input, quits) and the watched descriptors (the
+  ## hot-reload callback) keeps both alive; paired with `pumpEvents`.
+  if displayAttached():
+    pumpEvents()          # drains the server socket into SDL, then SDL here;
+                          # fdwatch callbacks ride the same wake thread
+  elif fdsReady():
+    ## An unattached host (a scripted test, an offscreen run) that sleeps in
+    ## its own loop instead of `start`: no one else takes the fdwake event,
+    ## so run what is ready right here — the watcher's callback lands between
+    ## frames exactly as in the paced loop.
+    runReadyFds()
+
+proc checkProjectSettled*() =
+  ## Called by the host loop each frame (the shell does): a change is
+  ## pending and the project has been quiet past `quietNs`? Build. Success
+  ## asks for the process to become the new binary; failure keeps serving
+  ## the old one until the next save.
+  if not watchingWholeApp or restarting:
+    return
+  if lastSourceChangeNs == 0:
+    ## Nothing pending — but a previous build may have finished without this
+    ## process being replaced (a scripted host runs on, or an attached
+    ## client's execv failed while the display server kept its slot). Arm a
+    ## periodic deadline so the loop keeps checking for a late save instead
+    ## of sleeping forever on stale state.
+    pacing.requestFrameIn(quietNs * 4)
+    return
+  let age = stampNowNs() - lastSourceChangeNs
+  if age < quietNs:
+    ## Keep asking: re-arm a deadline right after the settle window closes,
+    ## so the loop wakes exactly when the project has gone quiet instead of
+    ## sleeping on whatever older deadline it happens to hold.
+    pacing.requestFrameIn(quietNs - age + 1_000_000'i64)
+    return
+  lastSourceChangeNs = 0
+  if rebuildProject():
+    ## The new image is on disk: end this loop so the shell's `run` seam
+    ## re-execs into it (`takeRestart` -> `relaunch`). Without quitting, the
+    ## paced loop would keep running frames from the old build and only
+    ## restart when the window closed. Attached to a display server, the
+    ## window never notices: the close-on-exec socket dies with the old
+    ## image, the new one dials fresh, and the server hands it the screen.
+    ## A detached (in-house) window *does* close between old quit and new
+    ## attach -- so an attached request with nobody serving raises a server
+    ## first (see `platform/display.ensureDisplayServer`); whole-app reload
+    ## is meant for the attached case.
+    restartRequested = true
+    platform.quit()
+    platform.askToQuitExternally()   # a scripted host must still see the ask
+
+proc takeRestart*(): bool =
+  ## True once a whole-app rebuild finished: the host loop ends itself and
+  ## `run` turns that into a fresh `execv`. Only ever answered between
+  ## frames -- that is what makes replacing the image safe.
+  result = restartRequested
+  if result:
+    restartedAlready = true   # tests look at this: the flag stays set past `run`
+
+proc restartSeen*(): bool =
+  ## Whether a restart was claimed since this process began (a test's seam:
+  ## `run` re-execs over itself, so the flag would otherwise vanish with the
+  ## old image before an assertion could read it).
+  restartedAlready
+
+proc restartPending*(): bool =
+  ## A rebuild has landed and the restart is pending or done: stop poking the
+  ## watcher (a test's seam; production saves arrive on their own).
+  restartRequested
+
+proc buildStarted*(): bool =
+  ## Whether a rebuild has ever begun in this process (a test's seam).
+  buildStartedOnce
+
+proc lastSeen*(): int64 =
+  ## The monotonic stamp of the change being waited on, 0 when nothing is
+  ## pending (a test's seam: did the watcher take my save?).
+  lastSourceChangeNs
+
+proc requestRestart*() =
+  ## Ask for the process to become the new binary at the next safe moment.
+  restartRequested = true
 
 proc nimExe(): string =
   ## The compiler to rebuild with: the Makefile hands its `NIM` down
@@ -475,13 +763,17 @@ proc startHotLoading*() =
   ## starts automatically. `ELLIPSE_HOT=0` turns it off (e.g. to run the
   ## hot binary against its own stale copy); `NIM` tells the loader
   ## which compiler to rebuild with, exactly as the Makefile's `hot`
-  ## target passes it.
+  ## target passes it. An attached or otherwise host-driven app that wants
+  ## *whole-project* reload calls `startProjectWatching` instead (see that).
   when not defined(ellipseHotApp):
     return                          # plain builds never hot-load
   else:
     if getEnv("ELLIPSE_HOT", "") == "0":
       hotMsg("disabled (ELLIPSE_HOT=0)")
       return
+    if watchingWholeApp:
+      return                        # `startProjectWatching` already armed this
+                                    # process; the shell must not double-watch
     when defined(windows):
       hotMsg("hot-loading needs inotify; not supported on Windows")
     else:

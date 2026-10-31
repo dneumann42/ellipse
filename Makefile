@@ -7,7 +7,7 @@ SHADERCROSS := shadercross
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
 
-.PHONY: build_owl run_owl test_owl test_repl install owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui test_atlas run_display run_attached
+.PHONY: build_owl run_owl test_owl test_repl install owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui test_hot test_atlas run_display run_attached
 
 OWL_FLAGS := --outdir:bin/ --nimcache:build/nimcache -p:src -p:src/clay
 
@@ -31,7 +31,10 @@ GUI_SOURCES := $(wildcard src/ellipse_ui.nim src/clay/*.nim src/ellipse_ui/*.nim
 	src/ellipse/logger.nim src/ellipse/failure.nim src/ellipse/clock.nim \
 	src/ellipse/hotload.nim src/ellipse/platform/*.nim src/ellipse/terminal/*.nim)
 
-GUI_TESTS := $(notdir $(wildcard tests/gui/*_test.nim))
+# `hot_reload_test` is excluded: it is a headless project skeleton that only
+# makes sense inside its bash wrapper (scratch src/, a real rebuild, an
+# execv over the same pid) -- `make test_hot` runs that.
+GUI_TESTS := $(filter-out hot_reload_test.nim,$(notdir $(wildcard tests/gui/*_test.nim)))
 
 SHADER_SOURCES := $(wildcard src/ellipse/drawing/shaders/*.glsl)
 SHADER_SPVS := $(patsubst src/ellipse/drawing/shaders/%.glsl,src/ellipse/drawing/shaders/spv/%.spv,$(SHADER_SOURCES))
@@ -75,10 +78,11 @@ run_ellipse: bin/ellipse
 	./bin/ellipse $(ARGS)
 
 # --- development mode: the window lives in a display server, the game in its
-# own process. Start the server in one terminal; run games against it with
-# --display-attach. Kill and relaunch the game all you like: the window stays,
-# input keeps flowing, and frames mirror straight back. `attach` below does
-# both at once for an existing checkout of the game.
+# own process. A game run with --display-attach raises the server from its own
+# image when none answers (see `platform/display.ensureDisplayServer`), so one
+# terminal is enough; `run_display` starts it separately if you prefer. Kill
+# and relaunch the game all you like: the window stays, input keeps flowing,
+# and frames mirror straight back.
 
 run_display: bin/ellipse
 	./bin/ellipse --display-serve
@@ -107,6 +111,9 @@ test_gui:
 	  SDL_VIDEODRIVER=offscreen $(NIM) -r --outdir:bin/tests/ \
 	    --nimcache:build/nimcache-gui -p:src -p:src/clay c tests/gui/$$t || exit 1; \
 	done
+
+test_hot:
+	@bash tests/gui/hot_reload_test.sh
 
 # Aseprite reading and atlas packing (owl metadata beside each atlas image).
 test_atlas:
