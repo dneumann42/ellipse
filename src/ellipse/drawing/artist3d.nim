@@ -1394,7 +1394,7 @@ proc saveSnapshot(a: Artist3D, path: string, width, height: uint32) =
   else:
     echo "snapshot: failed to encode ", path
 
-proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
+proc present*(a: Artist3D, app: var App, clearColor: ClearColor) =
   let frame = app.gpuFrame()
   var snapshotPath = a.snapshotPath
   a.snapshotPath = ""
@@ -1428,10 +1428,12 @@ proc present*(a: Artist3D, app: App, clearColor: ClearColor) =
       frame.beginRender(clearColor)
       frame.pass.endRender()
     a.presentLayers(frame.cmd, frame.target, frame.width, frame.height)
-  frame.endFrame()
+  # Local: submit and flip the window. Attached: copy the finished picture
+  # out and hand it to the display server instead (see `platform/display`).
+  mirrorPresented(app, frame)
   a.reset()
   if frame.valid and not a.snapshotDownload.isNil:
     a.saveSnapshot(snapshotPath, frame.width, frame.height)
 
-proc present*(a: Artist3D, app: App, color: chroma.Color) =
+proc present*(a: Artist3D, app: var App, color: chroma.Color) =
   a.present(app, (color.r.float32, color.g.float32, color.b.float32, color.a.float32))

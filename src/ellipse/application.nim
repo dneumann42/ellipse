@@ -118,7 +118,16 @@ template start*[G](cfg: AppConfig, game: G) =
   configureVideoDriver()
   sdl.initialize()
 
-  var state {.inject.} = cfg.createApplication(game)
+  var appCfg = cfg
+  if displayServerRequested():
+    # `--display-serve`: this run *is* the display server -- no game loop,
+    # just the window every attached game mirrors into. Never returns.
+    when not defined(windows):
+      serveDisplay(cfg.appname, cfg.width.int32, cfg.height.int32)
+  if displayAttachedRequested():
+    appCfg.displayMode = DisplayAttached
+
+  var state {.inject.} = appCfg.createApplication(game)
   injectFields(state, G)
 
   state.sceneStack.loadSceneStackState()
@@ -127,11 +136,16 @@ template start*[G](cfg: AppConfig, game: G) =
   while state.running:
     state.sceneStack.handlePushed()
     processEvents(state.running)
-    let frame = state.engine.beginFrame()
-    state.dt = frame.dt
+    let tick = state.engine.beginFrame()
+    state.dt = tick.dt
     update(state)
     state.sceneStack.handleUnloads()
     draw(state)
+    # Attached mode: the display server (or a dead connection) asks for the
+    # app to stop; local apps never see one. Frames went out through the
+    # artists' `present`, which mirrors them when attached (see platform/sdl).
+    if servedQuitAsked(app):
+      state.running = false
     state.engine.endFrame(state.running)
 
 template start*(cfg: AppConfig) =

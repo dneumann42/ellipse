@@ -24,6 +24,7 @@ import ./keyevents
 export keyevents
 import ../terminal/[tty, terminput]
 import ./fdwatch
+import ./display
 export fdwatch
 export layershell
 
@@ -264,7 +265,21 @@ when withSdl:
   proc SDL_DestroyRenderer(ren: ptr SDL_Renderer) {.importc: "SDL_DestroyRenderer", header: "<SDL3/SDL.h>".}
   type
     SDL_Surface {.importc: "SDL_Surface", header: "<SDL3/SDL.h>".} = object
-      ## Opaque here: only SDL's calls touch its contents.
+      ## Opaque here: only SDL's calls touch its contents. An attached app's
+      ## snapshot path reads the picture through `SdlSurfaceView` below --
+      ## the same layout, so the cast is honest (renderer.nim declares this
+      ## struct in full too).
+
+    SdlSurfaceView* = object ## The C `SDL_Surface`, fields and all: what an
+      ## attached client copies out of the offscreen picture it paints
+      ## (see `platform/display`). Layout-identical to SDL's own.
+      flags: uint32
+      format: uint32
+      w, h: int32
+      pitch: int32
+      pixels: ptr UncheckedArray[uint8]
+      refcount: int32
+      reserved: pointer
   proc SDL_CreateSurface(w, h: int32; format: uint32): ptr SDL_Surface {.
     importc: "SDL_CreateSurface", header: "<SDL3/SDL.h>".}
   proc SDL_DestroySurface(surf: ptr SDL_Surface) {.
@@ -394,6 +409,9 @@ type
     offscreen: bool             ## no window of ours: a host app owns the
                                 ## screen and draws our picture itself (see
                                 ## `initializeOffscreen`)
+    attached*: DisplayServer    ## development mode: the display server this
+                                ## app mirrors frames to and takes input from
+                                ## (see `platform/display`); nil when local
 
 when withSdl:
   proc `=destroy`(app: var PlatformApplication) =
@@ -778,14 +796,72 @@ when withSdl:
     if inputDebug:
       discard info("sdl video driver: ", $SDL_GetCurrentVideoDriver())
 
+when withSdl:
+  const PixelFormatARGB8888 = 0x16362004'u32  ## SDL_PIXELFORMAT_ARGB8888
+
+  proc openOffscreen(app: var PlatformApplication; w, h: int32)  =
+    ## (Re)build the offscreen picture: an ARGB surface with a software
+    ## renderer on it. Nothing about it is visible; the renderer module
+    ## paints commands into it and `readPicture` copies it out.
+    `=destroy`(app.renderer)
+    if not app.surface.isNil:
+      SDL_DestroySurface(app.surface)
+      app.surface = nil
+    app.surface = SDL_CreateSurface(w, h, PixelFormatARGB8888)
+    if app.surface.isNil:
+      raise Failure()
+    app.renderer.raw = SDL_CreateSoftwareRenderer(app.surface)
+    if app.renderer.raw.isNil:
+      raise Failure()
+    app.surfaceWidth = w
+    app.surfaceHeight = h
+
+when withSdl:
+  proc initAttachedWindow*(cfg: WindowConfig): bool =
+    ## Development mode for GUI-kit apps (`--display-attach`, see
+    ## `platform/display`): instead of opening a window, connect to the
+    ## display server and take over its screen -- paint the UI offscreen and
+    ## mirror each finished picture as a snapshot (see `drawFrame`), while
+    ## the server forwards input back through `pumpAttached`. False when no
+    ## server answers or the terminal owns the run: the caller opens its own
+    ## window then.
+    if terminalMode() or not attachedUiRequested():
+      return false
+    let disp = initAttachedUi(cfg.title, cfg.width, cfg.height)
+    if disp == nil:
+      info "no display server on ", displaySocketPath(),
+        ": opening a window of our own"
+      return false
+    # SDL must be up before a surface can be made; the wake thread keeps
+    # watched descriptors reaching the paced loop, exactly as in a window.
+    sdlHandle(SDL_SetAppMetadata("ellipse".cstring, "0.1.0".cstring,
+      "org.ellipse.platform".cstring), "SDL_SetAppMetadata()")
+    sdlHandle(SDL_Init(Video or Audio), "SDL_Init()")
+    fdWakeType = ellipse_sdl_fdwake_start()
+    activeApp.attached = disp
+    activeApp.offscreen = true
+    activeApp.visible = false
+    activeApp.vsync = false
+    openOffscreen(activeApp, disp.width, disp.height)
+    activeApp.width = float32(disp.width)
+    activeApp.height = float32(disp.height)
+    activeApp.running = true
+    true
+
 proc initialize*(cfg: WindowConfig)  =
   ## Start SDL and open the app's window as `cfg` describes -- or take over
-  ## the terminal in `terminalMode()` (always, in a build without SDL).
+  ## the terminal in `terminalMode()` (always, in a build without SDL). With
+  ## `--display-attach` / `ELLIPSE_DISPLAY_ATTACH=1` (development mode, see
+  ## `platform/display`) no window opens at all: the display server owns the
+  ## screen, this app paints its UI offscreen and mirrors each finished
+  ## picture to the server, which forwards input back.
   activeApp = PlatformApplication()
   if terminalMode():
     initTerminal(activeApp, cfg)
     return
   when withSdl:
+    if initAttachedWindow(cfg):
+      return
     initWindow(cfg)
 
 var textImeActive = false
@@ -810,26 +886,6 @@ proc setTextInputEnabled*(enabled: bool) =
 proc initialize*()  =
   ## The default window: 1280x720, resizable.
   initialize(WindowConfig())
-
-when withSdl:
-  const PixelFormatARGB8888 = 0x16362004'u32  ## SDL_PIXELFORMAT_ARGB8888
-
-  proc openOffscreen(app: var PlatformApplication; w, h: int32)  =
-    ## (Re)build the offscreen picture: an ARGB surface with a software
-    ## renderer on it. Nothing about it is visible; the renderer module
-    ## paints commands into it and `readPicture` copies it out.
-    `=destroy`(app.renderer)
-    if not app.surface.isNil:
-      SDL_DestroySurface(app.surface)
-      app.surface = nil
-    app.surface = SDL_CreateSurface(w, h, PixelFormatARGB8888)
-    if app.surface.isNil:
-      raise Failure()
-    app.renderer.raw = SDL_CreateSoftwareRenderer(app.surface)
-    if app.renderer.raw.isNil:
-      raise Failure()
-    app.surfaceWidth = w
-    app.surfaceHeight = h
 
 proc initializeOffscreen*(width, height: int32)  =
   ## The platform app without a window of its own: SDL stays as the host
@@ -1274,6 +1330,25 @@ when withSdl:
       app.height = float32(ph)
       noteResize(monoNow())
 
+  proc pumpAttached(app: var PlatformApplication) =
+    ## Development mode (see `platform/display`): drain everything the
+    ## display server has sent since the last pump -- forwarded input lands
+    ## in SDL's queue through `pushWireEvent`, so `pumpSdlEvents` picks it up
+    ## right after this -- and notice a resize of *the server's* window by
+    ## folding it into ours. A dead connection or a quit at the window ends
+    ## the loop; the server's window outlives this process either way.
+    let disp = app.attached
+    var stop = disp.pumpEvents()
+    let size = disp.noteUiSize()
+    if size.changed and size.w > 0 and size.h > 0 and
+        (float32(size.w) != app.width or float32(size.h) != app.height):
+      app.width = float32(size.w)
+      app.height = float32(size.h)
+      noteResize(monoNow())
+    if stop:
+      app.running = false
+      quitSignaled = true
+
 proc videoDriver*(): string =
   ## SDL's video backend: "wayland", "x11", "windows", "offscreen", ...;
   ## "" in the terminal or without SDL.
@@ -1555,11 +1630,30 @@ when withSdl:
 proc drawFrame(app: var PlatformApplication; render: FrameFn): bool  =
   ## Run the render hook; present only when it painted something (see
   ## `pacing.requestPresent`) and the window can show it. Returns whether
-  ## a present happened.
+  ## a present happened. Attached apps have no window to flip: their whole
+  ## offscreen picture goes to the display server instead (see
+  ## `platform/display`).
   render()
   if terminalMode():
     return presentRequested()   # the renderer wrote the changed cells
   when withSdl:
+    if app.attached != nil:
+      if presentRequested():
+        let surf = cast[ptr SdlSurfaceView](app.surface)
+        if not surf.isNil and surf.w > 0 and surf.h > 0:
+          let
+            wpx = surf.w.int
+            hpx = surf.h.int
+          var bytes = newSeq[uint8](wpx * hpx * 4)
+          var y = 0'i32
+          while y < surf.h:
+            copyMem(addr bytes[y * wpx * 4],
+                    cast[pointer](cast[uint](surf.pixels) + uint(y) * uint(surf.pitch)),
+                    wpx * 4)
+            inc y
+          discard sendSnapshot(app.attached, bytes, uint32(wpx), uint32(hpx))
+        return true
+      return false
     if presentRequested() and app.visible:
       sdlHandle(SDL_RenderPresent(app.renderer.raw), "SDL_RenderPresent()")
       return true
@@ -1584,12 +1678,16 @@ proc waitFor(app: PlatformApplication; ns: int64) =
 proc pumpEvents(app: var PlatformApplication) =
   ## Take in what arrived since the last pump: the descriptors that turned
   ## readable in the terminal (key presses, mouse reports, resizes, and any
-  ## other watched fd), SDL's queue and layer-surface configures in a window.
+  ## other watched fd), SDL's queue and layer-surface configures in a window,
+  ## and the display server's forwarded input when attached (see
+  ## `platform/display`).
   if terminalMode():
     waitFds(0)
     runReadyFds()
     return
   when withSdl:
+    if app.attached != nil:
+      pumpAttached(app)
     pumpSdlEvents(app)
     pumpLayer(app)
 

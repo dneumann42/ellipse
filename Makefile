@@ -7,7 +7,7 @@ SHADERCROSS := shadercross
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
 
-.PHONY: build_owl run_owl test_owl test_repl install owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui test_atlas
+.PHONY: build_owl run_owl test_owl test_repl install owl_clean build_ellipse run_ellipse build_3d run_3d shaders shaders_portable ellipse_clean build_gallery run_gallery run_gallery_tui test_gui test_atlas run_display run_attached
 
 OWL_FLAGS := --outdir:bin/ --nimcache:build/nimcache -p:src -p:src/clay
 
@@ -73,6 +73,18 @@ run_3d: bin/hello3d
 
 run_ellipse: bin/ellipse
 	./bin/ellipse $(ARGS)
+
+# --- development mode: the window lives in a display server, the game in its
+# own process. Start the server in one terminal; run games against it with
+# --display-attach. Kill and relaunch the game all you like: the window stays,
+# input keeps flowing, and frames mirror straight back. `attach` below does
+# both at once for an existing checkout of the game.
+
+run_display: bin/ellipse
+	./bin/ellipse --display-serve
+
+run_attached: bin/ellipse
+	ELLIPSE_DISPLAY_ATTACH=1 ./bin/ellipse $(ARGS)
 
 # --- GUI kit (clay + ellipse_ui, ported from the nimony ellipse-preview) ----
 

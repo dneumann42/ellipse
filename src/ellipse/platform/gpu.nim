@@ -866,6 +866,31 @@ proc beginFrame*(device: Device, window: Window): GpuFrame =
     result.height = height
     result.valid = true
 
+proc readbackPixels*(frame: GpuFrame): seq[uint8] =
+  ## Copy the frame's finished target back to the CPU: open one overlay pass
+  ## over what the frame drew, record a download of its whole area, submit
+  ## whatever is open, wait the GPU out, and hand out RGBA8 bytes, row 0 the
+  ## top. The blocking is the point -- attached mode pays it once per frame
+  ## to keep the display server's GPU objects fully separate from the app's
+  ## (see `platform/display`). An invalid or empty frame yields @[]; an
+  ## unended pass is ended first, so the frame closes exactly once either
+  ## way. The store writes back to the swapchain texture itself: the blit
+  ## lands where the window would have shown it, in the same orientation.
+  if not frame.valid or frame.target.isNil or frame.width == 0 or frame.height == 0:
+    return @[]
+  let device = frame.cmd.device
+  if not frame.pass.isNil:
+    frame.pass.endRender()
+  let pass = beginOverlay(frame.cmd, frame.target)
+  let download = frame.cmd.stageDownload(frame.target, frame.width, frame.height)
+  endRender(pass)
+  frame.cmd.submit()
+  discard waitForGPUFences(device.raw, true, [device.fence])
+  releaseGPUFence(device.raw, device.fence)
+  device.fence = nil
+  collectGarbage(device)
+  device.finishDownload(download)
+
 proc beginRender*(frame: GpuFrame, clearColor: ClearColor) =
   frame.pass = beginRender(frame.cmd, frame.target, clearColor, frame.depth)
 
