@@ -274,9 +274,9 @@ when withSdl:
   ## two contours and lets the smoothing bands tile without overlapping.
   ##
   ## SDL3's 2D geometry has no antialiasing, so rounded shapes get two thin
-  ## translucent outline bands hugging their edges (and, for border rings, hugging
-  ## the hole) as cheap coverage smoothing: the 0..0.5px band carries 3/4 of the
-  ## colour's alpha, the 0.5..1px band 1/4, approximating the ideal coverage ramp.
+  ## outline bands hugging their edges (and, for border rings, hugging the hole).
+  ## Vertex alpha falls continuously from opaque at the contour to transparent
+  ## one pixel away, giving opposite edges the same coverage.
 
   func arcSegments(radius: float32): int =
     ## Chords of the quarter arc deviate from the true circle by
@@ -322,8 +322,6 @@ when withSdl:
 
   const
     QuarterTurn = float32(PI / 2.0)
-    BandInner = 0.75'f32   # alpha of the edge-adjacent smoothing band
-    BandOuter = 0.25'f32   # ... and of the far half-pixel band
 
   proc addArc(pts: var seq[SDL_FPoint]; cx, cy, rad, startAngle, step: float32;
               seg: int) =
@@ -331,8 +329,21 @@ when withSdl:
     ## `startAngle` (radians, screen space: x right, y down, angles clockwise).
     var k = 0
     while k <= seg:
-      let a = startAngle + step * float32(k)
-      pts.add(SDL_FPoint(x: cx + rad * cos(a), y: cy + rad * sin(a)))
+      # Generate every quadrant from the same first-quadrant samples.
+      # Large-angle sin/cos leave tiny errors at cardinal endpoints, which
+      # can rasterize onto different pixel rows on opposite sides.
+      let a = step * float32(min(k, seg - k))
+      let small = if k == 0 or k == seg: 0'f32 else: sin(a)
+      let large = if k == 0 or k == seg: 1'f32 else: cos(a)
+      let u = if k <= seg div 2: large else: small
+      let v = if k <= seg div 2: small else: large
+      var dx, dy: float32
+      case round(startAngle / QuarterTurn).int mod 4
+      of 0: dx = u; dy = v
+      of 1: dx = -v; dy = u
+      of 2: dx = -u; dy = -v
+      else: dx = v; dy = -u
+      pts.add(SDL_FPoint(x: cx + rad * dx, y: cy + rad * dy))
       inc k
 
   proc roundedContour(r: Rect; c: CornerRadius; seg: int): seq[SDL_FPoint] =
@@ -355,19 +366,21 @@ when withSdl:
   ## list so the whole element ships in one `SDL_RenderGeometry` call.
 
   proc addBand(verts: var seq[SDL_Vertex]; a, b: seq[SDL_FPoint];
-               col: Color; alpha: float32) =
+               col: Color; alpha: float32; alphaB = -1'f32) =
     ## Ring between contours `a` and `b` (paired by index, same winding).
     let vc = SDL_FColor(r: col.r / 255.0, g: col.g / 255.0, b: col.b / 255.0,
                         a: col.a / 255.0 * alpha)
+    let vcB = SDL_FColor(r: vc.r, g: vc.g, b: vc.b,
+      a: col.a / 255.0 * (if alphaB < 0: alpha else: alphaB))
     var i = 0
     while i < a.len:
       let j = (i + 1) mod a.len
       verts.add(SDL_Vertex(position: a[i], color: vc, tex_coord: SDL_FPoint()))
       verts.add(SDL_Vertex(position: a[j], color: vc, tex_coord: SDL_FPoint()))
-      verts.add(SDL_Vertex(position: b[j], color: vc, tex_coord: SDL_FPoint()))
+      verts.add(SDL_Vertex(position: b[j], color: vcB, tex_coord: SDL_FPoint()))
       verts.add(SDL_Vertex(position: a[i], color: vc, tex_coord: SDL_FPoint()))
-      verts.add(SDL_Vertex(position: b[j], color: vc, tex_coord: SDL_FPoint()))
-      verts.add(SDL_Vertex(position: b[i], color: vc, tex_coord: SDL_FPoint()))
+      verts.add(SDL_Vertex(position: b[j], color: vcB, tex_coord: SDL_FPoint()))
+      verts.add(SDL_Vertex(position: b[i], color: vcB, tex_coord: SDL_FPoint()))
       inc i
 
   func insetRect(r: Rect; d: float32): Rect =
@@ -399,8 +412,11 @@ when withSdl:
     let base = featherContour(r, c, seg, 0.0, inside)
     let mid = featherContour(r, c, seg, 0.5, inside)
     let far = featherContour(r, c, seg, 1.0, inside)
-    addBand(verts, base, mid, col, BandInner)
-    addBand(verts, mid, far, col, BandOuter)
+    # Interpolate alpha continuously. Constant half-pixel bands put pixel
+    # centres on a discontinuity and the GPU's top-left rule then gives
+    # opposite edges different coverage.
+    addBand(verts, base, mid, col, 1.0, 0.5)
+    addBand(verts, mid, far, col, 0.5, 0.0)
 
   proc addSector(verts: var seq[SDL_Vertex]; cx, cy, rad, startAngle: float32;
                  seg: int; vc: SDL_FColor) =

@@ -980,6 +980,7 @@ proc optionRowDecl*(over, selected: bool, press = false, gap: int = 0,
 ## may be open at a time across the set -- `toggleDropdown` owns that slot.
 
 var openDropdownId = 0'u32
+persistUiState("ellipse/dropdowns", openDropdownId)
 
 proc toggleDropdown*(id, popId: ElementId): bool =
   ## Fold this frame's click into the open-dropdown slot: a click on the

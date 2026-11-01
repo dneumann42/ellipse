@@ -3,7 +3,7 @@
 ## `run`. See `documentation/nim-tutorial.md` §12 (The app shell and its
 ## hooks) and `documentation/README.md` for the two quick starts.
 
-import std/[envvars, syncio]
+import std/[envvars, syncio, os, tempfiles, base64, strutils]
 when defined(posix):
   import std/posix
 
@@ -35,12 +35,45 @@ type
                                ## "make build")
     prepare*: AppFn        ## first, in every process (dialogs too)
     setup*: AppFn          ## once, after `bootup` (main process only)
+    beforeReload*: proc (): string {.closure.}
+      ## Called before whole-process re-exec. Return opaque state bytes.
+    afterReload*: proc (state: string) {.closure.}
+      ## Called after setup, before the first frame, only following re-exec.
     input*: InputHook      ## every frame, inside `updateUI`
     before*: AppFn         ## every frame, before the layout pass
     view*: AppFn           ## every frame, inside `layout`
     after*: AppFn          ## every frame, after the layout pass
 
 var current: App
+
+const reloadStateEnv = "ELLIPSE_RELOAD_STATE"
+const reloadPidEnv = "ELLIPSE_RELOAD_PID"
+const reloadEnvelope = "ellipse-ui-reload:1\n"
+
+proc restoreReloadState(app: App) =
+  let path = getEnv(reloadStateEnv)
+  let owner = getEnv(reloadPidEnv)
+  delEnv(reloadStateEnv)
+  delEnv(reloadPidEnv)
+  # exec keeps the PID. Dialogs and other child processes must not consume
+  # their parent's snapshot if they inherit the environment.
+  if path.len == 0 or owner != $getCurrentProcessId():
+    return
+  try:
+    let bytes = readFile(path)
+    if bytes.startsWith(reloadEnvelope):
+      let saved = parseJson(bytes[reloadEnvelope.len .. ^1])
+      if app.afterReload != nil and saved["application"].kind != JNull:
+        app.afterReload(base64.decode(saved["application"].getStr()))
+      restoreUiState(saved["ui"])
+    elif app.afterReload != nil:
+      # Accept snapshots from a running build predating the UI envelope.
+      app.afterReload(bytes)
+  except CatchableError as exc:
+    raise newException(IOError, "could not restore reload state from " &
+                       path & ": " & exc.msg)
+  removeFile(path)
+
 
 proc frame*()  =
   ## One update pass of the launched app: input, hooks, layout. The loop
@@ -91,6 +124,7 @@ proc launch*(app: App)  =
   let setup = app.setup
   if setup != nil:
     setup()
+  restoreReloadState(app)
 
 proc runDialogProcess(app: App)  =
   ## This process shows one dialog for the app that started it: the app's
@@ -138,7 +172,31 @@ proc relaunch*(): bool =
       held[i] = restartArgs[i] & ""   # deep copy, pinned until execv returns:
       argv[i] = held[i].cstring       # a `cstring` is just a pointer
     argv[restartArgs.len] = nil
-    discard execv(restartArgs[0].cstring, cast[cstringArray](addr argv[0]))
+    var statePath = ""
+    try:
+      let state = if current.beforeReload != nil: current.beforeReload() else: ""
+      let envelope = newJObject()
+      envelope["application"] = if current.beforeReload != nil:
+        %base64.encode(state) else: newJNull()
+      envelope["ui"] = saveUiState()
+      let (file, path) = createTempFile("ellipse-reload-", ".bif")
+      statePath = path
+      try:
+        file.write(reloadEnvelope & $envelope)
+      finally:
+        file.close()
+      putEnv(reloadStateEnv, path)
+      putEnv(reloadPidEnv, $getCurrentProcessId())
+      discard execv(restartArgs[0].cstring, cast[cstringArray](addr argv[0]))
+    except CatchableError as exc:
+      stderr.writeLine("hot: could not save reload state: " & exc.msg)
+    finally:
+      # Successful exec never returns. Failed saves/execs leave no marker
+      # for a later ordinary launch and no orphaned temporary file.
+      delEnv(reloadStateEnv)
+      delEnv(reloadPidEnv)
+      if statePath.len > 0:
+        removeFile(statePath)
     # execv only returns on failure: keep the old build serving
     false
 

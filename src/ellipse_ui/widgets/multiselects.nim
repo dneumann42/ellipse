@@ -15,6 +15,8 @@ var
   cursorId = 0'u32   ## the multiselect whose list the highlight belongs to
   cursor = -1        ## keyboard-highlighted option, -1 none
 
+persistUiState("ellipse/multiselect-cursor", (cursorId, cursor))
+
 func bit*(i: int): Selection =
   ## The mask for option `i`.
   1'u64 shl uint32(i)

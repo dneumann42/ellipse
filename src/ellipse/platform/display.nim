@@ -388,12 +388,15 @@ proc spawnDisplayServer(): bool =
     var args: array[0 .. 2, cstring]
     args[0] = exe.cstring
     args[1] = "--display-serve".cstring
+    let owner = $getCurrentProcessId()
     let mid = fork()
     if mid < 0:
       return false
     if mid == 0:
       let kid = fork()
       if kid == 0:
+        if getEnv("ELLIPSE_DISPLAY_OWNED") == "1":
+          putEnv("ELLIPSE_DISPLAY_OWNER", owner)
         discard setsid()  # own session: signals to the app's terminal miss it
         let fd = open(logPath.cstring, O_WRONLY or O_CREAT or O_TRUNC, Mode(0o600))
         if fd >= 0:
@@ -922,10 +925,8 @@ proc stepServerOnce(s: DisplaySlot, timeoutMs: int) =
       s.forwardEvent(ev)
     of EVENT_QUIT, EVENT_WINDOW_CLOSE_REQUESTED, EVENT_TERMINATING:
       if s.client != nil and not s.client.gone:
-        # closing belongs to the game: ask the app to quit, keep the window
         discard s.client.sendMsg(WireMsg(kind: evQuit))
-      else:
-        s.quitAsked = true
+      s.quitAsked = true
     else:
       discard
 
@@ -969,7 +970,15 @@ proc serveDisplay*(title: string; width, height: int32) {.noreturn.} =
   echo "ellipse display: serving on ", displaySocketPath()
   flushFile(stdout)
   serverSlot.paintWaiting()
+  when not defined(windows):
+    let ownerText = getEnv("ELLIPSE_DISPLAY_OWNER")
+    let owner = if ownerText.len > 0: Pid(parseInt(ownerText)) else: Pid(0)
   while not serverSlot.quitAsked:
+    when not defined(windows):
+      # exec preserves the owner PID, so reloads never close the window.
+      if owner > 0 and posix.kill(owner, 0) < 0 and errno == ESRCH:
+        serverSlot.quitAsked = true
+        break
     serverSlot.stepServerOnce(0)
     # SDL input is serviced every millisecond; frame arrivals wake poll early.
     when not defined(windows):
@@ -980,5 +989,14 @@ proc serveDisplay*(title: string; width, height: int32) {.noreturn.} =
     else:
       sdl3.delay(1'u32)
   echo "ellipse display: closed"
+  if serverSlot.client != nil:
+    closeDisplay(serverSlot.client)
+  when not defined(windows):
+    discard close(serverSlot.listenFd)
+    removeFile(displaySocketPath())
+  if serverSlot.texture != nil:
+    destroyTexture(serverSlot.texture)
+  destroyRenderer(serverSlot.renderer)
+  destroyWindow(serverSlot.window)
   sdl3.quit()
   quit(0)

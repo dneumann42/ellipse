@@ -11,6 +11,9 @@ import ellipse/platform/renderer
 import ./theme
 export theme
 
+import ./reloadstate
+export reloadstate
+
 import ./focus
 export focus
 
@@ -205,6 +208,7 @@ template layout*(blk: untyped) =
   beginLayout()
   blk
   endLayout()
+  finishFocusReload()
 
 proc text*(value: string, fontSize: uint16 = activeTheme.text.control,
            color: Color = activeTheme.palette.textColor) =
@@ -312,6 +316,8 @@ var
   menuBarLast: seq[uint32] = @[]  ## ... and of the previous frame
   menuKeysGen = 0'u32      ## frame whose keys a menu already handled
 
+persistUiState("ellipse/menus", (openMenuId, menuCursor))
+
 proc menuPressed(): bool =
   currentContext().pointerData().state == pressedThisFrame
 
@@ -407,15 +413,20 @@ proc menu*(label: string, blk: MenuBody) =
   let isOpen = openMenuId == btnId.id
 
   let over = pointerOver(btnId)
-  let press = pressing(btnId) or isOpen   # an open menu sits pressed in
+  let active = over or pressing(btnId) or isOpen or focused(btnId)
+  let button = col(width = fit(), height = grow(), alignX = centerX,
+                   alignY = centerY, padding = padAll(t.metrics.padButton))
+  var caption = col(width = fit(), height = fit(), padding = Padding(bottom: 2))
+  caption.border = BorderConfig(
+    color: if active: t.palette.accent else: t.palette.panelBorder,
+    width: BorderWidth(bottom: if active: t.metrics.borderTab
+                               else: t.metrics.borderHairline))
   openElement(btnId)
-  configureOpenElement(col(width = fit(), height = grow(), alignX = centerX,
-      alignY = centerY, padding = squeeze(padAll(t.metrics.padButton), press))
-      .bg(shade(over, press))
-      .corner(t.radii.button)
-      .border(t.metrics.borderHairline, t.palette.panelBorder)
-      .focusRing(btnId))
+  configureOpenElement(button)
+  openElement(localId("caption", btnId.id))
+  configureOpenElement(caption)
   textElement(label, TextConfig(fontSize: t.text.menu, color: t.palette.textColor))
+  closeElement()
   closeElement()
 
   if isOpen:

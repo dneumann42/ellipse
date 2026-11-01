@@ -13,6 +13,18 @@ import ./common
 
 var tabState = initTable[uint32, int]()
 
+type SavedTab = tuple[id: uint32, index: int]
+proc savedTabs(): seq[SavedTab] =
+  for id, index in tabState:
+    result.add (id: id, index: index)
+
+proc restoreTabs(value: seq[SavedTab]) =
+  tabState.clear()
+  for tab in value:
+    tabState[tab.id] = max(0, tab.index)
+
+registerUiState("ellipse/tabs", savedTabs, restoreTabs)
+
 proc activeTab*(id: ElementId): int =
   ## `id`'s selected tab index; 0 until something selects otherwise.
   tabState.getOrDefault(id.id, 0)

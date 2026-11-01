@@ -3,6 +3,7 @@
 ## the keyboard) and §8 (Keymaps and shortcuts).
 
 import clay
+import ./reloadstate
 
 import ellipse/platform/platform
 
@@ -20,6 +21,16 @@ var
   chainNowGen = 0'u32               ## clay generation `chainNow` belongs to
   chainLast: seq[FocusEntry] = @[]  ## the frame before `chainNow`'s
   chainLastGen = 0'u32
+
+var reloadFocusId = 0'u32
+registerUiState("ellipse/focus", proc(): uint32 = focusId,
+  proc(value: uint32) =
+    focusId = value
+    reloadFocusId = value)
+
+proc finishFocusReload*() =
+  ## A removed widget must not claim focus if it is introduced later.
+  reloadFocusId = 0'u32
 
 proc focusedId*(): uint32 =
   ## The element id holding focus now, 0 for none.
@@ -87,6 +98,11 @@ proc registerFocus*(id: ElementId, tabIndex: int = 0,
   ## press folds in -- a press inside takes focus, a press elsewhere while
   ## it holds focus lets go. `inside` names a floating part that counts as
   ## the widget's own (a dropdown's popover): pressing it keeps focus.
+  if reloadFocusId != 0 and id.id == reloadFocusId:
+    # Resolve restored focus as widgets register, after application startup
+    # focus requests. This also keeps a restored popover from closing itself.
+    setFocusId(id.id)
+    reloadFocusId = 0'u32
   noteRegistration(id.id, tabIndex)
   let ctx = currentContext()
   if ctx.pointerData().state == pressedThisFrame:

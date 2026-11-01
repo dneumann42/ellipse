@@ -284,6 +284,12 @@ when withSdl:
     importc: "SDL_CreateSurface", header: "<SDL3/SDL.h>".}
   proc SDL_DestroySurface(surf: ptr SDL_Surface) {.
     importc: "SDL_DestroySurface", header: "<SDL3/SDL.h>".}
+  proc SDL_RenderReadPixels(ren: ptr SDL_Renderer; area: pointer): ptr SDL_Surface {.
+    importc: "SDL_RenderReadPixels", header: "<SDL3/SDL.h>".}
+  proc SDL_ConvertSurface(surf: ptr SDL_Surface; format: uint32): ptr SDL_Surface {.
+    importc: "SDL_ConvertSurface", header: "<SDL3/SDL.h>".}
+  proc SDL_GetRendererName(ren: ptr SDL_Renderer): cstring {.
+    importc: "SDL_GetRendererName", header: "<SDL3/SDL.h>".}
   proc SDL_CreateSoftwareRenderer(surf: ptr SDL_Surface): ptr SDL_Renderer {.
     importc: "SDL_CreateSoftwareRenderer", header: "<SDL3/SDL.h>".}
   proc SDL_PollEvent(event: ptr SDL_Event): bool {.importc: "SDL_PollEvent", header: "<SDL3/SDL.h>".}
@@ -825,9 +831,24 @@ when withSdl:
   const PixelFormatARGB8888 = 0x16362004'u32  ## SDL_PIXELFORMAT_ARGB8888
 
   proc openOffscreen(app: var PlatformApplication; w, h: int32)  =
-    ## (Re)build the offscreen picture: an ARGB surface with a software
-    ## renderer on it. Nothing about it is visible; the renderer module
-    ## paints commands into it and `readPicture` copies it out.
+    ## Attached UIs draw with SDL's hardware renderer on a hidden window.
+    ## Windowless host integrations and explicit software tests keep an ARGB
+    ## surface. Neither path opens another visible application window.
+    if app.attached != nil and getEnv("ELLIPSE_UI_SOFTWARE") != "1":
+      if app.window.raw == nil:
+        createPlainWindow(app, WindowConfig(title: "Ellipse UI render target"),
+                          w, h, WindowHidden)
+        let backend = $SDL_GetRendererName(app.renderer.raw)
+        if backend == "software":
+          raise newException(IOError, "attached UI needs a hardware SDL renderer; " &
+            "use ELLIPSE_UI_SOFTWARE=1 for headless software tests")
+        discard SDL_SetRenderVSync(app.renderer.raw, 0)
+        info "UI renderer: ", backend
+      else:
+        sdlHandle(SDL_SetWindowSize(app.window.raw, w, h), "SDL_SetWindowSize()")
+      app.surfaceWidth = w
+      app.surfaceHeight = h
+      return
     `=destroy`(app.renderer)
     if not app.surface.isNil:
       SDL_DestroySurface(app.surface)
@@ -1239,7 +1260,7 @@ when withSdl:
         wake()
       elif kind == EventQuit or kind == EventWindowCloseRequested:
         closeAsked(app)
-      elif kind == EventWindowPixelResized:
+      elif kind == EventWindowPixelResized and app.attached == nil:
         # Track the live window size so the UI can re-layout the moment the
         # window is resized. `data1`/`data2` carry the new drawable size in
         # renderer pixels -- the space we draw and report pointer positions in.
@@ -1690,10 +1711,24 @@ proc drawFrame(app: var PlatformApplication; render: FrameFn): bool  =
     if app.attached != nil:
       if presentRequested():
         flushOffscreen()
-        let surf = cast[ptr SdlSurfaceView](app.surface)
-        if not surf.isNil and surf.w > 0 and surf.h > 0:
-          discard sendSurfaceSnapshot(app.attached, surf.pixels, int(surf.pitch),
-            uint32(surf.w), uint32(surf.h))
+        var snapshot: ptr SDL_Surface
+        if app.surface == nil:
+          # Read before present, while the completed hardware backbuffer is
+          # valid. Normalize the GPU format to the transport's ARGB8888.
+          let pixels = SDL_RenderReadPixels(app.renderer.raw, nil)
+          sdlHandle(pixels != nil, "SDL_RenderReadPixels()")
+          snapshot = SDL_ConvertSurface(pixels, PixelFormatARGB8888)
+          SDL_DestroySurface(pixels)
+          sdlHandle(snapshot != nil, "SDL_ConvertSurface()")
+        try:
+          let surf = cast[ptr SdlSurfaceView](
+            if snapshot != nil: snapshot else: app.surface)
+          if not surf.isNil and surf.w > 0 and surf.h > 0:
+            discard sendSurfaceSnapshot(app.attached, surf.pixels, int(surf.pitch),
+              uint32(surf.w), uint32(surf.h))
+        finally:
+          if snapshot != nil:
+            SDL_DestroySurface(snapshot)
         return true
       return false
     if presentRequested() and app.visible:
