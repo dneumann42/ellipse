@@ -14,13 +14,14 @@ layout(location = 3) in float iShade;
 layout(location = 4) in float iPhase;
 layout(location = 5) in float iBlink;   // damage-flash intensity 0..1
 
+layout(location = 6) in vec4 iRect; // per-instance sprite UV rectangle
+
 layout(set = 1, binding = 0) uniform Uniforms {
   mat4 viewProj;
   vec4 eye;    // xyz: the eye; w: seconds
   vec4 right;  // xyz: the camera's right, flat; w: metres of sway
   vec4 light;  // xyz: toward the sun; w: intensity
   vec4 params; // x: ambient; y: grow; z: cutoff
-  vec4 rects[16]; // per layer: u0, v0, u1, v1
 } u;
 
 layout(location = 0) out vec2 fragmentUv;
@@ -50,7 +51,7 @@ void main() {
   gl_Position = u.viewProj * vec4(world, 1.0);
 
   int layer = int(iLayer + 0.5);
-  vec4 rect = u.rects[clamp(layer, 0, 15)];
+  vec4 rect = iRect;
   fragmentUv = vec2(mix(rect.x, rect.z, c.x), mix(rect.w, rect.y, c.y));
   fragmentLayer = float(layer);
 

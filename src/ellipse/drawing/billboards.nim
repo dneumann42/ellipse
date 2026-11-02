@@ -1,6 +1,6 @@
 ## Billboards: flat sprites standing upright in the world and turned to face
 ## the camera -- trees, grass, the clutter of a forest floor -- drawn in the
-## hundreds of thousands. Each is one 32-byte instance in a GPU buffer that is
+## hundreds of thousands. Each is one 52-byte instance in a GPU buffer that is
 ## uploaded once and drawn from every frame after, so a frame costs nothing on
 ## the CPU per sprite: the vertex stage builds the four corners of every
 ## instance itself, one draw call for each run of instances the caller asks
@@ -23,7 +23,7 @@ import geometry
 import fog
 
 const
-  MaxBillboardLayers* = 16 ## sprites one billboard atlas can hold
+  MaxBillboardLayers* = 512 ## sprites one billboard atlas can hold
 
 type
   BillboardInstance* = object
@@ -35,6 +35,11 @@ type
     phase*: float32 ## 0 .. 1, where in its sway it starts; 0 sways not at all
     ## when the sprite should stand still (a stone)
     blink*: float32 ## damage-flash intensity 0..1, applied as a red tint
+
+  GpuBillboardInstance = object
+    ## Extra render data stays out of the public/saveable sprite record.
+    sprite: BillboardInstance
+    uvRect: Vec4
 
   BillboardAtlas* = object
     ## Sprites one to a layer, each standing on its layer's bottom middle,
@@ -62,7 +67,6 @@ type
     right: Vec4 # the camera's right, flattened onto the ground; then wind
     light: Vec4 # toward the sun, intensity
     params: Vec4 # ambient, grow, cutoff, unused
-    rects: array[MaxBillboardLayers, Vec4]
 
   BillboardFragmentUniforms = object
     cut: Vec4 # cutoff, three unused
@@ -104,8 +108,9 @@ const
     Attribute(location: 3, offset: 24, format: Float32),
     Attribute(location: 4, offset: 28, format: Float32),
     Attribute(location: 5, offset: 32, format: Float32),
+    Attribute(location: 6, offset: 36, format: Float4),
   ]
-  BillboardStride* = uint32 sizeof(BillboardInstance)
+  BillboardStride* = uint32 sizeof(GpuBillboardInstance)
 
   billboardVertexSpv = staticRead("shaders/spv/billboard.vert.spv")
   billboardFragmentSpv = staticRead("shaders/spv/billboard.frag.spv")
@@ -114,6 +119,7 @@ const
 
 static:
   doAssert sizeof(BillboardInstance) == 36
+  doAssert sizeof(GpuBillboardInstance) == 52
 
 func newBillboardOptions*(wind = 0.25f, cutoff = 0.5f): BillboardOptions =
   BillboardOptions(wind: wind, cutoff: cutoff)
@@ -334,7 +340,11 @@ proc upload*(p: BillboardPass, cmd: CommandBuffer) =
     p.atlasStaged = false
   for buffer in p.uploads:
     if buffer.staged.len > 0:
-      cmd.upload(buffer.buffer, buffer.staged)
+      var instances = newSeq[GpuBillboardInstance](buffer.staged.len)
+      for i, instance in buffer.staged:
+        let layer = clamp(int(instance.layer + 0.5f), 0, MaxBillboardLayers - 1)
+        instances[i] = GpuBillboardInstance(sprite: instance, uvRect: p.rects[layer])
+      cmd.upload(buffer.buffer, instances)
       buffer.staged = @[]
   p.uploads.setLen(0)
 
@@ -357,7 +367,6 @@ proc uniformsFor(p: BillboardPass, view, viewProj: Mat4, eye, toLight: Vec3,
     right: vec4(flatRight(view), o.wind),
     light: vec4(toLight, intensity),
     params: vec4(ambient, grow, o.cutoff, 0),
-    rects: p.rects,
   )
 
 proc drawRuns(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,

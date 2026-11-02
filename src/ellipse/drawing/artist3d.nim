@@ -35,6 +35,9 @@ type
   Batch = object
     firstIndex, indexCount: uint32
     uniforms: Uniforms
+    fog: FogUniforms ## the fog the batch was begun under: dynamic meshes
+    ## sink into exactly that, so a draw between two `setFog` calls keeps
+    ## its own haze; recorded meshes ignore it and take the frame's fog
 
   StaticMesh* = ref object
     ## Geometry recorded once between `beginRecording` and `endRecording`,
@@ -559,6 +562,7 @@ proc begin*(a: Artist3D, mode: DrawMode = Triangles) =
   a.pending = Batch(
     firstIndex: a.indices.len.uint32,
     uniforms: a.uniformState(a.model, a.projection * a.view),
+    fog: fogUniforms(a.fog, a.eye),
   )
 
 proc vertex*(a: Artist3D, v: Vec3) =
@@ -891,6 +895,7 @@ proc render*(a: Artist3D, mesh: Mesh) =
     firstIndex: firstIndex,
     indexCount: (a.indices.len - firstIndex.int).uint32,
     uniforms: a.uniformState(a.model, viewProj),
+    fog: fogUniforms(a.fog, a.eye),
   )
 
 proc render*(a: Artist3D, mesh: Mesh, model: Mat4) =
@@ -974,7 +979,8 @@ proc refreshProjection(a: Artist3D, frame: GpuFrame) =
     batch.uniforms.viewProj = viewProj
 
 proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
-                 pushFragment: proc () = nil, textured: bool = false) =
+                 pushFragment: proc () = nil, textured: bool = false,
+                 perBatchFog = false) =
   pass.bindPipeline(pipeline)
   pass.bindVertexBuffers([BufferBinding(buffer: a.vertexBuffer)])
   pass.bindIndexBuffer(a.indexBuffer)
@@ -984,7 +990,9 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
     pass.bindFragmentSamplers([(texture: a.meshTexture, sampler: sampler)])
   for batch in a.batches:
     cmd.pushVertexUniforms(0, batch.uniforms)
-    if not pushFragment.isNil:
+    if perBatchFog:
+      cmd.pushFragmentUniforms(0, batch.fog) # this batch's own haze
+    elif not pushFragment.isNil:
       pushFragment()
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
   if a.statics.len == 0:
@@ -1122,7 +1130,8 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   let (mesh, splat, waterPipeline) = a.scenePipelines()
   let fog = fogUniforms(a.fog, a.eye)
   a.drawBatches(cmd, pass, mesh,
-    proc () = cmd.pushFragmentUniforms(0, fog), textured = true)
+    proc () = cmd.pushFragmentUniforms(0, fog), textured = true,
+    perBatchFog = true)
   let uniforms = SplatUniforms(
     splat: vec4(
       max(a.splatOptions.metersPerRepeat, 1e-3f), max(a.splatOptions.blendDepth, 1e-3f),
