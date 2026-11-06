@@ -1,16 +1,16 @@
 import std/math
 import owl/[objects, evaluator, modules]
 
-proc nums(env: ref Environment, args: seq[Object]): seq[float64]  =
+proc nums(env: ref Environment, args: seq[Object]): seq[float64] =
   numbersIn(env, args, "arithmetic")
 
-proc plusBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc plusBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var total = 0.0
   for a in args:
     total += numberIn(env, a, "arithmetic")
   number(total)
 
-proc subBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc subBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("- needs at least one argument")
   var total = numberIn(env, args[0], "arithmetic")
@@ -18,13 +18,13 @@ proc subBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
     total -= numberIn(env, args[i], "arithmetic")
   number(total)
 
-proc mulBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc mulBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var total = 1.0
   for a in args:
     total *= numberIn(env, a, "arithmetic")
   number(total)
 
-proc divBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc divBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let ns = nums(env, args)
   if ns.len == 0:
     err("/ needs at least one argument")
@@ -35,7 +35,7 @@ proc divBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
     total = total / ns[i]
   number(total)
 
-proc floorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc floorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let ns = numbersIn(env, args, "floor")
   if ns.len != 1:
     err("floor needs one number")

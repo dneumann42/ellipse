@@ -1,20 +1,20 @@
 import std/[cmdline, options, strutils]
-import owl/[objects, evaluator, reader, modules, errors]
+import owl/[objects, evaluator, modules, errors]
 import ../embedfile
 
 
-proc quoteBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc quoteBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("quote needs one argument")
   args[0]
 
-proc evalBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc evalBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("eval needs one argument")
   let syntax = eval(args[0], env)
   eval(syntax, env)
 
-proc parseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc parseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 1 or args.len > 2:
     err("parse needs a string and an optional name")
   let source = eval(args[0], env)
@@ -28,7 +28,7 @@ proc parseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
     name = toStr(n)
   list(readSource(toStr(source), name))
 
-proc charBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc charBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("char needs one number")
   let code = eval(args[0], env)
@@ -41,13 +41,13 @@ proc charBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   s[0] = char(int(n))
   str(s)
 
-proc wholeArg(env: ref Environment, form: Object, what: string): int  =
+proc wholeArg(env: ref Environment, form: Object, what: string): int =
   let v = eval(form, env)
   if not isNumber(v) or toNumber(v) != float64(int64(toNumber(v))):
     err(what & " needs a whole number, got " & stringify(v))
   int(toNumber(v))
 
-proc sliceBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc sliceBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 2 or args.len > 3:
     err("slice needs a string or list, a start and an optional end")
   let x = eval(args[0], env)
@@ -67,7 +67,7 @@ proc sliceBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
       part.add items[i]
     result = list(part)
 
-proc findBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc findBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 2 or args.len > 3:
     err("find needs a string, a needle and an optional start")
   let s = eval(args[0], env)
@@ -81,7 +81,7 @@ proc findBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   else:
     result = number(float64(at))
 
-proc codeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc codeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 1 or args.len > 2:
     err("code needs a string and an optional position")
   let s = eval(args[0], env)
@@ -92,12 +92,12 @@ proc codeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
     err("code position out of range: " & $at)
   number(float64(ord(toStr(s)[at])))
 
-proc toStringBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc toStringBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("to-string needs one argument")
   str(stringify(eval(args[0], env)))
 
-proc toCodeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc toCodeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 1 or args.len > 2:
     err("to-code needs a value and an optional width")
   let value = eval(args[0], env)
@@ -106,12 +106,12 @@ proc toCodeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
     width = wholeArg(env, args[1], "to-code")
   str(toCode(value, max(width, 20)))
 
-proc typeOfBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc typeOfBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("type-of needs one argument")
   str(kindName(eval(args[0], env)))
 
-proc bodyStartBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc bodyStartBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("body-start needs one form")
   let at = bodyStart(eval(args[0], env))
@@ -120,24 +120,23 @@ proc bodyStartBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): 
   else:
     result = number(float64(at))
 
-proc syntaxFormBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc syntaxFormBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("syntax-form needs one argument")
   let v = eval(args[0], env)
   result = if isSyntax(v): syntaxForm(v) else: v
 
-proc syntaxScopeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc syntaxScopeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("syntax-scope needs one argument")
   let v = eval(args[0], env)
   let scope = syntaxScope(v)
   if scope == nil:
     err("syntax-scope needs a command argument, got " & stringify(v))
-    result = nothing()
   else:
     result = scopeValue(scope)
 
-proc withBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc withBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 1:
     err("with needs a record")
   let r = eval(args[0], env)
@@ -167,9 +166,10 @@ proc callerBlockScope(env: ref Environment): ref Environment =
   if caller != nil:
     setRedirect(result, caller, newEnvironment(resolveScope(env, caller)))
 
-var caught = owlError(RuntimeError, "")
+var caught {.threadvar.}: OwlError
+  ## The error the last `try` on this thread handled.
 
-proc tryBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc tryBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("try needs something to evaluate")
   let attempt = if bodyStart >= 1 and bodyStart < args.len: bodyStart else: args.len
@@ -177,7 +177,7 @@ proc tryBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
   result = nothing()
   try:
     result = evalRange(env, args, 0, attempt)
-  except:
+  except CatchableError:
     adoptForeign()
     failed = true
   if failed:
@@ -186,7 +186,7 @@ proc tryBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
     define(child, symbol("failure"), str(caught.message))
     result = evalRange(child, args, attempt, args.len)
 
-proc ifBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc ifBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("if needs a condition")
   if bodyStart >= args.len:
@@ -196,13 +196,13 @@ proc ifBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object 
   else:
     evalRange(blockScope(env), args, bodyStart + 1, args.len)
 
-proc doBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc doBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let scope = callerBlockScope(env)
   result = nothing()
   for form in args:
     result = eval(form, scope)
 
-proc whileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc whileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("while needs a condition")
   if bodyStart >= args.len:
@@ -211,7 +211,7 @@ proc whileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
     discard evalRange(blockScope(env), args, bodyStart, args.len)
   nothing()
 
-proc whenBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc whenBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("when needs a condition")
   if bodyStart >= args.len:
@@ -221,7 +221,7 @@ proc whenBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   else:
     nothing()
 
-proc condBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc condBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   result = nothing()
   for form in args:
     if not isPair(form):
@@ -229,7 +229,7 @@ proc condBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
     if toBool(eval(car(form), env)):
       return eval(cdr(form), blockScope(env))
 
-proc concatBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc concatBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("concat needs at least one argument")
   let first = eval(args[0], env)
@@ -261,9 +261,8 @@ proc concatBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
     result = record(joined)
   else:
     err("concat needs strings, lists or records, got " & stringify(first))
-    result = nothing()
 
-proc errorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc errorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var parts: seq[string] = @[]
   for a in args:
     parts.add stringify(eval(a, env))
@@ -272,7 +271,7 @@ proc errorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
     raiseError(caught)
   err(msg)
 
-proc errorAtBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc errorAtBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 2:
     err("error-at needs a form and a message")
   let form = eval(args[0], env)
@@ -281,12 +280,12 @@ proc errorAtBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
     parts.add stringify(eval(args[i], env))
   raiseError(RuntimeError, parts.join(" "), placeOf(form))
 
-proc errorReportBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc errorReportBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 0:
     err("error-report takes no arguments")
   str(renderError(caught))
 
-proc placeOfBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc placeOfBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("place-of needs one form")
   let p = placeOf(eval(args[0], env))
@@ -297,7 +296,7 @@ proc placeOfBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
     result = record(@[pair(symbol("file"), str(src.name)),
       pair(symbol("line"), number(float64(line))), pair(symbol("column"), number(float64(col)))])
 
-proc setBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc setBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("set needs a name and a value")
   var key = args[0]
@@ -310,7 +309,7 @@ proc setBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
     err("set on an unbound symbol: " & toSymbol(key))
   value
 
-proc pairBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc pairBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("pair needs a name and a value")
   var key = args[0]
@@ -320,7 +319,7 @@ proc pairBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
     err("pair needs a symbol name, got " & stringify(key))
   pair(key, eval(args[1], env))
 
-proc ordered(env: ref Environment, args: seq[Object], ascending: bool): Object  =
+proc ordered(env: ref Environment, args: seq[Object], ascending: bool): Object =
   if args.len < 2:
     err("comparisons need at least two arguments")
   var ok = true
@@ -332,13 +331,13 @@ proc ordered(env: ref Environment, args: seq[Object], ascending: bool): Object  
     previous = n
   boolean(ok)
 
-proc ltBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc ltBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   ordered(env, args, true)
 
-proc gtBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc gtBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   ordered(env, args, false)
 
-proc equality(env: ref Environment, args: seq[Object], wantSame: bool): Object  =
+proc equality(env: ref Environment, args: seq[Object], wantSame: bool): Object =
   if args.len < 2:
     err("comparisons need at least two arguments")
   result = boolean(true)
@@ -350,13 +349,13 @@ proc equality(env: ref Environment, args: seq[Object], wantSame: bool): Object  
       return
     previous = current
 
-proc eqBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc eqBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   equality(env, args, true)
 
-proc neBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc neBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   equality(env, args, false)
 
-proc notBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc notBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("not needs exactly one argument")
   boolean(not toBool(eval(args[0], env)))
@@ -370,16 +369,16 @@ proc defineInEnv(env: ref Environment, args: seq[Object], bodyStart: int,
     args[bodyStart ..< args.len], env, isFun, dynamic))
   nothing()
 
-proc funBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc funBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   defineInEnv(env, args, bodyStart, true)
 
-proc commandBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc commandBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   defineInEnv(env, args, bodyStart, false)
 
-proc dynamicCommandBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc dynamicCommandBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   defineInEnv(env, args, bodyStart, false, true)
 
-proc bindBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc bindBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("bind needs a name and a value")
   let name = eval(args[0], env)
@@ -395,12 +394,12 @@ proc bindBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
     err("bind needs a name, got " & stringify(name))
   value
 
-proc newScopeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc newScopeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 0:
     err("new-scope takes no arguments")
   scopeValue(newEnvironment(env))
 
-proc evalInBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc evalInBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("eval-in needs a scope and code")
   let target = eval(args[0], env)
@@ -412,10 +411,10 @@ proc evalInBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
   else:
     result = eval(code, scope)
 
-proc lambdaBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc lambdaBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   result = newCommand("", args[0 ..< bodyStart], args[bodyStart ..< args.len], env, true)
 
-proc recordBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc recordBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var fields = newSeqOfCap[Object](args.len)
   for form in args:
     if not isPair(form):
@@ -425,7 +424,7 @@ proc recordBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
     fields.add pair(car(form), eval(cdr(form), env))
   record(fields)
 
-proc listBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc listBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var xs = newSeqOfCap[Object](args.len)
   for form in args:
     xs.add eval(form, env)
@@ -445,7 +444,7 @@ proc lengthOf(o: Object): int =
   elif isPair(o):
     result = 2
 
-proc lengthBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc lengthBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("length needs one argument")
   let o = eval(args[0], env)
@@ -467,12 +466,12 @@ proc positionOf(key: Object): int =
     if n >= 0.0 and n == float64(int64(n)):
       result = int(n)
 
-proc keyOf(env: ref Environment, form: Object): Object  =
+proc keyOf(env: ref Environment, form: Object): Object =
   result = form
   if not isSymbol(form):
     result = eval(form, env)
 
-proc indexAt(o: Object, key: Object): Object  =
+proc indexAt(o: Object, key: Object): Object =
   let name = nameOf(key)
   if name.len > 0:
     if isRecord(o):
@@ -496,14 +495,14 @@ proc indexAt(o: Object, key: Object): Object  =
   else:
     result = itemAt(o, at)
 
-proc indexBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc indexBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 2:
     err("index needs a value and a key")
   result = eval(args[0], env)
   for i in 1 ..< args.len:
     result = indexAt(result, keyOf(env, args[i]))
 
-proc fieldBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc fieldBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("field needs a record and a name")
   let o = eval(args[0], env)
@@ -514,7 +513,7 @@ proc fieldBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
     err("field needs a name, got " & stringify(key))
   field(o, nameOf(key))
 
-proc listVar(env: ref Environment, form: Object, what: string): Object  =
+proc listVar(env: ref Environment, form: Object, what: string): Object =
   if not isSymbol(form):
     err(what & " needs a variable name")
   let found = lookup(env, form)
@@ -527,7 +526,7 @@ proc listVar(env: ref Environment, form: Object, what: string): Object  =
 proc storeList(env: ref Environment, name: Object, items: sink seq[Object]) =
   discard assign(env, name, list(items))
 
-proc appendBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc appendBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 1:
     err("append needs a variable")
   var items = toSeq(listVar(env, args[0], "append"))
@@ -536,7 +535,7 @@ proc appendBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
   result = list(items)
   discard assign(env, args[0], result)
 
-proc prependBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc prependBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 1:
     err("prepend needs a variable")
   var items: seq[Object] = @[]
@@ -548,7 +547,7 @@ proc prependBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
   result = list(items)
   discard assign(env, args[0], result)
 
-proc insertBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc insertBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len < 2:
     err("insert needs a variable and a position")
   let items = toSeq(listVar(env, args[0], "insert"))
@@ -568,7 +567,7 @@ proc insertBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obj
   result = list(grown)
   discard assign(env, args[0], result)
 
-proc popBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc popBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("pop needs one variable")
   let old = listVar(env, args[0], "pop")
@@ -581,7 +580,7 @@ proc popBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
     rest.add itemAt(old, i)
   storeList(env, args[0], rest)
 
-proc popFrontBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc popFrontBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("pop-front needs one variable")
   let old = listVar(env, args[0], "pop-front")
@@ -600,7 +599,7 @@ proc argvValue(): Object =
     xs.add str(paramStr(i))
   list(xs)
 
-proc installBaseOwl*(env: ref Environment)
+proc installBaseOwl*(env: ref Environment) {.gcsafe.}
 
 proc installBase*(env: ref Environment) =
   define(env, symbol("argv"), argvValue())

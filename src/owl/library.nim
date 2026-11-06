@@ -1,11 +1,13 @@
 import std/syncio
-import ./[objects, reader, evaluator, modules, embedfile]
+import ./[objects, evaluator, modules, embedfile]
 import ./libraries/[base, math, io, term, fs, loader, net, gui, watch]
 
 
-var programLib: Library = nil
+var programLib {.threadvar.}: Library
+  ## The library `run-file` runs against: the last `owlLibrary` made on this
+  ## thread.
 
-proc runFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc runFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("run-file needs one path")
   let path = eval(args[0], env)
@@ -15,7 +17,7 @@ proc runFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
   var failed = false
   try:
     source = readFile(toStr(path))
-  except:
+  except CatchableError:
     failed = true
   if failed:
     err("cannot open file: " & toStr(path))
@@ -30,7 +32,7 @@ proc runFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
 proc programModule(): Module =
   result = newModule("program").addBuiltin("run-file", runFileBuiltin, true)
 
-proc owlLibrary*(): Library  =
+proc owlLibrary*(): Library =
   let lib = newLibrary("owl")
   programLib = lib
   lib.add baseModule()

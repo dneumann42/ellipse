@@ -146,7 +146,7 @@ proc readValue*(self: AbstractSettingsObject): Object =
   var source = ""
   try:
     source = readFile(self.path)
-  except:
+  except CatchableError:
     err("cannot read settings: " & self.path)
   evaluate(self.sandbox, self.root, self.path, source)
 
@@ -174,7 +174,7 @@ proc stampOf(path: string): string =
     for b in digest:
       result.add H[int(b) shr 4]
       result.add H[int(b) and 15]
-  except:
+  except CatchableError:
     result = ""
 
 proc writeFileText(path, text: string) =
@@ -184,18 +184,18 @@ proc writeFileText(path, text: string) =
   if dir.len > 0 and dir != ".":
     try:
       createDir(dir)
-    except:
+    except CatchableError:
       discard
   var failed = false
   try:
     writeFile(path & ".owl-tmp", text)
-  except:
+  except CatchableError:
     failed = true
   if failed:
     err("cannot write settings: " & path)
   try:
     moveFile(path & ".owl-tmp", path)
-  except:
+  except CatchableError:
     removeFile(path & ".owl-tmp")
     err("cannot replace settings: " & path)
 
@@ -330,7 +330,7 @@ proc reload*(repo: var SettingsRepository, name: SettingsTypeName): bool =
   except ValueError:
     obj.error = lastErrorMessage
     if not repo.quiet:
-      errorReport(errorText(colorErrors))
+      report(errorText(colorErrors))
     result = false
 
 proc reloadAll*(repo: var SettingsRepository): int =
@@ -402,7 +402,7 @@ proc checkForChanges*(repo: var SettingsRepository): int =
       except ValueError:
         obj.error = lastErrorMessage
         if not repo.quiet:
-          errorReport(errorText(colorErrors))
+          report(errorText(colorErrors))
 
 proc close*(repo: var SettingsRepository) =
   ## Give up the watcher's descriptor. Registered data is left alone.

@@ -263,7 +263,7 @@ proc readForms*(source: string, name: string,
   var lines: seq[Line] = @[]
   try:
     lines = scanLines(t, source)
-  except:
+  except CatchableError:
     discard
   var p = Parser(pos: 0, num: 0, err: "", src: newSource(name, source, internal), errLoc: Loc(at: 0, len: 0))
   if t.err.len > 0:

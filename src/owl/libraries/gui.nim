@@ -1,4 +1,4 @@
-import std/[syncio, strutils, tables, os, envvars]
+import std/[syncio, strutils, tables, os, envvars, atomics]
 import owl/[objects, evaluator, modules, errors]
 import ellipse_ui/app
 
@@ -6,10 +6,35 @@ import ellipse_ui/app
 # widgets, the widget event frames and the app loop. A bridge, not a second
 # toolkit. See `documentation/owl-tutorial.md` for the Owl side.
 
+# --- the thread the gui lives on ------------------------------------------------
+#
+# The toolkit (clay, ellipse_ui, the platform layer) keeps its state in
+# process globals, and SDL wants a single UI thread. So this is the one part
+# of owl tied to a thread: the first thread to call a gui builtin owns the
+# gui, and a call from any other thread fails as an owl error. The rest of
+# owl runs on any thread, one interpreter per thread.
+
+var guiOwner: Atomic[int]
+  ## The owning thread's id, 0 while nobody has called a gui builtin.
+
+proc claimGuiThread(what: string) =
+  let me = getThreadId()
+  var owner = 0
+  if not guiOwner.compareExchange(owner, me) and owner != me:
+    err(what & ": the gui belongs to thread " & $owner & ", not to thread " & $me)
+
+template onGuiThread(name: string, p: typed): CommandProc =
+  ## `p` as a `CommandProc`: it may touch the toolkit's globals because the
+  ## call is refused on every thread but the gui's.
+  proc (env: ref Environment, args: seq[Object], bodyStart: int): Object {.gcsafe.} =
+    claimGuiThread(name)
+    {.cast(gcsafe).}:
+      result = p(env, args, bodyStart)
+
 # --- errors across Nim callbacks ------------------------------------------------
 
-var pending = owlError(RuntimeError, "")
-var hasPending = false
+var pending {.threadvar.}: OwlError
+var hasPending {.threadvar.}: bool
 
 proc stash() =
   if not hasPending:
@@ -24,7 +49,7 @@ proc rethrow() =
 proc runQuietly(fn: Object) =
   try:
     discard invoke(fn, @[])
-  except:
+  except CatchableError:
     stash()
 
 proc slotOf(fn: Object): proc () {.closure.} =
@@ -168,7 +193,6 @@ proc colorOf(o: Object): Color =
       float32(toNumber(field(o, "b"))), float32(a))
   else:
     err("a colour is a palette name, #rrggbb or a record of r g b, got " & stringify(o))
-    result = Color()
 
 proc sizingOf(o: Object): SizingAxis =
   var v = o
@@ -190,10 +214,8 @@ proc sizingOf(o: Object): SizingAxis =
     of "pct": result = pct(float32(toNumber(field(v, "fraction"))))
     else:
       err("unknown sizing " & stringify(v))
-      result = fit()
   else:
     err("a size is a number, grow, fit or (pct f), got " & stringify(v))
-    result = fit()
 
 proc sizingOr(a: Args, name: string, at: int, fallback: SizingAxis): SizingAxis =
   let v = arg(a, name, at)
@@ -214,7 +236,6 @@ proc paddingOf(o: Object): Padding =
       top: int(toNumber(field(o, "top"))), bottom: int(toNumber(field(o, "bottom"))))
   else:
     err("padding is a number, [] x y, [] left right top bottom or a record, got " & stringify(o))
-    result = Padding()
 
 proc alignXOf(o: Object): AlignX =
   case textOf(o, "align-x")
@@ -223,7 +244,6 @@ proc alignXOf(o: Object): AlignX =
   of "right": result = right
   else:
     err("align-x is left, center or right, got " & stringify(o))
-    result = left
 
 proc alignYOf(o: Object): AlignY =
   case textOf(o, "align-y")
@@ -232,7 +252,6 @@ proc alignYOf(o: Object): AlignY =
   of "bottom": result = bottom
   else:
     err("align-y is top, center or bottom, got " & stringify(o))
-    result = top
 
 proc textSizeOf(o: Object, fallback: uint16): uint16 =
   result = if isNothing(o): fallback else: uint16(numOf(o, "size"))
@@ -249,7 +268,6 @@ proc axes(o: Object): (bool, bool) =
     of "both": result = (true, true)
     else:
       err("scroll and clip take true, x, y or both, got " & stringify(o))
-      result = (false, false)
 
 proc declOf(a: Args, vertical: bool): ElementDeclaration =
   # A row or column declaration from its options. Built while the element
@@ -318,7 +336,6 @@ proc fontIdOf(o: Object): uint16 =
   elif textOf(o, "font") == "ui" or textOf(o, "font") == "": 0'u16
   else:
     err("font is ui or mono, got " & stringify(o))
-    0'u16
 
 proc textBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   # text value (size = n) (color = c)
@@ -428,7 +445,7 @@ proc fnv1a(s: string): uint32 =
   for c in s:
     result = (result xor uint32(ord(c))) * 16777619'u32
 
-var eventFields = initTable[string, seq[string]]()
+var eventFields {.threadvar.}: Table[string, seq[string]]
 
 proc stockFields(name: string): seq[string] =
   case name
@@ -582,7 +599,7 @@ proc handlerOf(hs: seq[OwlHandler]): EventHandler =
           let changed = invoke(h.fn, @[toRecord(h.name, payload)])
           if isRecord(changed):
             fromRecord(h.name, changed, payload)
-        except:
+        except CatchableError:
           stash()
         return efConsumed
 
@@ -1299,8 +1316,8 @@ proc callLater(fn: Object, args: seq[Object]) =
   if isCommand(fn):
     try:
       discard invoke(fn, args)
-    except:
-      errorReport("owl error in a dialog callback:\n" & errorText(colorErrors))
+    except CatchableError:
+      report("owl error in a dialog callback:\n" & errorText(colorErrors))
 
 proc dialogFnOf(fn: Object): DialogFn =
   result = proc () {.closure.} =
@@ -1312,7 +1329,6 @@ proc modeOf(o: Object): DialogMode =
   of "window": result = dmWindow
   else:
     err("a dialog mode is inline or window, got " & stringify(o))
-    result = dmInline
 
 proc rawArg(args: seq[Object], name: string): Object =
   # The unevaluated value of option `name`, or nothing.
@@ -1469,9 +1485,9 @@ proc isDialogProcessBuiltin(env: ref Environment, args: seq[Object], bodyStart: 
 
 # Why the last frame's view failed ("" when it did not): the message, and
 # the whole error window shown over the view.
-var frameError = ""
-var frameReport = ""
-var reportedError = ""
+var frameError {.threadvar.}: string
+var frameReport {.threadvar.}: string
+var reportedError {.threadvar.}: string
 
 proc drawError() =
   let t = activeTheme
@@ -1485,9 +1501,9 @@ proc drawError() =
     fontId: MonoFont, wrap: newlineWrap))
   closeElement()
 
-var currentView = nothing()
-var guiRunning = false
-var quietRun = false
+var currentView {.threadvar.}: Object
+var guiRunning {.threadvar.}: bool
+var quietRun {.threadvar.}: bool
   ## gui-run (quiet = true): nothing goes to stdout or stderr -- the app owns
   ## the terminal (the repl), and shows its errors itself.
 
@@ -1501,12 +1517,12 @@ proc viewProc(): AppFn =
       discard invoke(currentView, @[])
       frameError = ""
       frameReport = ""
-    except:
+    except CatchableError:
       frameError = currentError.message
       frameReport = errorText()
     if frameError.len > 0:
       if frameReport != reportedError and not quietRun:
-        errorReport("owl error in the view:\n" & errorText(colorErrors))
+        report("owl error in the view:\n" & errorText(colorErrors))
         reportedError = frameReport
       drawError()
     else:
@@ -1521,10 +1537,10 @@ proc useFonts() =
     if fileExists(candidate):
       fontPath = candidate
 
-var guiScript*: AppFn = nil
+var guiScript* {.threadvar.}: AppFn
   ## Tests: drives gui-run's frames instead of the loop (`run(app, script)`).
 
-var afterQueue: seq[Object] = @[]
+var afterQueue {.threadvar.}: seq[Object]
 
 proc afterFrameBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   # after-frame f: call f once the next frame has run (a frame is asked for).
@@ -1540,7 +1556,7 @@ proc runAfterFrame() =
   for f in queued:
     try:
       discard invoke(f, @[])
-    except:
+    except CatchableError:
       discard
 
 proc guiRunBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
@@ -1612,7 +1628,7 @@ proc watchFdBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
   let ok = watchFd(fd, proc () {.closure.} =
     try:
       discard invoke(f, @[])
-    except:
+    except CatchableError:
       discard
     # what the callback printed reaches a log file now, not at exit
     flushFile(stdout)
@@ -1629,7 +1645,7 @@ proc windowTitleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int)
 
 # --- for code: the editor, keys taken before widgets, scrolling ------------
 
-var editorSeen: Table[string, string] = initTable[string, string]()
+var editorSeen {.threadvar.}: Table[string, string]
   ## The text each code-editor last handed back. Text arriving that differs
   ## from it means the app swapped the buffer (a submit clearing the entry,
   ## an item pulled in to edit): the undo history must not resurrect the
@@ -1770,7 +1786,7 @@ proc onCloseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
       result = true
       try:
         result = toBool(invoke(f, @[]))
-      except:
+      except CatchableError:
         result = true
       requestFrame())
   nothing()
@@ -1788,10 +1804,10 @@ proc useWindowBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): 
   nothing()
 
 proc installGui*(env: ref Environment) =
-  template fn(name: string, p: CommandProc) =
-    define(env, symbol(name), newBuiltin(name, p, true))
-  template cmd(name: string, p: CommandProc) =
-    define(env, symbol(name), newBuiltin(name, p, false))
+  template fn(name: string, p: typed) =
+    define(env, symbol(name), newBuiltin(name, onGuiThread(name, p), true))
+  template cmd(name: string, p: typed) =
+    define(env, symbol(name), newBuiltin(name, onGuiThread(name, p), false))
   # layout and values
   cmd "row", rowBuiltin
   cmd "column", columnBuiltin

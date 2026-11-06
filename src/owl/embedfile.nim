@@ -13,7 +13,7 @@ macro embedFile*(path: untyped): untyped =
   var failed = false
   try:
     content = readFile(full)
-  except:
+  except CatchableError:
     failed = true
   if failed:
     error("embedFile cannot read: " & full, path)

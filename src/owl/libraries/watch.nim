@@ -17,7 +17,7 @@
 ## Events are hints, not truth (see `owl/watch`): callers that must be right
 ## compare against the files themselves.
 
-import std/[os, syncio]
+import std/os
 import std/strutils as su
 when not defined(windows):
   import posix
@@ -50,10 +50,11 @@ proc waitForReadable(fd: int32, ms: int): bool =
 import owl/[objects, evaluator, modules]
 import owl/watch
 
-var watcher: FileWatch = nil
-var pending: seq[WatchEvent] = @[]
-var roots: seq[string] = @[]  ## the directories `watch-dir` was given, re-walked
-                              ## on every call so new subdirectories get watched
+var watcher {.threadvar.}: FileWatch
+var pending {.threadvar.}: seq[WatchEvent]
+var roots {.threadvar.}: seq[string]
+  ## the directories `watch-dir` was given, re-walked on every call so new
+  ## subdirectories get watched
 
 proc ensureWatcher(): FileWatch =
   if watcher == nil:

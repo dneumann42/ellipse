@@ -1,21 +1,27 @@
-import std/[options, syncio, strutils]
+import std/[syncio, strutils]
 import owl/[objects, errors]
 
+
+type
+  OwlFailure* = object of ValueError
+    ## Raised for every owl error; the details live in `currentError`.
+
+  ErrorReporter* = proc (msg: string) {.gcsafe.}
 
 proc defaultErrorReport*(msg: string) =
   writeLine(stderr, msg)
 
-var errorReport*: proc(msg: string) = defaultErrorReport
-var colorErrors* = false
+# The error being raised, and where reports go, belong to the thread: each
+# thread runs its own interpreter, and its failures are its own. Thread
+# variables start zeroed, so `nil` stands for the default reporter.
+var errorReport* {.threadvar.}: ErrorReporter
+  ## Where `reportError` sends a rendered error; `nil` writes to stderr.
+var colorErrors* {.threadvar.}: bool
+var currentError* {.threadvar.}: OwlError
+var lastErrorMessage* {.threadvar.}: string
 
-var currentError* = owlError(RuntimeError, "")
-var lastErrorMessage* = ""
-
-var culprit = nothing()
-var hasCulprit = false
-
-type OwlFailure* = object of ValueError
-  ## Raised for every owl error; the details live in `currentError`.
+var culprit {.threadvar.}: Object
+var hasCulprit {.threadvar.}: bool
 
 proc setError(e: sink OwlError) =
   lastErrorMessage = e.message
@@ -26,16 +32,16 @@ proc fail() {.noreturn.} =
   raise newException(OwlFailure, lastErrorMessage)
 
 proc adoptForeign*() =
-  ## Called first thing in an `except:` that goes on to report: a Nim
-  ## exception escaping a builtin (an IOError, an IndexDefect) becomes the
+  ## Called first thing in an `except` that goes on to report: a Nim
+  ## exception escaping a builtin (an IOError, a ValueError) becomes the
   ## current owl error, so its own message is reported rather than whatever
-  ## failed last.
+  ## failed last. Defects are bugs, not owl errors, and are never caught.
   let e = getCurrentException()
   if e != nil and not (e of OwlFailure):
     setError(owlError(RuntimeError, e.msg))
 
 proc rethrow*() {.noreturn.} =
-  ## Re-raise from an `except:` as an owl failure.
+  ## Re-raise from an `except` as an owl failure.
   adoptForeign()
   fail()
 
@@ -63,8 +69,16 @@ proc errAt*(at: Object, msg: string, kind: ErrorKind = RuntimeError) {.noreturn.
 proc errorText*(color: bool = false): string =
   renderError(currentError, color)
 
+proc report*(msg: string) =
+  ## Send `msg` to this thread's error reporter.
+  let r = errorReport
+  if r == nil:
+    defaultErrorReport(msg)
+  else:
+    r(msg)
+
 proc reportError*() =
-  errorReport(errorText(colorErrors))
+  report(errorText(colorErrors))
 
 proc sealError*() =
   currentError.sealed = true
@@ -92,15 +106,15 @@ proc bodyStartOf(o: Object): int =
   let bs = bodyStart(o)
   result = if bs >= 1 and bs < n: bs - 1 else: max(n - 1, 0)
 
-proc eval*(obj: Object, env: ref Environment): Object
+proc eval*(obj: Object, env: ref Environment): Object {.gcsafe.}
 
-proc numberIn*(env: ref Environment, form: Object, what: string): float64  =
+proc numberIn*(env: ref Environment, form: Object, what: string): float64 =
   let v = eval(form, env)
   if not isNumber(v) and not isBoolean(v):
     errAt(form, what & " needs numbers, got " & stringify(v))
   toNumber(v)
 
-proc numbersIn*(env: ref Environment, args: seq[Object], what: string): seq[float64]  =
+proc numbersIn*(env: ref Environment, args: seq[Object], what: string): seq[float64] =
   result = @[]
   for a in args:
     let v = eval(a, env)
@@ -283,12 +297,12 @@ proc apply(cmd: Object, call: Object, callerEnv: ref Environment, args: seq[Obje
     for f in bodyOf(cmd):
       result = eval(f, child)
       inc i
-  except:
+  except CatchableError:
     adoptForeign()
     placeError(bodyPlace(cmd, i))
     fail()
 
-proc invoke*(cmd: Object, values: seq[Object]): Object  =
+proc invoke*(cmd: Object, values: seq[Object]): Object =
   if not isCommand(cmd):
     err("cannot call " & stringify(cmd) & ", it is not a command")
   let scratch = newEnvironment()
@@ -299,20 +313,20 @@ proc invoke*(cmd: Object, values: seq[Object]): Object  =
     args.add name
   try:
     result = apply(cmd, nothing(), scratch, args, args.len)
-  except:
+  except CatchableError:
     rethrow()
 
-proc evalForms*(env: ref Environment, forms: seq[Object]): Object  =
+proc evalForms*(env: ref Environment, forms: seq[Object]): Object =
   result = nothing()
   for f in forms:
     result = eval(f, env)
 
-proc evalRange*(env: ref Environment, forms: seq[Object], a, b: int): Object  =
+proc evalRange*(env: ref Environment, forms: seq[Object], a, b: int): Object =
   result = nothing()
   for i in a ..< b:
     result = eval(forms[i], env)
 
-proc eval*(obj: Object, env: ref Environment): Object  =
+proc eval*(obj: Object, env: ref Environment): Object {.gcsafe.} =
   case objectKind(obj)
   of List:
     if itemCount(obj) == 0:
@@ -329,7 +343,7 @@ proc eval*(obj: Object, env: ref Environment): Object  =
       if not isCommand(cmd):
         errAt(headOf(obj), "the head of a call must be a command, got " & stringify(cmd))
       result = apply(cmd, obj, env, operands(obj), bodyStartOf(obj))
-    except:
+    except CatchableError:
       adoptForeign()
       leaveCall(obj, cmd)
       fail()
@@ -346,14 +360,14 @@ proc eval*(obj: Object, env: ref Environment): Object  =
       err("syntax without a scope: " & stringify(obj))
     try:
       result = eval(formOf(obj), resolveScope(env, scope))
-    except:
+    except CatchableError:
       adoptForeign()
       placeError(placeOf(obj))
       fail()
   of Pair:
     try:
       result = eval(cdrOf(obj), env)
-    except:
+    except CatchableError:
       adoptForeign()
       if hasCulprit and sameValue(cdrOf(obj), culprit):
         placeError(valuePlace(obj))
@@ -409,7 +423,7 @@ proc hoistDefinitions*(env: ref Environment, forms: seq[Object]) =
     elif isCommandDefinition(f):
       makeCommandDefinition(env, f)
 
-proc runProgram*(env: ref Environment, forms: seq[Object])  =
+proc runProgram*(env: ref Environment, forms: seq[Object]) =
   hoistDefinitions(env, forms)
   for f in forms:
     if not isAnyDefinition(f):

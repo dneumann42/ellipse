@@ -37,26 +37,26 @@ proc addForms*(m: Module, forms: seq[Object]): Module =
 proc sourceName*(m: Module): string =
   if m.path.len > 0: m.path else: "<" & m.name & ">"
 
-proc readSource*(source: string, name: string, internal: bool = false): seq[Object]  =
+proc readSource*(source: string, name: string, internal: bool = false): seq[Object] =
   let parsed = readForms(source, name, internal)
   if not parsed.isOk:
     raiseError(parsed.error(owlError(ReadError, "")))
   result = parsed.get(@[])
 
-proc addSource*(m: Module, source: string): Module  =
+proc addSource*(m: Module, source: string): Module =
   result = addForms(m, readSource(source, sourceName(m)))
   result.source.add source
 
-proc addLibrarySource*(m: Module, source: string): Module  =
+proc addLibrarySource*(m: Module, source: string): Module =
   result = addForms(m, readSource(source, sourceName(m), true))
   result.source.add source
 
-proc addFile*(m: Module, path: string): Module  =
+proc addFile*(m: Module, path: string): Module =
   var source = ""
   var failed = false
   try:
     source = readFile(path)
-  except:
+  except CatchableError:
     failed = true
   if failed:
     err("module " & m.name & ": cannot open file: " & path)
@@ -95,7 +95,7 @@ proc moduleFile*(lib: Library, name: string): string =
     if fileExists(candidate):
       return candidate
 
-proc add*(lib: Library, m: Module)  =
+proc add*(lib: Library, m: Module) =
   if lib.modules.hasKey(m.name):
     err("duplicate module: " & m.name)
   lib.modules[m.name] = m
@@ -163,7 +163,7 @@ proc isExportAll*(f: Object): bool =
   isExportForm(f) and bodyStart(f) < 0 and itemCount(f) == 2 and
     toSymbol(itemAt(f, 1)) == "all"
 
-proc registerExports(m: Module)  =
+proc registerExports(m: Module) =
   for f in m.forms:
     if isExportAll(f):
       setExportAll(m.exports, true)
@@ -174,7 +174,7 @@ proc registerExports(m: Module)  =
         if isSymbol(cdr(e)):
           exportName(m.exports, car(e), cdr(e))
 
-proc runExportForm(m: Module, f: Object)  =
+proc runExportForm(m: Module, f: Object) =
   for e in exportEntries(f):
     let publicName = car(e)
     if isSymbol(cdr(e)):
@@ -185,7 +185,7 @@ proc runExportForm(m: Module, f: Object)  =
       define(m.env, publicName, eval(cdr(e), m.env))
       exportName(m.exports, publicName, publicName)
 
-proc runModuleForms(m: Module, lib: Library)  =
+proc runModuleForms(m: Module, lib: Library) =
   let env = m.env
   hoistDefinitions(env, m.forms)
   useFormsIn(env, m.forms, lib)
@@ -202,7 +202,7 @@ proc runModuleForms(m: Module, lib: Library)  =
       continue
     discard eval(f, env)
 
-proc runHook*(m: Module, hook: string, args: seq[Object])  =
+proc runHook*(m: Module, hook: string, args: seq[Object]) =
   let name = symbol(hook)
   if hasOwn(m.env, name) and isCommand(lookup(m.env, name).get(nothing())):
     var call = @[name]
@@ -210,7 +210,7 @@ proc runHook*(m: Module, hook: string, args: seq[Object])  =
       call.add a
     discard eval(list(call), m.env)
 
-proc evaluateModule(lib: Library, m: Module)  =
+proc evaluateModule(lib: Library, m: Module) =
   if m.evaluated or m.evaluating:
     return
   m.evaluating = true
@@ -223,7 +223,7 @@ proc evaluateModule(lib: Library, m: Module)  =
     m.evaluating = false
     m.evaluated = true
     runHook(m, "on-load", @[])
-  except:
+  except CatchableError:
     # Left marked as evaluating, a failed module would be skipped silently
     # by every later evaluate; clear it so a retry reports again.
     m.evaluating = false
@@ -231,7 +231,7 @@ proc evaluateModule(lib: Library, m: Module)  =
     sealError()
     rethrow()
 
-proc unload*(lib: Library, name: string)  =
+proc unload*(lib: Library, name: string) =
   let m = findModule(lib, name)
   if m == nil:
     err("no module named " & name)
@@ -239,7 +239,7 @@ proc unload*(lib: Library, name: string)  =
     runHook(m, "on-unload", @[])
     lib.modules.del(name)
 
-proc loadDeps(lib: Library, m: Module)
+proc loadDeps(lib: Library, m: Module) {.gcsafe.}
 
 proc ensureLoaded(lib: Library, name: string, user: string,
     useForm: Object = nothing())  =
@@ -257,7 +257,7 @@ proc ensureLoaded(lib: Library, name: string, user: string,
   lib.add m
   loadDeps(lib, m)
 
-proc loadDeps(lib: Library, m: Module)  =
+proc loadDeps(lib: Library, m: Module) {.gcsafe.} =
   m.deps = @[]
   for f in m.forms:
     if isUseForm(f):
@@ -266,14 +266,14 @@ proc loadDeps(lib: Library, m: Module)  =
         if name notin m.deps:
           m.deps.add name
 
-proc collectDeps(lib: Library)  =
+proc collectDeps(lib: Library) =
   var known: seq[Module] = @[]
   for m in lib.modules.values:
     known.add m
   for m in known:
     loadDeps(lib, m)
 
-proc evaluate*(lib: Library)  =
+proc evaluate*(lib: Library) =
   collectDeps(lib)
   var all: seq[Module] = @[]
   for m in lib.modules.values:
@@ -281,7 +281,7 @@ proc evaluate*(lib: Library)  =
   for m in all:
     evaluateModule(lib, m)
 
-proc require*(lib: Library, name: string, useForm: Object = nothing()): Module  =
+proc require*(lib: Library, name: string, useForm: Object = nothing()): Module =
   ensureLoaded(lib, name, "", useForm)
   let found = findModule(lib, name)
   if found == nil:
@@ -290,7 +290,7 @@ proc require*(lib: Library, name: string, useForm: Object = nothing()): Module  
   evaluateModule(lib, found)
   result = found
 
-proc runProgram*(lib: Library, forms: seq[Object]): ref Environment  =
+proc runProgram*(lib: Library, forms: seq[Object]): ref Environment =
   evaluate(lib)
   for f in forms:
     if isUseForm(f):
@@ -308,7 +308,7 @@ proc runProgram*(lib: Library, forms: seq[Object]): ref Environment  =
     rest.add f
   try:
     discard evalForms(result, rest)
-  except:
+  except CatchableError:
     adoptForeign()
     sealError()
     rethrow()

@@ -1,4 +1,13 @@
-import std/[tables, hashes, options, strutils]
+## Owl's values and scopes.
+##
+## Threading model: an interpreter -- its `Library`, its environments and the
+## objects they hold -- belongs to the thread that made it. Objects are
+## reference-counted without atomics, so a value is never shared between
+## threads; it is copied across with `isolateValue` and unpacked with
+## `extract`. Every thread may run its own interpreter: all interpreter state
+## that is not reached through an environment is thread-local.
+
+import std/[tables, hashes, options, strutils, isolation]
 import owl/errors
 
 type
@@ -104,7 +113,9 @@ type
     blockSym*: Object
     emptyBlock*: bool
 
-  CommandProc* = proc (env: ref Environment, args: seq[Object], bodyStart: int): Object
+  CommandProc* = proc (env: ref Environment, args: seq[Object], bodyStart: int): Object {.gcsafe.}
+    ## A builtin. `gcsafe`, so a builtin can neither read nor write state
+    ## shared between threads.
 
 func nothing*(): Object =
   Object(kind: Nothing)
@@ -1030,3 +1041,73 @@ proc lookupExport*(x: ref Exports, name: Object): Option[Object] =
       result = some(x.env.bindings.entries[own].val)
     else:
       result = none[Object]()
+
+
+# --- crossing threads ------------------------------------------------------
+
+type CopyMemo = object
+  sources: Table[pointer, ref SourceFile]
+
+proc copySource(m: var CopyMemo, src: ref SourceFile): ref SourceFile =
+  ## One fresh copy per source file, however many values point into it.
+  if src == nil:
+    return nil
+  let key = cast[pointer](src)
+  result = m.sources.getOrDefault(key, nil)
+  if result == nil:
+    result = newSource(src.name, src.text, src.internal)
+    m.sources[key] = result
+
+proc copyData(m: var CopyMemo, o: Object): Object =
+  case o.kind
+  of Nothing, Number, String, Symbol, Boolean:
+    result = o
+  of List:
+    var xs = newSeqOfCap[Object](o.items.xs.len)
+    for x in o.items.xs:
+      xs.add copyData(m, x)
+    result = listAt(xs, copySource(m, o.items.src), o.items.loc, o.items.locs,
+      o.bodyStart)
+  of Pair:
+    result = pairAt(copyData(m, o.pr.a), copyData(m, o.pr.b),
+      copySource(m, o.pr.src), o.pr.keyLoc, o.pr.valLoc)
+  of Record:
+    var fields = newSeqOfCap[Object](o.rec.xs.len)
+    for f in o.rec.xs:
+      fields.add copyData(m, f)
+    result = record(fields)
+  of Command, Syntax, Scope:
+    raise newException(ValueError,
+      "a " & kindName(o) & " cannot leave its thread: it holds a scope")
+
+func isData*(o: Object): bool =
+  ## Whether `o` can be sent to another thread: atoms, and lists, pairs and
+  ## records of them. Commands, syntax and scopes hold their environment.
+  case o.kind
+  of Nothing, Number, String, Symbol, Boolean:
+    result = true
+  of List:
+    result = true
+    for x in o.items.xs:
+      if not isData(x):
+        return false
+  of Pair:
+    result = isData(o.pr.a) and isData(o.pr.b)
+  of Record:
+    result = true
+    for f in o.rec.xs:
+      if not isData(f):
+        return false
+  of Command, Syntax, Scope:
+    result = false
+
+proc isolateValue*(o: Object): Isolated[Object] =
+  ## A deep copy of `o` that no other reference reaches, ready to be moved
+  ## to another thread (through a `Channel`, or as a thread's argument) and
+  ## unpacked there with `extract`. Source places come along, so errors still
+  ## point at file, line and column. Raises `ValueError` for anything that is
+  ## not `isData`.
+  var memo = CopyMemo(sources: initTable[pointer, ref SourceFile]())
+  # Sound: every ref in the copy was allocated just now and is reached only
+  # through it.
+  result = unsafeIsolate(copyData(memo, o))

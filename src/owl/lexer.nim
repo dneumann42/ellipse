@@ -33,7 +33,7 @@ func numberDot(text: string, at, stop: int): bool =
   ## the start of a `.key` access.
   text[at - 1] in Digits and (at + 1 >= stop or text[at + 1] in Digits + Delimiters)
 
-proc fail(t: var Tokenizer, msg: string, at: int)  =
+proc fail(t: var Tokenizer, msg: string, at: int) =
   if t.err.len == 0:
     t.err = msg
     t.errAt = at
@@ -42,7 +42,7 @@ proc fail(t: var Tokenizer, msg: string, at: int)  =
 func tok(kind: TokenKind, at: int, len: int = 1): Token =
   Token(kind: kind, text: "", at: int32(at), len: int32(len))
 
-proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token]  =
+proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token] =
   result = newSeqOfCap[Token](min(stop - start, 16))
   var i = start
   while i < stop:
@@ -90,7 +90,7 @@ proc tokenizeRange(t: var Tokenizer, text: string, start, stop: int): seq[Token]
       result.add Token(kind: Word, text: text[i ..< j], at: int32(i), len: int32(j - i))
       i = j
 
-proc tokenize*(t: var Tokenizer, text: string): seq[Token]  =
+proc tokenize*(t: var Tokenizer, text: string): seq[Token] =
   tokenizeRange(t, text, 0, text.len)
 
 func parenDelta(toks: seq[Token]): int =
@@ -101,7 +101,7 @@ func parenDelta(toks: seq[Token]): int =
     of Close: dec result
     else: discard
 
-proc scanLines*(t: var Tokenizer, text: string): seq[Line]  =
+proc scanLines*(t: var Tokenizer, text: string): seq[Line] =
   result = newSeqOfCap[Line](text.len div 24 + 1)
   var num = 0
   var start = 0

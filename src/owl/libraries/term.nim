@@ -12,13 +12,13 @@ proc stderrIsTerminal*(): bool =
   owl_term_stderr_is_tty() != 0
 proc owl_term_raw(on: int32): int32 {.importc: "owl_term_raw".}
 proc owl_term_read_byte(timeoutMs: int32): int32 {.importc: "owl_term_read_byte".}
-proc owl_term_size(rows, cols: var int32) {.importc: "owl_term_size".}
-proc owl_term_write(s: cstring; len: int32) {.importc: "owl_term_write".}
+proc owl_term_size(rows, cols: var int32) {.importc: "owl_term_size", gcsafe.}
+proc owl_term_write(s: cstring; len: int32) {.importc: "owl_term_write", gcsafe.}
 
-proc isTerminalBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc isTerminalBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   boolean(owl_term_is_tty() != 0)
 
-proc rawModeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc rawModeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("raw-mode needs true or false")
   let on = toBool(eval(args[0], env))
@@ -27,7 +27,7 @@ proc rawModeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
     err("raw-mode: the terminal refused the change")
   nothing()
 
-proc readByteBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc readByteBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var timeout = -1'i32
   if args.len > 0:
     let t = eval(args[0], env)
@@ -40,14 +40,14 @@ proc readByteBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): O
   else:
     result = number(float64(b))
 
-proc terminalSizeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc terminalSizeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var rows = 0'i32
   var cols = 0'i32
   owl_term_size(rows, cols)
   record(@[pair(symbol("rows"), number(float64(rows))),
     pair(symbol("cols"), number(float64(cols)))])
 
-proc writeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc writeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var text = ""
   for a in args:
     text.add stringify(eval(a, env))
