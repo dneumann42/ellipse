@@ -623,29 +623,20 @@ func stringify*(o: Object): string =
 
 
 func quoteString(s: string): string =
-  var parts: seq[string] = @[]
-  var cur = ""
-  var hasRun = false
+  result = "\""
   for c in s:
-    if c == '"' or (c < ' ' and c != '\t'):
-      if hasRun:
-        parts.add "\"" & cur & "\""
-        cur = ""
-        hasRun = false
-      parts.add "(char " & $ord(c) & ")"
-    else:
-      cur.add c
-      hasRun = true
-  if hasRun or parts.len == 0:
-    parts.add "\"" & cur & "\""
-  if parts.len == 1:
-    result = parts[0]
-  else:
-    result = "(concat"
-    for p in parts:
-      result.add " "
-      result.add p
-    result.add ")"
+    case c
+    of '"': result.add "\\\""
+    of '\\': result.add "\\\\"
+    of '\n': result.add "\\n"
+    of '\t': result.add "\\t"
+    of '\r': result.add "\\r"
+    of '\0': result.add "\\0"
+    of '\e': result.add "\\e"
+    elif c < ' ' or c == '\x7f':
+      result.add "\\u{" & toHex(ord(c), 2).toLowerAscii & "}"
+    else: result.add c
+  result.add '"'
 
 func isCodeList(o: Object): bool =
   o.kind == List and o.items.xs.len > 0 and o.items.xs[0].kind == Symbol

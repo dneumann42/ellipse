@@ -229,6 +229,12 @@ proc condBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
     if toBool(eval(car(form), env)):
       return eval(cdr(form), blockScope(env))
 
+proc interpolateBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
+  var joined = ""
+  for a in args:
+    joined.add stringify(eval(a, env))
+  str(joined)
+
 proc concatBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len == 0:
     err("concat needs at least one argument")
@@ -607,6 +613,7 @@ proc installBase*(env: ref Environment) =
   define(env, symbol("true"), boolean(true))
   define(env, symbol("false"), boolean(false))
   define(env, symbol("concat"), newBuiltin("concat", concatBuiltin, true))
+  define(env, symbol("interpolate"), newBuiltin("interpolate", interpolateBuiltin, true))
   define(env, symbol("error"), newBuiltin("error", errorBuiltin, false))
   define(env, symbol("error-at"), newBuiltin("error-at", errorAtBuiltin, false))
   define(env, symbol("error-report"), newBuiltin("error-report", errorReportBuiltin, true))

@@ -66,6 +66,16 @@ proc evalText(text: string): Object =
     raiseAssert("printed code evaluates: " & lastError() & "\n" & text)
 
 suite "owl/evaluator":
+  test "string interpolation":
+    check evalText("p = {} (name = \"Joe\") (age = 45)\n\"\\(p.name) is \\(+ p.age 1)\"") == str("Joe is 46"),
+      "values and calls are spliced in"
+    check evalText("xs = [] 1 2\n\"\\(xs) \\(true) \\(nothing)\"") == str("[] 1 2 true ()"),
+      "any value reads as to-string gives it"
+    check evalText("fun f:\n    \"called\"\n\"<\\((f))>\"") == str("<called>"), "parens call a fun"
+    check evalText("n = 2\n\"\\(n)\\(n)\"") == str("22"), "pieces may touch"
+    check evalText("\"\\\\(not) \\\"q\\\"\"") == str("\\(not) \"q\""), "escapes still work beside it"
+    check evalText(toCode(str("a \\(b)"), 80)) == str("a \\(b)"), "to-code keeps a literal \\( literal"
+
   test "factorial doc example":
     let e1 = runOk(docExample, "")
     check toNumber(value(e1, "res")) == 120.0, "factorial 5 = 120"
@@ -971,9 +981,10 @@ mixed = [] 1 -2.5 true false nothing "é" ([] ([] 1) ([]))
           for line in text.split("\n"):
             check line.len <= width or not line.contains(" = ") or line.startsWith(" "),
               "lines stay within the width where owl can break: " & line
-    check toCode(value(printed, "quoted"), 80) ==
-      "(concat \"say \" (char 34) \"hi\" (char 34) (char 10) \"tab\tend\")",
-      "quotes and newlines become char codes: " & toCode(value(printed, "quoted"), 80)
+    check toCode(value(printed, "quoted"), 80) == "\"say \\\"hi\\\"\\ntab\\tend\"",
+      "quotes and control characters print as escapes: " & toCode(value(printed, "quoted"), 80)
+    for raw in ["back\\slash", "\"", "\x01\x7f", "caf\u00e9", "\e[0m\r\0"]:
+      check evalText(toCode(str(raw), 80)) == str(raw), "escapes read back: " & toCode(str(raw), 80)
     check toCode(value(printed, "tasks"), 50) == """[]:
     {} (title = "Hello") (descr = "World!")
     {} (title = "Bye") (descr = "")""", "a list that does not fit breaks into a block:\n" & toCode(value(printed, "tasks"), 50)

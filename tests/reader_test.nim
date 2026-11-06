@@ -99,6 +99,41 @@ suite "owl/reader":
     check kinds("a \"b\" c") == @[Word, Str, Word], "quotes split surrounding words"
     check kinds("\"a\"")[0] == Str and toks("\"a\"")[0].text == "a", "string keeps its contents"
 
+  test "string escapes":
+    check toks("\"a\\\"b\"")[0].text == "a\"b", "an escaped quote stays in the string"
+    check toks("\"a\\\\b\"")[0].text == "a\\b", "a doubled backslash is one backslash"
+    check toks("\"\\n\\t\\r\\0\\e\"")[0].text == "\n\t\r\0\e", "control escapes"
+    check toks("\"\\u{e9}\\u{1F600}\"")[0].text == "\u00e9\u{1F600}", "unicode escapes encode as UTF-8"
+    check kinds("\"a\\\" b\" c") == @[Str, Word], "an escaped quote does not end the string"
+    check kinds("\"\\\\\" b") == @[Str, Word], "a string may end in an escaped backslash"
+    check kinds("\"a ; b\"") == @[Str], "a semicolon in a string is not a comment"
+    check toks("x \"a\\\"b\"")[1].len == 6, "the token spans the source, escapes included"
+    errIs("\"\\q\"", "unknown escape \\q")
+    errIs("\"\\u{}\"", "hex digits in braces")
+    errIs("\"\\u41\"", "hex code in braces")
+    errIs("\"\\u{110000}\"", "is not a unicode character")
+    errIs("\"\\u{d800}\"", "is not a unicode character")
+    errIs("\"abc\\\"", "unterminated string")
+    errIs("\"abc\\", "unterminated string")
+
+  test "string interpolation":
+    check kinds("\"a \\(x) b\"") == @[Interp], "an interpolated string is one token"
+    check kinds("\"a \\\\(x) b\"") == @[Str], "an escaped backslash before ( is plain text"
+    check toks("\"\\\\(x)\"")[0].text == "\\(x)", "the text keeps the backslash"
+    proc same(interpolated, plain: string): bool = forms(interpolated) == forms(plain)
+    check same("echo \"hi \\(name)!\"", "echo (interpolate \"hi \" name \"!\")"), "a lone name is its value"
+    check same("x = \"\\(+ a 1)\"", "x = interpolate (+ a 1)"), "several items are a call"
+    check same("x = \"\\(p.name)\"", "x = interpolate p.name"), "a dotted access is one value"
+    check same("x = \"\\((f))\"", "x = interpolate (f)"), "parens call a fun"
+    check same("x = \"a\\(concat \"b\\(c)\" \")\")d\"",
+      "x = interpolate \"a\" (concat (interpolate \"b\" c) \")\") \"d\""),
+      "strings nest inside, with their own parens and interpolation"
+    check kinds("\"\\(x)\" y ; c") == @[Interp, Word], "the line goes on after the string"
+    errIs("\"\\()\"", "needs an expression inside")
+    errIs("\"\\(x\"", "unterminated \\(")
+    errIs("\"\\(f \"a)\"", "unterminated")
+    errIs("\"\\(a = b = c)\"", "repeated")
+
   test "scanLines":
     let ls = scan("a\n\n; c\n  b")
     check ls.len == 2, "blank and comment lines skipped"

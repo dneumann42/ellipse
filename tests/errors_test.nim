@@ -41,6 +41,15 @@ command twice name body:
 """
 
 suite "owl/errors":
+  test "an error inside an interpolation points into the string":
+    var text = ""
+    try:
+      let env = newTestEnv()
+      runProgram(env, readSource("x = 1\necho \"value: \\(nope)\"\n", "t.owl"))
+    except:
+      text = lastError()
+    check "unbound symbol: nope" in text and "t.owl:2:16" in text, "the place: " & text
+
   test "reader errors place the window":
     check fails("x = 1\ny = \"open\n"), "an unterminated string fails"
     check currentError.kind == ReadError, "it is a read error"

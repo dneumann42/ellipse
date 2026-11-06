@@ -11,6 +11,14 @@ fun ends-with s suffix:
 fun find-char s c:
     find s c
 
+fun find-last s sub:
+    at = find s sub
+    last = nothing
+    while (not (= at nothing)):
+        set last at
+        set at (find s sub (+ at 1))
+    last
+
 fun take s count:
     slice s 0 count
 
@@ -21,5 +29,6 @@ export:
     starts-with = starts-with
     ends-with = ends-with
     find-char = find-char
+    find-last = find-last
     take = take
     drop = drop

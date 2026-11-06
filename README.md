@@ -17,9 +17,13 @@ tree syntex, similar to s-expressions but using indentation instead of parenthes
 as in its designed for building gui tools and system scripts.
 
 ```owl
+use base
+use io
+use math
+
 fun hello-world msg:
   echo "\(msg) world!"
-hell-world "test"
+hello-world "test"
 
 joe = {}:
   name = "Joe"
@@ -37,3 +41,12 @@ fun word next what (optional = false):
         nothing
         arg.name
 ```
+
+Strings are one line between double quotes. A backslash escapes: `\"` and
+`\\` for a quote and a backslash, `\n`, `\t`, `\r`, `\0` and `\e` for control
+characters, and `\u{e9}` for any Unicode character by its hex code. Any other
+escape is an error. `\(...)` interpolates: `"\(msg) world!"`, `"\(p.name) is
+\(+ p.age 1)"`. One item inside is a value, several are a call, and
+`"\((f))"` calls a fun; any value reads as `to-string` would give it. It
+reads as `(interpolate "..." value ...)`. `to-code` prints strings with the
+same escapes, so they read back unchanged.

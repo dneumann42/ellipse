@@ -185,6 +185,30 @@ proc parseItems(p: var Parser, toks: seq[Token], i: var int): seq[Item] =
     of Str:
       result.add Item(kind: Object, value: str(toks[i].text), loc: here)
       inc i
+    of Interp:
+      var parts = @[symbol("interpolate")]
+      var locs = @[here]
+      for piece in toks[i].pieces:
+        let at = Loc(at: piece.at, len: piece.len)
+        if not piece.isExpr:
+          parts.add str(piece.text)
+          locs.add at
+          continue
+        var k = 0
+        var inner = p.parseItems(piece.toks, k)
+        if p.err.len > 0:
+          return
+        if k < piece.toks.len:
+          p.fail("unexpected ')' in \\( )", Loc(at: piece.toks[k].at, len: piece.toks[k].len))
+          return
+        var whole = at
+        let value = p.assemble(inner, whole)
+        if p.err.len > 0:
+          return
+        parts.add value
+        locs.add itemsLoc(inner)
+      result.add Item(kind: Object, value: listAt(parts, p.src, here, locs), loc: here)
+      inc i
     of Eq:
       result.add Item(kind: Eq, loc: here)
       inc i
