@@ -178,6 +178,7 @@ proc tryBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object
   try:
     result = evalRange(env, args, 0, attempt)
   except:
+    adoptForeign()
     failed = true
   if failed:
     caught = currentError
@@ -320,6 +321,8 @@ proc pairBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   pair(key, eval(args[1], env))
 
 proc ordered(env: ref Environment, args: seq[Object], ascending: bool): Object  =
+  if args.len < 2:
+    err("comparisons need at least two arguments")
   var ok = true
   var previous = 0.0
   for i in 0 ..< args.len:
@@ -327,8 +330,6 @@ proc ordered(env: ref Environment, args: seq[Object], ascending: bool): Object  
     if i > 0 and ok:
       ok = if ascending: previous < n else: previous > n
     previous = n
-  if args.len < 2:
-    err("comparisons need at least two arguments")
   boolean(ok)
 
 proc ltBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
@@ -660,13 +661,7 @@ proc installBase*(env: ref Environment) =
 
 proc installBaseOwl*(env: ref Environment) =
   const source: string = embedFile("base.owl")
-  let parsed = readForms(source, "<base>", true)
-  if parsed.isOk:
-    for f in parsed.get(@[]):
-      if isCommandDefinition(f):
-        makeCommandDefinition(env, f)
-      elif isDefinition(f, "fun"):
-        makeDefinition(env, f, true)
+  hoistDefinitions(env, readSource(source, "<base>", true))
 
 proc baseModule*(): Module =
   result = newModule("base")

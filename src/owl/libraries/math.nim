@@ -1,3 +1,4 @@
+import std/math
 import owl/[objects, evaluator, modules]
 
 proc nums(env: ref Environment, args: seq[Object]): seq[float64]  =
@@ -38,11 +39,7 @@ proc floorBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Obje
   let ns = numbersIn(env, args, "floor")
   if ns.len != 1:
     err("floor needs one number")
-  let x = ns[0]
-  var f = float64(int64(x))
-  if f > x:
-    f -= 1.0
-  number(f)
+  number(floor(ns[0]))
 
 proc installMath*(env: ref Environment) =
   define(env, symbol("+"), newBuiltin("+", plusBuiltin, true))

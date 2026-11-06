@@ -29,11 +29,9 @@ func indentOf*(text: string): int =
     inc result
 
 func numberDot(text: string, at, stop: int): bool =
-  if text[at - 1] notin Digits:
-    return false
-  if at + 1 >= stop:
-    return true
-  return text[at + 1] in Digits or text[at + 1] in Delimiters
+  ## Whether the '.' at `at` is a decimal point (`1.5`, `1.`) rather than
+  ## the start of a `.key` access.
+  text[at - 1] in Digits and (at + 1 >= stop or text[at + 1] in Digits + Delimiters)
 
 proc fail(t: var Tokenizer, msg: string, at: int)  =
   if t.err.len == 0:

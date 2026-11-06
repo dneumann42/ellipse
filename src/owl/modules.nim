@@ -19,9 +19,6 @@ type
     modules*: Table[string, Module]
     paths*: seq[string]
 
-proc fail(msg: string)  =
-  err(msg)
-
 proc newModule*(name: string): Module =
   let env = newEnvironment()
   result = Module(name: name, forms: @[], env: env,
@@ -62,7 +59,7 @@ proc addFile*(m: Module, path: string): Module  =
   except:
     failed = true
   if failed:
-    fail("module " & m.name & ": cannot open file: " & path)
+    err("module " & m.name & ": cannot open file: " & path)
   m.path = path
   result = addSource(m, source)
 
@@ -89,10 +86,7 @@ proc removePath*(lib: Library, dir: string) =
   lib.paths = kept
 
 proc findModule*(lib: Library, name: string): Module =
-  result = nil
-  for m in lib.modules.values:
-    if m.name == name:
-      return m
+  lib.modules.getOrDefault(name, nil)
 
 proc moduleFile*(lib: Library, name: string): string =
   result = ""
@@ -103,7 +97,7 @@ proc moduleFile*(lib: Library, name: string): string =
 
 proc add*(lib: Library, m: Module)  =
   if lib.modules.hasKey(m.name):
-    fail("duplicate module: " & m.name)
+    err("duplicate module: " & m.name)
   lib.modules[m.name] = m
 
 proc hasModule*(lib: Library, name: string): bool =
@@ -161,19 +155,9 @@ proc useFormsIn*(env: ref Environment, forms: seq[Object], lib: Library) =
   for f in forms:
     if isUseForm(f):
       for name in useNames(f):
-        for dep in lib.modules.values:
-          if dep.name == name:
-            useModule(env, dep)
-
-proc hoistDefinitions*(env: ref Environment, forms: seq[Object]) =
-  ## Define every `fun`/`command` in `forms` before anything runs, so a body
-  ## may call a definition that comes later in the file.
-  for f in forms:
-    if evaluator.isCommandDefinition(f):
-      evaluator.makeCommandDefinition(env, f)
-  for f in forms:
-    if evaluator.isDefinition(f, "fun"):
-      evaluator.makeDefinition(env, f, true)
+        let dep = findModule(lib, name)
+        if dep != nil:
+          useModule(env, dep)
 
 proc isExportAll*(f: Object): bool =
   isExportForm(f) and bodyStart(f) < 0 and itemCount(f) == 2 and
@@ -230,23 +214,27 @@ proc evaluateModule(lib: Library, m: Module)  =
   if m.evaluated or m.evaluating:
     return
   m.evaluating = true
-  for d in m.deps:
-    for dep in lib.modules.values:
-      if dep.name == d:
-        evaluateModule(lib, dep)
   try:
+    for d in m.deps:
+      let dep = findModule(lib, d)
+      if dep != nil:
+        evaluateModule(lib, dep)
     runModuleForms(m, lib)
     m.evaluating = false
     m.evaluated = true
     runHook(m, "on-load", @[])
   except:
+    # Left marked as evaluating, a failed module would be skipped silently
+    # by every later evaluate; clear it so a retry reports again.
+    m.evaluating = false
+    adoptForeign()
     sealError()
-    raise newException(ValueError, lastErrorMessage)
+    rethrow()
 
 proc unload*(lib: Library, name: string)  =
   let m = findModule(lib, name)
   if m == nil:
-    fail("no module named " & name)
+    err("no module named " & name)
   else:
     runHook(m, "on-unload", @[])
     lib.modules.del(name)
@@ -264,7 +252,7 @@ proc ensureLoaded(lib: Library, name: string, user: string,
       raiseError(CompileError, "module " & user & " uses unknown module " & name, at)
     if at.isKnown:
       raiseError(CompileError, "unknown module " & name, at)
-    fail("unknown module " & name)
+    err("unknown module " & name)
   let m = newModule(name).addFile(path)
   lib.add m
   loadDeps(lib, m)
@@ -297,12 +285,10 @@ proc require*(lib: Library, name: string, useForm: Object = nothing()): Module  
   ensureLoaded(lib, name, "", useForm)
   let found = findModule(lib, name)
   if found == nil:
-    fail("unknown module " & name)
-    result = newModule(name)
-  else:
-    loadDeps(lib, found)
-    evaluateModule(lib, found)
-    result = found
+    err("unknown module " & name)
+  loadDeps(lib, found)
+  evaluateModule(lib, found)
+  result = found
 
 proc runProgram*(lib: Library, forms: seq[Object]): ref Environment  =
   evaluate(lib)
@@ -323,5 +309,6 @@ proc runProgram*(lib: Library, forms: seq[Object]): ref Environment  =
   try:
     discard evalForms(result, rest)
   except:
+    adoptForeign()
     sealError()
-    raise newException(ValueError, lastErrorMessage)
+    rethrow()

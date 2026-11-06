@@ -123,6 +123,8 @@ suite "owl/reader":
     check not isNum("5x"), "trailing junk"
     check not isNum("1.2.3"), "two dots"
     check not isNum("1e5"), "no exponents"
+    check numVal("0.3") == 0.3 and numVal("0.7") == 0.7 and numVal("-1.1") == -1.1,
+      "decimals read as the nearest double, not a digit-by-digit sum"
     check not isNum("0x10"), "no hex"
 
   test "atom":

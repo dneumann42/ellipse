@@ -398,10 +398,13 @@ func `==`*(a, b: Object): bool =
   of Nothing:
     result = true
   of Command:
+    # A command is its definition: the same box, or the same builtin proc
+    # under the same name. Comparing name and scope alone made every two
+    # lambdas made in one scope equal.
     let x = a.cmd
     let y = b.cmd
-    result = x.name == y.name and x.isFun == y.isFun and x.dynamic == y.dynamic and
-      x.env == y.env and (x.call == y.call or (x.call != nil and y.call != nil))
+    result = x == y or (x.call != nil and x.call == y.call and x.name == y.name and
+      x.isFun == y.isFun)
   of Syntax:
     result = a.scope == b.scope and a.form.form == b.form.form
   of Scope:

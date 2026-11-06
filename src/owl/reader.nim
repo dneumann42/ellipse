@@ -1,4 +1,5 @@
 import owl/[resultshim, lexer, objects, errors]
+from std/parseutils import parseFloat
 export resultshim
 
 type
@@ -33,31 +34,35 @@ func itemsLoc(items: seq[Item]): Loc =
     result = span(items[0].loc, items[^1].loc)
 
 func tryNumber*(text: string): (bool, float64) =
+  ## `[+-]digits[.digits]` with at least one digit. The shape is checked
+  ## here; the value comes from `parseFloat`, which rounds correctly (summing
+  ## digit by digit read `0.3` as 0.30000000000000004).
   var i = 0
-  var sign = 1.0
   if i < text.len and text[i] in {'+', '-'}:
-    if text[i] == '-':
-      sign = -1.0
     inc i
-  var value = 0.0
   var digits = 0
   while i < text.len and text[i] in {'0'..'9'}:
-    value = value * 10.0 + float64(ord(text[i]) - ord('0'))
     inc i
     inc digits
-  var frac = 0.1
-  var fracDigits = 0
   if i < text.len and text[i] == '.':
     inc i
     while i < text.len and text[i] in {'0'..'9'}:
-      value += frac * float64(ord(text[i]) - ord('0'))
-      frac *= 0.1
       inc i
-      inc fracDigits
-  if i != text.len or digits + fracDigits == 0:
-    result = (false, 0.0)
-  else:
-    result = (true, sign * value)
+      inc digits
+  if i != text.len or digits == 0:
+    return (false, 0.0)
+  var n = 0.0
+  # parseFloat wants a digit on both sides of the point: "1." and ".5" are
+  # padded, the sign is kept.
+  var body = text
+  if body[^1] == '.':
+    body.add '0'
+  let signLen = if body[0] in {'+', '-'}: 1 else: 0
+  if body[signLen] == '.':
+    body.insert("0", signLen)
+  if parseFloat(body, n) != body.len:
+    return (false, 0.0)
+  result = (true, n)
 
 func atom*(text: string): objects.Object =
   if text.len == 0 or text[0] notin {'0'..'9', '+', '-'}:
@@ -278,6 +283,5 @@ proc parseOwl*(source: string, name: string = "<input>"): Result[seq[objects.Obj
     result = ok[seq[objects.Object], string](r.get(@[]))
   else:
     let e = r.error(owlError(ReadError, ""))
-    let (line, col) = lineCol(source, int(e.place.loc.at))
-    discard col
+    let (line, _) = lineCol(source, int(e.place.loc.at))
     result = err[seq[objects.Object], string]("line " & $line & ": " & e.message)

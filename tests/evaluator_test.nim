@@ -18,6 +18,9 @@ proc failBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   failCalled = true
   nothing()
 
+proc ioFailBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
+  raise newException(IOError, "disk gone")
+
 proc runSrc(src, extra: string): ref Environment =
   let r = parseOwl(src)
   if not r.isOk:
@@ -1047,3 +1050,56 @@ none = forms-of 1
     check toStr(value(blockEnv, "named")) == "de", "a block parameter can be passed by name"
     check toNumber(value(blockEnv, "count")) == 2.0, "a command gets the block's forms"
     check toNumber(value(blockEnv, "none")) == 0.0 or value(blockEnv, "none") == nothing(), "no block, no forms"
+
+  test "named arguments leave positional ones the open parameters":
+    let e = runOk("""
+fun add3 a b (c = 1):
+  [] a b c
+before = add3 (a = 10) 2
+after = add3 2 (a = 10)
+command wrap-all xs+ (&body = 5):
+  length xs
+n = wrap-all 1 2 3
+""", "")
+    check toCode(value(e, "before")) == "[] 10 2 1", "a named first: " & toCode(value(e, "before"))
+    check toCode(value(e, "after")) == "[] 10 2 1", "a named last: " & toCode(value(e, "after"))
+    check toNumber(value(e, "n")) == 3.0, "a rest parameter beside a defaulted block takes the arguments"
+
+  test "a missing argument is an error, not an outer binding":
+    clearCaptured()
+    var failed = false
+    try:
+      discard runSrc("x = 99\nfun f x:\n  x\ny = (f)\n", "")
+    except:
+      failed = true
+    check failed, "calling f without x fails"
+    check find(lastError(), "missing argument x for f") >= 0, "got: " & lastError()
+
+  test "commands are equal only to themselves":
+    let e = runOk("""
+a = lambda x:
+  1
+b = lambda x:
+  2
+same = = a a
+different = = a b
+builtins = = + +
+""", "")
+    check toBool(value(e, "same")), "a command equals itself"
+    check not toBool(value(e, "different")), "two lambdas from one scope differ"
+    check toBool(value(e, "builtins")), "a builtin equals itself"
+
+  test "a Nim exception from a builtin reports its own message":
+    clearCaptured()
+    try:
+      discard runSrc("x = (nope)", "")
+    except:
+      discard
+    let env = newTestEnv()
+    define(env, symbol("explode"), newBuiltin("explode", ioFailBuiltin, true))
+    var message = ""
+    try:
+      discard eval(list(@[symbol("explode")]), env)
+    except:
+      message = errorText()
+    check find(message, "disk gone") >= 0, "got: " & message
