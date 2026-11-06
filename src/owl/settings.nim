@@ -14,6 +14,12 @@
 #       width = scale 1024 75
 #       title = "editor"
 #
+# `evaluateBindings` reads a file differently: its value is a record of its
+# top-level bindings, so a file read that way leaves out the `{}:`:
+#
+#   width = scale 1024 75
+#   title = "editor"
+#
 # Files are registered by type with `add`, which hands back a mutable borrow of
 # the data, and read back through `get`. Both borrow, so writing to one writes
 # to the stored settings:
@@ -49,7 +55,7 @@
 # and save hooks at *its* call site, hooks defined next to the type are seen by
 # the first write and by every reload afterwards.
 
-import std/[tables, strutils, sha1, syncio, os, typetraits]
+import std/[tables, strutils, sha1, syncio, os, typetraits, options]
 import owl/[objects, reader, evaluator, errors, modules, embedfile]
 import owl/[serde, watch]
 import owl/libraries/[base, math, list]
@@ -116,10 +122,10 @@ proc settingsRoot*(): ref Environment =
     if parsed.isOk:
       hoistDefinitions(result, parsed.get(@[]))
 
-proc evaluate*(lib: Library, root: ref Environment, path: string,
-    source: string): Object =
-  ## Run a settings file's source and return the value of its last form.
-  ## Definitions are hoisted first, so a record may call a function below it.
+proc run(lib: Library, root: ref Environment, path: string, source: string,
+    rest: var seq[Object], env: var ref Environment): Object =
+  ## Run a settings file: `use` lines, hoisted definitions, then the other
+  ## forms (left in `rest`) in `env`. The value of the last form.
   let forms = readSource(source, path)
   for f in forms:
     if isUseForm(f):
@@ -131,15 +137,41 @@ proc evaluate*(lib: Library, root: ref Environment, path: string,
           raiseError(CompileError, "a settings file cannot use module " & name,
             itemPlace(f, findItem(f, symbol(name))))
         discard require(lib, name, f)
-  let env = newEnvironment(root)
+  env = newEnvironment(root)
   hoistDefinitions(env, forms)
   useFormsIn(env, forms, lib)
-  var rest: seq[Object] = @[]
+  rest = @[]
   for f in forms:
     if evaluator.isAnyDefinition(f) or isUseForm(f):
       continue
     rest.add f
   evalForms(env, rest)
+
+proc evaluate*(lib: Library, root: ref Environment, path: string,
+    source: string): Object =
+  ## Run a settings file's source and return the value of its last form.
+  ## Definitions are hoisted first, so a record may call a function below it.
+  var rest: seq[Object]
+  var env: ref Environment
+  run(lib, root, path, source, rest, env)
+
+proc evaluateBindings*(lib: Library, root: ref Environment, path: string,
+    source: string): Object =
+  ## Run a settings file's source and return its top-level `name = value`
+  ## bindings as a record, in the order they first appear, each with the
+  ## value it ended up with. `fun`s, `command`s and `use`d names are not
+  ## bindings, so helpers stay out of the record.
+  var rest: seq[Object]
+  var env: ref Environment
+  discard run(lib, root, path, source, rest, env)
+  var names: seq[Object] = @[]
+  for f in rest:
+    if isPair(f) and isSymbol(car(f)) and car(f) notin names:
+      names.add car(f)
+  var fields: seq[Object] = @[]
+  for name in names:
+    fields.add pair(name, lookup(env, name).get(nothing()))
+  record(fields)
 
 proc readValue*(self: AbstractSettingsObject): Object =
   ## The file's current value, read fresh off disk.
