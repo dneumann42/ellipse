@@ -30,7 +30,6 @@ when withSdl:
 proc nativeFileDialog*(save: bool; defaultPath: string; done: NativeFileDone) {.gcsafe.} =
   ## `save` chooses a destination; it does not write the file. SDL provides
   ## the platform's overwrite confirmation. One selected file is returned.
-  ## `done` comes last so callers can pass it with `do` notation.
   # Requests and completions are confined to the SDL main thread.
   {.cast(gcsafe).}:
     when withSdl:
@@ -53,5 +52,4 @@ proc nativeFileDialog*(save: bool; defaultPath: string; done: NativeFileDone) {.
       done(NativeFileResult(error: "Native file dialogs require SDL3 support"))
 
 proc nativeFileDialog*(save: bool; done: NativeFileDone) {.gcsafe.} =
-  ## Opens the dialog at the platform's default location.
   nativeFileDialog(save, "", done)
