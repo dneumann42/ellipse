@@ -1,4 +1,5 @@
 import sdl3, errors
+import uploadstaging
 
 {.push cdecl, dynlib: LibName.}
 proc acquireSwapchainTextureRaw(
@@ -41,8 +42,10 @@ type
     depthWidth, depthHeight: uint32
     freeTextures: seq[Texture]
     freeBuffers: seq[GPUBuffer]
-    pictureTransfer: GPUTransferBuffer ## one upload transfer, grown as
-    pictureTransferSize: uint32        ## the UI pictures need it
+    pictureTransfers: array[TextureUploadBuckets, GPUTransferBuffer]
+    textureUploadRequested, textureUploadCycled: uint64
+    textureUploadRetained: uint64
+    textureUploadCalls: int
 
   ShaderObj* = object
     device: Device
@@ -339,19 +342,29 @@ proc newPictureTexture*(device: Device, width, height: uint32, format: TextureFo
     raiseSdlError("Failed to create picture texture")
   Texture(device: device, raw: raw, owned: true)
 
+proc textureUploadStats*(device: Device): tuple[requested, cycled, retained: uint64, calls: int] =
+  (device.textureUploadRequested,device.textureUploadCycled,
+    device.textureUploadRetained,device.textureUploadCalls)
+
 proc pictureTransfer(device: Device, capacity: uint32): GPUTransferBuffer =
-  if device.pictureTransfer.isNil or device.pictureTransferSize < capacity:
-    if not device.pictureTransfer.isNil:
-      releaseGPUTransferBuffer(device.raw, device.pictureTransfer)
-    var info = GPUTransferBufferCreateInfo(
-      usage: GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-      size: capacity,
-    )
-    device.pictureTransfer = createGPUTransferBuffer(device.raw, addr info)
-    device.pictureTransferSize = capacity
-    if device.pictureTransfer.isNil:
-      raiseSdlError("Failed to create picture transfer buffer")
-  device.pictureTransfer
+  let plan = textureUploadPlan(capacity)
+  device.textureUploadRequested += capacity.uint64
+  device.textureUploadCycled += plan.capacity.uint64
+  inc device.textureUploadCalls
+  if plan.bucket < 0:
+    # Large atlas uploads are temporary. In particular, their allocation
+    # must never be cycled for each later clothing/mipmap upload.
+    return createTransferBuffer(device,plan.capacity)
+  if device.pictureTransfers[plan.bucket].isNil:
+    device.pictureTransfers[plan.bucket] = createTransferBuffer(device,plan.capacity)
+    device.textureUploadRetained += plan.capacity.uint64
+  device.pictureTransfers[plan.bucket]
+
+proc releasePictureTransfer(device: Device, transfer: GPUTransferBuffer, bytes: uint32) =
+  if bytes > MaxPooledTextureUpload:
+    # SDL defers disposal until recorded copies no longer reference it, as
+    # it already does when an upload buffer grows within a command buffer.
+    releaseGPUTransferBuffer(device.raw,transfer)
 
 proc uploadPicture*(cmd: CommandBuffer, texture: Texture, data: pointer,
                     width, height: uint32) =
@@ -378,6 +391,7 @@ proc uploadPicture*(cmd: CommandBuffer, texture: Texture, data: pointer,
   let copyPass = beginGPUCopyPass(cmd.raw)
   uploadToGPUTexture(copyPass, addr source, addr destination, false)
   endGPUCopyPass(copyPass)
+  releasePictureTransfer(cmd.device,transfer,size)
 
 proc uploadPictureArea*(cmd: CommandBuffer, texture: Texture, data: pointer,
                         width: uint32, x0, y0, x1, y1: uint32) =
@@ -417,6 +431,7 @@ proc uploadPictureArea*(cmd: CommandBuffer, texture: Texture, data: pointer,
   let copyPass = beginGPUCopyPass(cmd.raw)
   uploadToGPUTexture(copyPass, addr source, addr destination, false)
   endGPUCopyPass(copyPass)
+  releasePictureTransfer(cmd.device,transfer,span * h)
 
 proc newCubeTexture*(device: Device, size: uint32, format: TextureFormat): Texture =
   ## A cube map of six square faces `size` pixels across: the sky's box.
@@ -467,6 +482,7 @@ proc uploadCubeFaces*(cmd: CommandBuffer, texture: Texture, data: pointer,
     )
     uploadToGPUTexture(copyPass, addr source, addr destination, face == 0)
   endGPUCopyPass(copyPass)
+  releasePictureTransfer(cmd.device,transfer,total)
 
 proc newLayeredTexture*(device: Device, width, height, layers, levels: uint32,
                         format: TextureFormat): Texture =
@@ -490,7 +506,7 @@ proc newLayeredTexture*(device: Device, width, height, layers, levels: uint32,
   Texture(device: device, raw: raw, owned: true)
 
 proc uploadLayers*(cmd: CommandBuffer, texture: Texture, data: pointer,
-                   width, height, layers: uint32, level = 0'u32) =
+                   width, height, layers: uint32, level = 0'u32, firstLayer = 0'u32) =
   ## Copy `layers` RGBA8 pictures of `width` x `height`, one after another in
   ## CPU memory, into mip `level` of a layered texture: the top one unless
   ## told otherwise, and `width` by `height` must be that level's size.
@@ -514,13 +530,14 @@ proc uploadLayers*(cmd: CommandBuffer, texture: Texture, data: pointer,
     var destination = GPUTextureRegion(
       texture: cast[ptr GPUTexture](texture.raw),
       mip_level: level,
-      layer: layer,
+      layer: firstLayer + layer,
       w: width,
       h: height,
       d: 1,
     )
     uploadToGPUTexture(copyPass, addr source, addr destination, false)
   endGPUCopyPass(copyPass)
+  releasePictureTransfer(cmd.device,transfer,size)
 
 proc generateMipmaps*(cmd: CommandBuffer, texture: Texture) =
   ## Fill every mip level below the top one by halving it, layer by layer.

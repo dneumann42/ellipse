@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Blends up to nine tiling layers by the weights painted at the vertices.
 // Each texel's alpha is its height: where two layers share a spot, the one
@@ -39,6 +40,8 @@ float fogVisibility(float reach) {
   float limit = max(uFogLimit.x, 0.001);
   return 1.0 - smoothstep(limit * 0.82, limit, reach);
 }
+
+#include "clustered.glsl.inc"
 
 void main() {
   float weights[Layers] = float[Layers](
@@ -92,7 +95,10 @@ void main() {
     discard;
   }
   float amount = fogAmount(reach);
-  vec3 lit = colour * lighting.rgb + lighting.a;
+  vec3 n = normalize(cross(dFdx(worldPosition), dFdy(worldPosition)));
+  if (n.y < 0.0) n = -n;
+  float sky = environmentExposure(worldPosition + n*0.04);
+  vec3 lit = colour * (lighting.rgb * sky + pointLighting(worldPosition,n)) + lighting.a * sky;
   vec3 hazed = mix(lit, mix(uFogNear.rgb, uFogFar.rgb, amount), amount);
   outColor = vec4(hazed, 1.0);
 }

@@ -55,6 +55,8 @@ src/ellipse/drawing/shaders/spv/%.comp.spv: src/ellipse/drawing/shaders/%.comp.g
 src/ellipse/drawing/shaders/spv/%.msl: src/ellipse/drawing/shaders/spv/%.spv
 	$(SHADERCROSS) $< -o $@
 
+$(SHADER_SPVS): src/ellipse/drawing/shaders/clustered.glsl.inc
+
 shaders: $(SHADER_SPVS)
 
 shaders_portable: $(SHADER_PORTABLE)

@@ -64,6 +64,7 @@ proc newSsaoPass*(
       stride: VertexStride,
       colorFormat: Rgba8,
       depthFormat: Depth32,
+      cull: CullBack,
     )),
     occlusionPipeline: newPipeline(device, PipelineDesc(
       vertex: fullscreenVertex,

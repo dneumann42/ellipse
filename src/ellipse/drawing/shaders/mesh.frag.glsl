@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Meshes carry their colour from the vertex stage; the fragment stage only
 // tints that colour by the mesh texture when the batch asked for one (the
@@ -11,6 +12,9 @@ layout(location = 1) in vec2 fragmentUv;
 layout(location = 2) in vec3 worldPosition;
 layout(location = 3) in float fragmentCell;
 
+layout(location = 4) in vec3 localAlbedo;
+layout(location = 5) in vec3 localNormal;
+layout(location = 6) in float environmentWeight;
 layout(location = 0) out vec4 outColor;
 
 layout(set = 2, binding = 0) uniform sampler2DArray uMeshTex;
@@ -34,13 +38,17 @@ float fogVisibility(float reach) {
   return 1.0 - smoothstep(limit * 0.82, limit, reach);
 }
 
+#include "clustered.glsl.inc"
+
 void main() {
   float reach = length(uFogEye.xyz - worldPosition);
   float visibility = fogVisibility(reach);
   if (visibility <= 0.001) {
     discard;
   }
-  vec3 colour = vertexColor.rgb;
+  vec3 n = normalize(localNormal);
+  float sky = environmentWeight > 0.5 ? environmentExposure(worldPosition + n*0.04) : 1.0;
+  vec3 colour = vertexColor.rgb * sky + localAlbedo * pointLighting(worldPosition, n);
   if (fragmentCell > 0.5) {
     // The cell rides in the batch's uniform, so every fragment of a
     // textured draw takes this branch together and the implicit

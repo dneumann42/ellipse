@@ -1,6 +1,8 @@
 import std/[math]
 
 import ../platform/[gpu, sdl]
+import clustered
+export clustered
 import billboards
 import fog
 import geometry
@@ -50,6 +52,15 @@ type
     uploaded: bool
     vertexTotal: int
 
+  StaticSplatMesh* = ref object
+    ## Terrain geometry retained on the GPU; shading is supplied by each frame.
+    vertexBuffer, indexBuffer: DynamicBuffer
+    vertices: seq[SplatVertex]
+    indices: seq[uint32]
+    batches: seq[Batch]
+    uploaded: bool
+    vertexTotal: int
+
   Recording = object
     vertexStart, indexStart, batchStart: int
 
@@ -84,6 +95,11 @@ type
 
   Artist3D* = ref object
     device: Device
+    clusters: ClusteredLights
+    pointLights: seq[PointLight]
+    lightOccluders: seq[LightOccluder]
+    lightFocus: Vec3
+    environmentRooms: seq[EnvironmentRoom]
     pipeline: Pipeline
     wireframePipeline: Pipeline ## the mesh batches' edges, for wireframe frames
     vertexBuffer: DynamicBuffer
@@ -94,6 +110,8 @@ type
     pending: Batch
     statics: seq[StaticMesh] ## recorded meshes drawn this frame
     record: Recording
+    splatRecord: Recording
+    staticSplats: seq[StaticSplatMesh]
     view: Mat4
     eye: Vec3 ## where `setView` last put the eye: water reflects toward it
     projection: Mat4
@@ -216,17 +234,18 @@ const
 
 proc newArtist*(app: App): Artist3D =
   let device = app.gpuDevice
+  let clusters = newClusteredLights(device)
   let
     vertexShader = newShader(device, vertexSpv.toOpenArrayByte(0, vertexSpv.high), VertexShader, numUniformBuffers = 1)
-    fragmentShader = newShader(device, fragmentSpv.toOpenArrayByte(0, fragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
+    fragmentShader = newShader(device, fragmentSpv.toOpenArrayByte(0, fragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 2)
     fullscreenVertex = newShader(device, fullscreenVertSpv.toOpenArrayByte(0, fullscreenVertSpv.high), VertexShader)
     overlayFragment = newShader(device, overlayFragSpv.toOpenArrayByte(0, overlayFragSpv.high), FragmentShader, numSamplers = 1)
     shapeVertex = newShader(device, shapeVertexSpv.toOpenArrayByte(0, shapeVertexSpv.high), VertexShader, numUniformBuffers = 1)
     shapeFragment = newShader(device, shapeFragmentSpv.toOpenArrayByte(0, shapeFragmentSpv.high), FragmentShader)
     splatVertex = newShader(device, splatVertexSpv.toOpenArrayByte(0, splatVertexSpv.high), VertexShader, numUniformBuffers = 1)
-    splatFragment = newShader(device, splatFragmentSpv.toOpenArrayByte(0, splatFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
+    splatFragment = newShader(device, splatFragmentSpv.toOpenArrayByte(0, splatFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 2)
     waterVertex = newShader(device, waterVertexSpv.toOpenArrayByte(0, waterVertexSpv.high), VertexShader, numUniformBuffers = 1)
-    waterFragment = newShader(device, waterFragmentSpv.toOpenArrayByte(0, waterFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
+    waterFragment = newShader(device, waterFragmentSpv.toOpenArrayByte(0, waterFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 2)
     skyVertex = newShader(device, skyVertexSpv.toOpenArrayByte(0, skyVertexSpv.high), VertexShader, numUniformBuffers = 1)
     skyFragment = newShader(device, skyFragmentSpv.toOpenArrayByte(0, skyFragmentSpv.high), FragmentShader, numUniformBuffers = 1, numSamplers = 1)
     post = newSsaoPass(device, vertexShader, app.gpuSwapchainFormat())
@@ -240,6 +259,7 @@ proc newArtist*(app: App): Artist3D =
       colorFormat: app.gpuSwapchainFormat(),
       depthFormat: Depth32,
       blend: true,
+      cull: CullBack,
     )
     splatDesc = PipelineDesc(
       vertex: splatVertex,
@@ -267,6 +287,7 @@ proc newArtist*(app: App): Artist3D =
     waterWireframePipeline = newPipeline(device, waterDesc.asWireframe())
   result = Artist3D(
     device: device,
+    clusters: clusters,
     pipeline: pipeline,
     wireframePipeline: wireframePipeline,
     vertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
@@ -341,7 +362,7 @@ proc newArtist*(app: App): Artist3D =
     skySampler: newSampler(device),
     skyPixelSampler: newSampler(device, pixelated = true),
     fog: newFogOptions(),
-    sprites: newBillboardPass(device, app.gpuSwapchainFormat()),
+    sprites: newBillboardPass(device, app.gpuSwapchainFormat(), clusters),
     planes: newPlanePass(device, app.gpuSwapchainFormat()),
     aspect: 1.0f,
     retro: newRetroOptions(),
@@ -349,11 +370,23 @@ proc newArtist*(app: App): Artist3D =
     underwaterPass: newUnderwaterPass(device, app.gpuSwapchainFormat()),
   )
 
+proc setPointLights*(a: Artist3D, lights: openArray[PointLight], focus: Vec3,
+                     occluders: openArray[LightOccluder] = []) =
+  ## Call each frame; focus is the explorer position. RGB and intensity are linear.
+  a.pointLights = @lights
+  a.lightOccluders = @occluders
+  a.lightFocus = focus
+
+proc setEnvironmentRooms*(a: Artist3D, rooms: openArray[EnvironmentRoom]) =
+  ## Spatial outdoor-light attenuation; never changes point-light strength.
+  a.environmentRooms = @rooms
+
 proc reset*(a: Artist3D) =
   a.vertices.setLen(0)
   a.indices.setLen(0)
   a.batches.setLen(0)
   a.statics.setLen(0)
+  a.staticSplats.setLen(0)
   a.face.setLen(0)
   a.building = false
   a.splatVertices.setLen(0)
@@ -373,9 +406,10 @@ proc vertexCount*(a: Artist3D): int =
   var recorded = 0
   for mesh in a.statics:
     recorded += mesh.vertexTotal
+  for mesh in a.staticSplats: recorded += mesh.vertexTotal
   a.vertices.len + recorded + a.splatVertices.len + a.waterVertices.len +
-    a.sprites.queued * 6 + # each billboard's six corners, built on the GPU
-    a.planes.queued
+    (if a.sprites.isNil: 0 else: a.sprites.queued * 6) +
+    (if a.planes.isNil: 0 else: a.planes.queued)
 
 proc setView*(a: Artist3D, eye, target, up: Vec3) =
   a.view = lookAt(eye, target, up)
@@ -515,6 +549,20 @@ proc appendVertex(a: Artist3D, v: Vertex) =
   a.indices.add a.vertices.len.uint32
   a.vertices.add v
 
+proc orientTriangles(a: Artist3D, first: int) =
+  ## Counter-clockwise front faces follow the supplied outward normals. Align
+  ## indices with the supplied outward normals once when geometry is built;
+  ## cached meshes retain these indices without any per-frame correction.
+  var i = first
+  while i + 2 < a.indices.len:
+    let p = a.vertices[a.indices[i]]
+    let q = a.vertices[a.indices[i+1]]
+    let r = a.vertices[a.indices[i+2]]
+    if dot(cross(q.position-p.position,r.position-p.position),
+        p.normal+q.normal+r.normal) < 0:
+      swap(a.indices[i+1],a.indices[i+2])
+    i += 3
+
 proc `end`*(a: Artist3D) =
   if not a.building:
     return
@@ -549,6 +597,7 @@ proc `end`*(a: Artist3D) =
   else:
     discard
   a.building = false
+  a.orientTriangles(a.pending.firstIndex.int)
   a.pending.indexCount = a.indices.len.uint32 - a.pending.firstIndex
   if a.pending.indexCount > 0:
     a.batches.add a.pending
@@ -771,20 +820,27 @@ proc setBillboardAtlas*(a: Artist3D, atlas: BillboardAtlas) =
   ## present, and serves every frame after until the next one is staged.
   a.sprites.setAtlas(atlas)
 
+proc setBillboardDirectLayers*(a: Artist3D, enabled: bool) =
+  ## Sample clothing on the body's single depth surface. Camera-facing outfit
+  ## changes update instances without CPU composition or new output textures.
+  a.sprites.directLayers = enabled
+
 proc setBillboardOptions*(a: Artist3D, options: BillboardOptions) =
   a.sprites.options = options
 
 proc newBillboardBuffer*(a: Artist3D,
-                         instances: sink seq[BillboardInstance]): BillboardBuffer =
+                         instances: sink seq[BillboardInstance],
+                         overlays: sink seq[BillboardLayers] = @[]): BillboardBuffer =
   ## Hand a set of billboards to the GPU once: they upload at the next
   ## present and are drawn from, run by run, with `drawBillboards` after.
-  a.sprites.newBillboardBuffer(instances)
+  a.sprites.newBillboardBuffer(instances, overlays)
 
 proc updateBillboards*(a: Artist3D, buffer: BillboardBuffer,
-                       instances: sink seq[BillboardInstance]) =
+                       instances: sink seq[BillboardInstance],
+                       overlays: sink seq[BillboardLayers] = @[]) =
   ## Rewrite a standing set's instances -- for billboards that move: the
   ## new set uploads at the next present.
-  a.sprites.restage(buffer, instances)
+  a.sprites.restage(buffer, instances, overlays)
 
 proc drawBillboards*(a: Artist3D, buffer: BillboardBuffer, first, count: int,
                      grow = 1.0f) =
@@ -891,6 +947,7 @@ proc render*(a: Artist3D, mesh: Mesh) =
           color: a.current.color,
           uv: if mesh.uvs.len > i.int: mesh.uvs[i] else: vec2(0, 0),
         ))
+  a.orientTriangles(firstIndex.int)
   a.batches.add Batch(
     firstIndex: firstIndex,
     indexCount: (a.indices.len - firstIndex.int).uint32,
@@ -953,6 +1010,47 @@ proc uploadStatics(a: Artist3D, cmd: CommandBuffer) =
     mesh.indices = @[]
     mesh.uploaded = true
 
+proc uploadStaticSplats(a: Artist3D, cmd: CommandBuffer) =
+  for mesh in a.staticSplats:
+    if mesh.uploaded: continue
+    mesh.vertexBuffer = newDynamicBuffer(a.device, {VertexData},
+      max(mesh.vertices.len * sizeof(SplatVertex), 1).uint32)
+    mesh.indexBuffer = newDynamicBuffer(a.device, {IndexData},
+      max(mesh.indices.len * sizeof(uint32), 1).uint32)
+    cmd.upload(mesh.vertexBuffer, mesh.vertices)
+    cmd.upload(mesh.indexBuffer, mesh.indices)
+    mesh.vertices = @[]
+    mesh.indices = @[]
+    mesh.uploaded = true
+
+proc beginSplatRecording*(a: Artist3D) =
+  if a.building: a.`end`()
+  a.splatRecord = Recording(vertexStart: a.splatVertices.len,
+    indexStart: a.splatIndices.len, batchStart: a.splatBatches.len)
+  a.beginSplat()
+
+proc endSplatRecording*(a: Artist3D): StaticSplatMesh =
+  if a.building: a.`end`()
+  let r = a.splatRecord
+  result = StaticSplatMesh(vertices: a.splatVertices[r.vertexStart .. ^1])
+  result.indices = newSeq[uint32](a.splatIndices.len - r.indexStart)
+  for i in 0 ..< result.indices.len:
+    result.indices[i] = a.splatIndices[r.indexStart + i] - r.vertexStart.uint32
+  for i in r.batchStart ..< a.splatBatches.len:
+    var batch = a.splatBatches[i]
+    batch.firstIndex -= r.indexStart.uint32
+    result.batches.add batch
+  result.vertexTotal = result.vertices.len
+  a.splatVertices.setLen(r.vertexStart)
+  a.splatIndices.setLen(r.indexStart)
+  a.splatBatches.setLen(r.batchStart)
+
+proc drawStaticSplat*(a: Artist3D, mesh: StaticSplatMesh) =
+  if not mesh.isNil and mesh.batches.len > 0: a.staticSplats.add mesh
+
+proc billboardAtlasStats*(a: Artist3D): tuple[uploads, mipmapLayers: int] =
+  (a.sprites.atlasUploadCount, a.sprites.mipmapLayerBuildCount)
+
 proc refreshProjection(a: Artist3D, frame: GpuFrame) =
   if frame.width > 0 and frame.height > 0:
     a.aspect = frame.width.float32 / frame.height.float32
@@ -987,7 +1085,8 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
   if textured:
     let sampler =
       if a.retro.pixelatedTextures: a.meshPixelSampler else: a.meshSampler
-    pass.bindFragmentSamplers([(texture: a.meshTexture, sampler: sampler)])
+    pass.bindFragmentSamplers([(texture: a.meshTexture, sampler: sampler),
+      (texture: a.clusters.texture, sampler: a.clusters.sampler)])
   for batch in a.batches:
     cmd.pushVertexUniforms(0, batch.uniforms)
     if perBatchFog:
@@ -1013,7 +1112,7 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
 
 proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
                 pushFragment: proc (); textured: bool) =
-  if a.splatBatches.len == 0 or a.splatTexture.isNil:
+  if (a.splatBatches.len == 0 and a.staticSplats.len == 0) or a.splatTexture.isNil:
     return
   pass.bindPipeline(pipeline)
   pass.bindVertexBuffers([BufferBinding(buffer: a.splatVertexBuffer)])
@@ -1021,11 +1120,24 @@ proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pip
   if textured:
     let sampler =
       if a.retro.pixelatedTextures: a.splatPixelSampler else: a.splatSampler
-    pass.bindFragmentSamplers([(texture: a.splatTexture, sampler: sampler)])
+    pass.bindFragmentSamplers([(texture: a.splatTexture, sampler: sampler),
+      (texture: a.clusters.texture, sampler: a.clusters.sampler)])
   for batch in a.splatBatches:
     cmd.pushVertexUniforms(0, batch.uniforms)
     pushFragment()
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+
+  let frameState = a.uniformState(a.model, a.projection * a.view)
+  for mesh in a.staticSplats:
+    pass.bindVertexBuffers([BufferBinding(buffer: mesh.vertexBuffer)])
+    pass.bindIndexBuffer(mesh.indexBuffer)
+    for batch in mesh.batches:
+      var uniforms = frameState
+      uniforms.model = batch.uniforms.model
+      uniforms.color = batch.uniforms.color
+      cmd.pushVertexUniforms(0, uniforms)
+      pushFragment()
+      pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
 proc drawWater(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
                pushFragment: proc (); grounded: bool) =
@@ -1036,7 +1148,8 @@ proc drawWater(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipe
   pass.bindVertexBuffers([BufferBinding(buffer: a.waterVertexBuffer)])
   pass.bindIndexBuffer(a.waterIndexBuffer)
   if grounded:
-    pass.bindFragmentSamplers([(texture: a.waterGround, sampler: a.waterGroundSampler)])
+    pass.bindFragmentSamplers([(texture: a.waterGround, sampler: a.waterGroundSampler),
+      (texture: a.clusters.texture, sampler: a.clusters.sampler)])
   let o = a.waterOptions
   for batch in a.waterBatches:
     # The vertex stage heaves the surf, by the same waves the fragment
@@ -1142,7 +1255,7 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
     proc () = cmd.pushFragmentUniforms(0, uniforms), textured = true)
   a.sprites.drawColour(cmd, pass, a.view, a.projection * a.view, a.eye,
     vec3(-a.lightDir.x, -a.lightDir.y, -a.lightDir.z), a.lightIntensity,
-    a.ambient, fog)
+    a.ambient, fog, a.clusters)
   a.planes.drawColour(cmd, pass, a.projection * a.view, fog)
   let water = a.waterUniforms()
   a.drawWater(cmd, pass, waterPipeline,
@@ -1307,6 +1420,13 @@ proc setBackdropPicture*(a: Artist3D, width, height: int,
   ## the UI still on top. Staged and kept like the overlay picture.
   a.backdrop.stage(width, height, pixels)
 
+proc updateBackdropPicture*(a: Artist3D, width, height: int,
+                            pixels: openArray[uint8], x0, y0, x1, y1: int) =
+  ## `setBackdropPicture` when only the columns `x0 ..< x1` and rows
+  ## `y0 ..< y1` of `pixels` changed since the last stage: just those are
+  ## copied and uploaded. The picture shows again if it was cleared.
+  a.backdrop.stageArea(width, height, pixels, x0, y0, x1, y1)
+
 proc clearBackdropPicture*(a: Artist3D) =
   ## Stop drawing the backdrop picture.
   a.backdrop.valid = false
@@ -1414,11 +1534,16 @@ proc present*(a: Artist3D, app: var App, clearColor: ClearColor) =
       a.uploadMeshAtlas(frame.cmd)
     if a.waterGroundStaged:
       a.uploadWaterGround(frame.cmd)
+    a.clusters.build(a.pointLights, a.lightOccluders, a.lightFocus,
+      rooms = a.environmentRooms)
+    a.clusters.upload(frame.cmd)
     a.sprites.upload(frame.cmd)
     a.planes.upload(frame.cmd)
     frame.cmd.upload(a.shapeBuffer, a.shapes2d.vertices)
     a.uploadStatics(frame.cmd)
+    a.uploadStaticSplats(frame.cmd)
     if a.batches.len > 0 or a.statics.len > 0 or a.splatBatches.len > 0 or
+        a.staticSplats.len > 0 or
         a.waterBatches.len > 0 or
         a.sprites.pending or a.planes.pending or a.sky.enabled:
       a.refreshProjection(frame)

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Water shading, all of it procedural. The surface tilts by the slope of a
 // few octaves of gradient-carrying noise. Still water drifts two layers of it
@@ -166,6 +167,8 @@ float foamNoise(vec2 p) {
   return 0.5 + noised(p).x * 0.6 + noised(p * 2.7 + 9.3).x * 0.3;
 }
 
+#include "clustered.glsl.inc"
+
 void main() {
   float clarity = max(uShallow.a, 1e-3);
   float rippleMeters = max(uDeep.a, 1e-3);
@@ -244,7 +247,7 @@ void main() {
   float foam = smoothstep(1.0 - broken, 1.0 - broken + 0.12, pattern) * smoothstep(0.0, 0.05, broken);
   foam *= 0.85;
 
-  vec3 colour = mix(body, sky, fresnel) + glint;
+  vec3 colour = mix(body, sky, fresnel) + glint + mix(uShallow.rgb, uDeep.rgb, 0.5) * pointLighting(worldPosition, n);
   colour = mix(colour, vec3(0.9, 0.94, 0.96) * light, foam);
 
   float alpha = mix(0.3, 0.94, murk) + fresnel * 0.5 + foam;

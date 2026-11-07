@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // A billboard's texel: cut away under the cutoff, solid above it, lit as the
 // vertex stage found, tinted red by the per-instance damage flash
@@ -34,6 +35,8 @@ float fogVisibility(float reach) {
   return 1.0 - smoothstep(limit * 0.82, limit, reach);
 }
 
+#include "clustered.glsl.inc"
+
 void main() {
   vec4 texel = texture(uSprites, vec3(fragmentUv, fragmentLayer));
   if (texel.a < uCut.x) {
@@ -44,9 +47,11 @@ void main() {
   if (visibility <= 0.001) {
     discard;
   }
-  vec3 colour = texel.rgb * fragmentLight;
+  vec3 n = normalize(uFogEye.xyz-worldPosition);
+  float sky = environmentExposure(worldPosition);
+  vec3 colour = texel.rgb * (fragmentLight * sky + pointLighting(worldPosition,n));
   // damage flash: blend toward bright red by fragmentBlink
-  colour = mix(colour, vec3(1.4, 0.35, 0.25) * fragmentLight,
+  colour = mix(colour, vec3(1.4, 0.35, 0.25) * fragmentLight * sky,
               clamp(fragmentBlink, 0.0, 1.0));
   float amount = fogAmount(reach);
   vec3 hazed = mix(colour, mix(uFogNear.rgb, uFogFar.rgb, amount), amount);

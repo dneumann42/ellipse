@@ -18,6 +18,10 @@ layout(location = 1) out vec2 fragmentUv;
 layout(location = 2) out vec3 worldPosition; // the fragment stage fogs by the reach to it
 layout(location = 3) out float fragmentCell; // atlas layer to sample; 0: none
 
+layout(location = 4) out vec3 localAlbedo;
+layout(location = 5) out vec3 localNormal;
+layout(location = 6) out float environmentWeight;
+
 void main() {
   vec4 world = u.model * vec4(position, 1.0);
   gl_Position = u.viewProj * world;
@@ -32,4 +36,9 @@ void main() {
   fragmentUv = uv;
   worldPosition = world.xyz;
   fragmentCell = u.params.w;
+  localAlbedo = u.color.rgb * color.rgb;
+  localNormal = n;
+  // The artist draws sky bodies and lamp flames with unit ambient and no
+  // directional light. Preserve these intentionally emissive batches.
+  environmentWeight = (u.params.x >= 0.999 && u.light.w <= 0.0) ? 0.0 : 1.0;
 }
