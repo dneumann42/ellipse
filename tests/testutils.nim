@@ -2,8 +2,8 @@ import std/unittest
 import owl/[evaluator, errors]
 import owl/libraries/[io]
 
-var outputLines*: seq[string]
-var errorLines*: seq[string]
+var outputLines* {.threadvar.}: seq[string]
+var errorLines* {.threadvar.}: seq[string]
 
 proc collectOutput(s: string) =
   outputLines.add s

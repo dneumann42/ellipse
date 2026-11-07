@@ -18,6 +18,9 @@ proc failBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Objec
   failCalled = true
   nothing()
 
+proc ioFailBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
+  raise newException(IOError, "disk gone")
+
 proc runSrc(src, extra: string): ref Environment =
   let r = parseOwl(src)
   if not r.isOk:
@@ -63,6 +66,16 @@ proc evalText(text: string): Object =
     raiseAssert("printed code evaluates: " & lastError() & "\n" & text)
 
 suite "owl/evaluator":
+  test "string interpolation":
+    check evalText("p = {} (name = \"Joe\") (age = 45)\n\"\\(p.name) is \\(+ p.age 1)\"") == str("Joe is 46"),
+      "values and calls are spliced in"
+    check evalText("xs = [] 1 2\n\"\\(xs) \\(true) \\(nothing)\"") == str("[] 1 2 true ()"),
+      "any value reads as to-string gives it"
+    check evalText("fun f:\n    \"called\"\n\"<\\((f))>\"") == str("<called>"), "parens call a fun"
+    check evalText("n = 2\n\"\\(n)\\(n)\"") == str("22"), "pieces may touch"
+    check evalText("\"\\\\(not) \\\"q\\\"\"") == str("\\(not) \"q\""), "escapes still work beside it"
+    check evalText(toCode(str("a \\(b)"), 80)) == str("a \\(b)"), "to-code keeps a literal \\( literal"
+
   test "factorial doc example":
     let e1 = runOk(docExample, "")
     check toNumber(value(e1, "res")) == 120.0, "factorial 5 = 120"
@@ -968,9 +981,10 @@ mixed = [] 1 -2.5 true false nothing "é" ([] ([] 1) ([]))
           for line in text.split("\n"):
             check line.len <= width or not line.contains(" = ") or line.startsWith(" "),
               "lines stay within the width where owl can break: " & line
-    check toCode(value(printed, "quoted"), 80) ==
-      "(concat \"say \" (char 34) \"hi\" (char 34) (char 10) \"tab\tend\")",
-      "quotes and newlines become char codes: " & toCode(value(printed, "quoted"), 80)
+    check toCode(value(printed, "quoted"), 80) == "\"say \\\"hi\\\"\\ntab\\tend\"",
+      "quotes and control characters print as escapes: " & toCode(value(printed, "quoted"), 80)
+    for raw in ["back\\slash", "\"", "\x01\x7f", "caf\u00e9", "\e[0m\r\0"]:
+      check evalText(toCode(str(raw), 80)) == str(raw), "escapes read back: " & toCode(str(raw), 80)
     check toCode(value(printed, "tasks"), 50) == """[]:
     {} (title = "Hello") (descr = "World!")
     {} (title = "Bye") (descr = "")""", "a list that does not fit breaks into a block:\n" & toCode(value(printed, "tasks"), 50)
@@ -1047,3 +1061,56 @@ none = forms-of 1
     check toStr(value(blockEnv, "named")) == "de", "a block parameter can be passed by name"
     check toNumber(value(blockEnv, "count")) == 2.0, "a command gets the block's forms"
     check toNumber(value(blockEnv, "none")) == 0.0 or value(blockEnv, "none") == nothing(), "no block, no forms"
+
+  test "named arguments leave positional ones the open parameters":
+    let e = runOk("""
+fun add3 a b (c = 1):
+  [] a b c
+before = add3 (a = 10) 2
+after = add3 2 (a = 10)
+command wrap-all xs+ (&body = 5):
+  length xs
+n = wrap-all 1 2 3
+""", "")
+    check toCode(value(e, "before")) == "[] 10 2 1", "a named first: " & toCode(value(e, "before"))
+    check toCode(value(e, "after")) == "[] 10 2 1", "a named last: " & toCode(value(e, "after"))
+    check toNumber(value(e, "n")) == 3.0, "a rest parameter beside a defaulted block takes the arguments"
+
+  test "a missing argument is an error, not an outer binding":
+    clearCaptured()
+    var failed = false
+    try:
+      discard runSrc("x = 99\nfun f x:\n  x\ny = (f)\n", "")
+    except:
+      failed = true
+    check failed, "calling f without x fails"
+    check find(lastError(), "missing argument x for f") >= 0, "got: " & lastError()
+
+  test "commands are equal only to themselves":
+    let e = runOk("""
+a = lambda x:
+  1
+b = lambda x:
+  2
+same = = a a
+different = = a b
+builtins = = + +
+""", "")
+    check toBool(value(e, "same")), "a command equals itself"
+    check not toBool(value(e, "different")), "two lambdas from one scope differ"
+    check toBool(value(e, "builtins")), "a builtin equals itself"
+
+  test "a Nim exception from a builtin reports its own message":
+    clearCaptured()
+    try:
+      discard runSrc("x = (nope)", "")
+    except:
+      discard
+    let env = newTestEnv()
+    define(env, symbol("explode"), newBuiltin("explode", ioFailBuiltin, true))
+    var message = ""
+    try:
+      discard eval(list(@[symbol("explode")]), env)
+    except:
+      message = errorText()
+    check find(message, "disk gone") >= 0, "got: " & message

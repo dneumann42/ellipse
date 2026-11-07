@@ -4,7 +4,7 @@ import owl/[objects, evaluator, modules]
 
 proc c_rename(src, dst: cstring): int32 {.importc: "rename", header: "<stdio.h>".}
 
-proc pathArg(env: ref Environment, args: seq[Object], what: string): string  =
+proc pathArg(env: ref Environment, args: seq[Object], what: string): string =
   if args.len < 1:
     err(what & " needs a path")
   let path = eval(args[0], env)
@@ -12,7 +12,7 @@ proc pathArg(env: ref Environment, args: seq[Object], what: string): string  =
     err(what & " needs a string path, got " & stringify(path))
   toStr(path)
 
-proc readFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc readFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("read-file needs one path")
   let path = pathArg(env, args, "read-file")
@@ -20,13 +20,13 @@ proc readFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): O
   var failed = false
   try:
     source = readFile(path)
-  except:
+  except CatchableError:
     failed = true
   if failed:
     err("cannot read file: " & path)
   str(source)
 
-proc writeFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc writeFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("write-file needs a path and a string")
   let path = pathArg(env, args, "write-file")
@@ -37,7 +37,7 @@ proc writeFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): 
   var failed = false
   try:
     writeFile(tmp, toStr(text))
-  except:
+  except CatchableError:
     failed = true
   if failed:
     err("cannot write file: " & tmp)
@@ -47,26 +47,26 @@ proc writeFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): 
     err("cannot replace file: " & path)
   nothing()
 
-proc fileExistsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc fileExistsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("file-exists needs one path")
   boolean(fileExists(pathArg(env, args, "file-exists")))
 
 proc c_unlink(path: cstring): int32 {.importc: "unlink", header: "<unistd.h>".}
 
-proc removeFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc removeFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("remove-file needs one path")
   var path = pathArg(env, args, "remove-file")
   discard c_unlink(path.cstring)
   nothing()
 
-proc dirExistsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc dirExistsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("dir-exists needs one path")
   boolean(dirExists(pathArg(env, args, "dir-exists")))
 
-proc listDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc listDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("list-dir needs one path")
   let dir = pathArg(env, args, "list-dir")
@@ -79,7 +79,7 @@ proc listDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
     for kind, entry in walkDir(dir, relative = true):
       names.add $entry
       kinds.add(if kind == pcDir or kind == pcLinkToDir: "dir" else: "file")
-  except:
+  except CatchableError:
     failed = true
   if failed:
     err("cannot list directory: " & dir)
@@ -100,46 +100,46 @@ proc listDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Ob
       pair(symbol("kind"), str(kinds[i]))])
   list(entries)
 
-proc makeDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc makeDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("make-dir needs one path")
   let dir = pathArg(env, args, "make-dir")
   var failed = false
   try:
     createDir(dir)
-  except:
+  except CatchableError:
     failed = true
   if failed or not dirExists(dir):
     err("cannot create directory: " & dir)
   nothing()
 
-proc currentDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc currentDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 0:
     err("current-dir takes no arguments")
   var dir = ""
   var failed = false
   try:
     dir = $paths.getCurrentDir()
-  except:
+  except CatchableError:
     failed = true
   if failed:
     err("cannot read the current directory")
   str(dir)
 
-proc changeDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc changeDirBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("change-dir needs one path")
   let dir = pathArg(env, args, "change-dir")
   var failed = false
   try:
     setCurrentDir(dir)
-  except:
+  except CatchableError:
     failed = true
   if failed:
     err("cannot change to directory: " & dir)
   nothing()
 
-proc envVarBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc envVarBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("env-var needs a name")
   let name = pathArg(env, args, "env-var")

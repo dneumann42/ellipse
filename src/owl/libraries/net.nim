@@ -1,4 +1,4 @@
-import std/[syncio, strutils, os, osproc]
+import std/[strutils, os, osproc]
 import posix
 import owl/[objects, evaluator, modules]
 
@@ -112,7 +112,7 @@ else:
     var code = 1
     try:
       (output, code) = execCmdEx(cmd)
-    except:
+    except CatchableError:
       code = 1
     let pid = output.strip()
     if code != 0 or pid.len == 0:

@@ -86,6 +86,27 @@ fun scale x pct:
     check repo.get(Theme, "expr-theme").dark, "a bare boolean reads as true"
     repo.close()
 
+  test "evaluateBindings reads top-level bindings as the record":
+    let source = """
+fun scale x pct:
+    / (* x pct) 100
+
+dark = true
+accent = "#151219"
+size = scale 1024 75
+size = + size 1
+"""
+    var theme: Theme
+    decode(evaluateBindings(settingsLibrary(), settingsRoot(), "bindings.owl",
+      source), theme)
+    check theme == Theme(dark: true, accent: "#151219", size: 769),
+      "the last value of each binding, helpers left out"
+    let r = evaluateBindings(settingsLibrary(), settingsRoot(), "bindings.owl", source)
+    check recordFields(r).len == 3, "one field per name, no fun"
+    check toSymbol(car(recordFields(r)[0])) == "dark", "in the order they appear"
+    check isNumber(evaluate(settingsLibrary(), settingsRoot(), "bindings.owl", source)),
+      "evaluate still returns the last form's value"
+
   test "the file is the source of truth":
     var repo = newSettings(hot = true)
     discard repo.add(dir / "hot.owl", App)

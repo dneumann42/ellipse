@@ -27,7 +27,7 @@ when withSdl:
   proc fileCallback(userdata: pointer; files: cstringArray; filter: cint)
     {.cdecl, importc: "ellipse_file_callback".}
 
-proc nativeFileDialog*(done: NativeFileDone; save = false; defaultPath = "") {.gcsafe.} =
+proc nativeFileDialog*(save: bool; defaultPath: string; done: NativeFileDone) {.gcsafe.} =
   ## `save` chooses a destination; it does not write the file. SDL provides
   ## the platform's overwrite confirmation. One selected file is returned.
   # Requests and completions are confined to the SDL main thread.
@@ -50,3 +50,6 @@ proc nativeFileDialog*(done: NativeFileDone; save = false; defaultPath = "") {.g
         sdl3.showOpenFileDialog(fileCallback, request, parent, nil, 0, location, false)
     else:
       done(NativeFileResult(error: "Native file dialogs require SDL3 support"))
+
+proc nativeFileDialog*(save: bool; done: NativeFileDone) {.gcsafe.} =
+  nativeFileDialog(save, "", done)

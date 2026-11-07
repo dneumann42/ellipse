@@ -1,6 +1,6 @@
 import owl/[objects, evaluator, modules]
 
-proc listBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc listBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var xs: seq[Object] = @[]
   for a in args:
     xs.add eval(a, env)

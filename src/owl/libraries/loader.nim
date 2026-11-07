@@ -1,18 +1,19 @@
-import std/[syncio, options, tables]
+import std/tables
 import owl/[objects, evaluator, modules]
 
 
-var loaderLibrary: Library = nil
+var loaderLibrary {.threadvar.}: Library
+  ## The library the module builtins reach: the last one `loaderModule` was
+  ## made for on this thread.
 
-proc theLibrary(): Library  =
+proc theLibrary(): Library =
   let lib = loaderLibrary
   if lib == nil:
     err("no module library is installed")
-    result = newLibrary("none")
   else:
     result = lib
 
-proc stringArg(env: ref Environment, args: seq[Object], i: int, what: string): string  =
+proc stringArg(env: ref Environment, args: seq[Object], i: int, what: string): string =
   if i >= args.len:
     err(what & " needs more arguments")
   let v = eval(args[i], env)
@@ -20,30 +21,28 @@ proc stringArg(env: ref Environment, args: seq[Object], i: int, what: string): s
     err(what & " needs a string, got " & stringify(v))
   toStr(v)
 
-proc moduleArg(env: ref Environment, args: seq[Object], what: string): Module  =
+proc moduleArg(env: ref Environment, args: seq[Object], what: string): Module =
   let name = stringArg(env, args, 0, what)
   let found = findModule(theLibrary(), name)
   if found == nil:
     err("no module named " & name)
-    result = newModule(name)
   else:
     result = found
 
-proc scopeArg(env: ref Environment, args: seq[Object], what: string): ref Environment  =
+proc scopeArg(env: ref Environment, args: seq[Object], what: string): ref Environment =
   let v = eval(args[0], env)
   let scope = scopeEnv(v)
   if scope == nil:
     err(what & " needs a scope, got " & stringify(v))
-    result = newEnvironment()
   else:
     result = scope
 
-proc loadModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc loadModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let name = stringArg(env, args, 0, "load-module")
   discard require(theLibrary(), name)
   str(name)
 
-proc newModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc newModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let name = stringArg(env, args, 0, "new-module")
   let lib = theLibrary()
   if hasModule(lib, name):
@@ -53,79 +52,79 @@ proc newModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): 
   discard require(lib, name)
   str(name)
 
-proc hasModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc hasModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   boolean(hasModule(theLibrary(), stringArg(env, args, 0, "has-module")))
 
-proc moduleNamesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleNamesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let lib = theLibrary()
   var names: seq[Object] = @[]
   for m in lib.modules.values:
     names.add str(m.name)
   list(names)
 
-proc modulePathsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc modulePathsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let lib = theLibrary()
   var dirs: seq[Object] = @[]
   for i in 0 ..< lib.paths.len:
     dirs.add str(lib.paths[i])
   list(dirs)
 
-proc addModulePathBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc addModulePathBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   addPath(theLibrary(), stringArg(env, args, 0, "add-module-path"))
   nothing()
 
-proc removeModulePathBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc removeModulePathBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   removePath(theLibrary(), stringArg(env, args, 0, "remove-module-path"))
   nothing()
 
-proc unloadModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc unloadModuleBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   unload(theLibrary(), stringArg(env, args, 0, "unload-module"))
   nothing()
 
-proc moduleFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleFileBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let path = moduleFile(theLibrary(), stringArg(env, args, 0, "module-file"))
   if path.len == 0:
     result = nothing()
   else:
     result = str(path)
 
-proc modulePathBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc modulePathBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let m = moduleArg(env, args, "module-path")
   if m.path.len == 0:
     result = nothing()
   else:
     result = str(m.path)
 
-proc setModulePathBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc setModulePathBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let m = moduleArg(env, args, "set-module-path")
   m.path = stringArg(env, args, 1, "set-module-path")
   nothing()
 
-proc moduleSourceBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleSourceBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   str(moduleArg(env, args, "module-source").source)
 
-proc setModuleSourceBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc setModuleSourceBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let m = moduleArg(env, args, "set-module-source")
   m.source = stringArg(env, args, 1, "set-module-source")
   nothing()
 
-proc moduleScopeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleScopeBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   scopeValue(moduleArg(env, args, "module-scope").env)
 
-proc moduleExportsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleExportsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   var names: seq[Object] = @[]
   for n in exportNames(moduleArg(env, args, "module-exports")):
     names.add str(n)
   list(names)
 
-proc moduleUsesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleUsesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let m = moduleArg(env, args, "module-uses")
   var names: seq[Object] = @[]
   for i in 0 ..< m.deps.len:
     names.add str(m.deps[i])
   list(names)
 
-proc moduleUseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleUseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let m = moduleArg(env, args, "module-use")
   let dep = stringArg(env, args, 1, "module-use")
   let d = require(theLibrary(), dep)
@@ -134,39 +133,39 @@ proc moduleUseBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): 
     m.deps.add dep
   nothing()
 
-proc moduleClearUsesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleClearUsesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let m = moduleArg(env, args, "module-clear-uses")
   clearImports(m.env)
   m.deps = @[]
   nothing()
 
-proc moduleExportBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleExportBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let m = moduleArg(env, args, "module-export")
   let public = stringArg(env, args, 1, "module-export")
   let internal = stringArg(env, args, 2, "module-export")
   exportName(m.exports, symbol(public), symbol(internal))
   nothing()
 
-proc moduleClearExportsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleClearExportsBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   let m = moduleArg(env, args, "module-clear-exports")
   clearExportNames(m.exports)
   setExportAll(m.exports, false)
   nothing()
 
-proc hasOwnBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc hasOwnBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("has-own needs a scope and a name")
   let scope = scopeArg(env, args, "has-own")
   boolean(hasOwn(scope, symbol(stringArg(env, args, 1, "has-own"))))
 
-proc unbindBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc unbindBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("unbind needs a scope and a name")
   let scope = scopeArg(env, args, "unbind")
   undefine(scope, symbol(stringArg(env, args, 1, "unbind")))
   nothing()
 
-proc makeDefinitionBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc makeDefinitionBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 2:
     err("make-definition needs a scope and a form")
   let scope = scopeArg(env, args, "make-definition")
@@ -179,7 +178,7 @@ proc makeDefinitionBuiltin(env: ref Environment, args: seq[Object], bodyStart: i
     err("make-definition needs a fun, command or dynamic-command, got " & stringify(form))
   nothing()
 
-proc scopeNamesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc scopeNamesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   if args.len != 1:
     err("scope-names needs a scope")
   let scope = scopeArg(env, args, "scope-names")
@@ -189,7 +188,7 @@ proc scopeNamesBuiltin(env: ref Environment, args: seq[Object], bodyStart: int):
       names.add str(toSymbol(name))
   list(names)
 
-proc moduleExportAllBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object  =
+proc moduleExportAllBuiltin(env: ref Environment, args: seq[Object], bodyStart: int): Object =
   setExportAll(moduleArg(env, args, "module-export-all").exports, true)
   nothing()
 

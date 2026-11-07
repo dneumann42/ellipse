@@ -385,7 +385,9 @@ proc toolBar*(id: string, blk: MenuBody) =
   menuBarLast = menuBarNow
   menuBarNow = @[]
   openElement(elementId(id))
-  configureOpenElement(row(width = grow(), height = fixedPx(t.metrics.toolbarHeight),
+  let height = if t.metrics.toolbarHeight > 0: fixedPx(t.metrics.toolbarHeight)
+               else: fit()
+  configureOpenElement(row(width = grow(), height = height,
                            gap = t.metrics.padToolbar,
                            padding = padAll(t.metrics.padToolbar)).bg(t.palette.panelBg))
   blk()

@@ -47,7 +47,8 @@ import std/[tables, options, strutils, math, typetraits, macros]
 import owl/[objects, reader, evaluator]
 export objects
 
-var trail: seq[string] = @[]
+var trail {.threadvar.}: seq[string]
+  ## The path into the value being decoded, for error messages.
 
 proc trailPush(part: string) =
   trail.add part
@@ -142,7 +143,7 @@ proc wantNumber*(o: Object): float64 =
   of String:
     try:
       result = parseFloat(toStr(o))
-    except:
+    except CatchableError:
       failAt(o, "expected a number, got " & showValue(o))
   else:
     failAt(o, "expected a number, got " & showValue(o))
@@ -235,7 +236,7 @@ proc readEnum[T: enum](o: Object, x: var T) =
   let text = wantText(o)
   try:
     x = parseEnum[T](text)
-  except:
+  except CatchableError:
     failAt(o, "\"" & text & "\" is not a " & name(T))
 
 proc readChar(o: Object, x: var char) =

@@ -119,6 +119,39 @@ proc main() =
   seen = step(@[KeyEvent(kind: kevEnter)])
   expect(seen.len == 1, "clear: no keymaps, nothing taken")
 
+  # Key sequences: "Ctrl+X b" waits after its prefix, like Emacs.
+  var emacs = Keymap(name: "emacs")
+  emacs.bindKey("Ctrl+X b", note("buffers"))
+  emacs.bindKey("Ctrl+X Ctrl+S", note("save"))
+  emacs.bindKey("Ctrl+K", note("kill"))
+  installKeymap(emacs)
+  expect(parseKeys("Ctrl+X b").len == 2, "parseKeys: two chords")
+  expect(parseKeys("Ctrl+X Bogus+q").len == 0, "parseKeys: a bad chord spoils it")
+  log = ""
+  seen = step(@[chord('x')])
+  expect(log == "" and seen.len == 0, "sequence: the prefix is taken and waits")
+  expect(pendingKeys() == "Ctrl+X", "sequence: the prefix is pending: " & pendingKeys())
+  seen = step(@[KeyEvent(kind: kevText, text: "b")])
+  expect(log == "buffers" and seen.len == 0, "sequence: the second key runs it")
+  expect(pendingKeys() == "", "sequence: done, nothing pending")
+  log = ""
+  seen = step(@[chord('x'), chord('s')])
+  expect(log == "save", "sequence: both keys in one frame")
+  log = ""
+  seen = step(@[chord('x'), KeyEvent(kind: kevText, text: "q")])
+  expect(log == "" and seen.len == 0, "sequence: an unbound continuation is swallowed")
+  expect(pendingKeys() == "", "sequence: ...and cancels the prefix")
+  seen = step(@[KeyEvent(kind: kevText, text: "b")])
+  expect(log == "" and seen.len == 1, "sequence: a lone continuation is just a key")
+  seen = step(@[chord('k')])
+  expect(log == "kill", "sequence: single chords still work beside sequences")
+  log = ""
+  discard step(@[chord('x')])
+  cancelKeySequence()
+  seen = step(@[KeyEvent(kind: kevText, text: "b")])
+  expect(log == "" and seen.len == 1, "sequence: cancelKeySequence forgets the prefix")
+  clearKeymaps()
+
   echo "keys_test: ", passed, " passed, ", failures, " failed"
   if failures > 0:
     quit 1

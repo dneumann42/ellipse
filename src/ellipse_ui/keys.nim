@@ -1,8 +1,14 @@
 ## Keyboard shortcuts: chords written the way menus print them, gathered
 ## into keymaps that run before the widget tree sees the keys. See
 ## `documentation/nim-tutorial.md` §8 (Keymaps and shortcuts).
+##
+## A binding may be a key *sequence*, chords separated by spaces, as in
+## Emacs: `bindKey(m, "Ctrl+X b", ...)`. Its first chord starts the sequence
+## and is taken from the widgets; the next key either continues it, finishes
+## it (the action runs), or -- bound to nothing after the prefix -- cancels
+## it and is swallowed. `pendingKeys` names the prefix typed so far.
 
-import std/syncio
+import std/[syncio, strutils]
 
 import ellipse/platform/platform
 
@@ -18,7 +24,7 @@ type
   KeyWhen* = proc (): bool {.closure.}
 
   Binding = object
-    chord: Chord
+    chords: seq[Chord]   ## one chord, or a sequence
     action: KeyAction
 
   Keymap* = object
@@ -31,6 +37,7 @@ type
     bindings: seq[Binding]
 
 var keymaps: seq[Keymap] = @[]
+var pending: seq[KeyEvent] = @[]   ## the key sequence typed so far
 
 # --- chords ------------------------------------------------------------------
 
@@ -145,6 +152,39 @@ proc matches*(ev: KeyEvent, c: Chord): bool =
     ev.kind == c.kind and ev.ctrl == c.ctrl and ev.alt == c.alt and
       ev.shift == c.shift
 
+proc parseKeys*(spec: string): seq[Chord] =
+  ## `"Ctrl+X b"` -> its chords, in order. Empty when any chord does not
+  ## parse (or there is none).
+  for part in spec.split(' '):
+    if part.len == 0:
+      continue
+    let c = parseChord(part)
+    if c.kind == kevNone:
+      return @[]
+    result.add c
+
+func describe(ev: KeyEvent): string =
+  ## A key event the way a chord is written: `Ctrl+X`, `b`.
+  if ev.ctrl: result.add "Ctrl+"
+  if ev.alt: result.add "Alt+"
+  if ev.shift and ev.kind != kevText: result.add "Shift+"
+  case ev.kind
+  of kevLetter: result.add (if ev.ch in {'a'..'z'}: char(ord(ev.ch) - 32) else: ev.ch)
+  of kevText: result.add ev.text
+  else:
+    let name = $ev.kind
+    result.add (if name.startsWith("kev"): name[3 .. ^1] else: name)
+
+proc pendingKeys*(): string =
+  ## The key sequence typed so far, `""` when none is: "Ctrl+X".
+  for i, ev in pending:
+    if i > 0: result.add ' '
+    result.add describe(ev)
+
+proc cancelKeySequence*() =
+  ## Forget a half-typed key sequence.
+  pending.setLen(0)
+
 proc pressed*(chord: string): bool =
   ## The chord went down this input frame -- a one-off check against the
   ## frame's (routed) key events, for code that doesn't keep a keymap.
@@ -158,14 +198,15 @@ proc pressed*(chord: string): bool =
 # --- keymaps -----------------------------------------------------------------
 
 proc bindKey*(m: var Keymap, chord: string, action: KeyAction) =
-  ## Run `action` when `chord` goes down while `m` is active. A chord that
-  ## does not parse is a programming error: it is reported and skipped.
-  let c = parseChord(chord)
-  if c.kind == kevNone:
+  ## Run `action` when `chord` goes down while `m` is active; `chord` may be
+  ## a space-separated sequence ("Ctrl+X b"). A chord that does not parse is
+  ## a programming error: it is reported and skipped.
+  let cs = parseKeys(chord)
+  if cs.len == 0:
     echo "ellipse_ui/keys: keymap `", m.name, "`: cannot parse chord `",
       chord, "`"
     return
-  m.bindings.add Binding(chord: c, action: action)
+  m.bindings.add Binding(chords: cs, action: action)
 
 proc installKeymap*(m: Keymap) =
   ## Put `m` on top of the keymap stack, replacing an installed keymap of
@@ -193,20 +234,42 @@ proc isActive(m: Keymap): bool =
   p()
 
 proc dispatchKey(ev: KeyEvent): bool =
-  ## Run the first binding `ev` matches, newest active keymap first, no
-  ## further down than the topmost active modal one.
+  ## Run the first binding the typed sequence (`pending` and `ev`) matches,
+  ## newest active keymap first, no further down than the topmost active
+  ## modal one. A strict prefix of a binding waits for more keys; a key
+  ## that ends a prefix nothing continues is swallowed.
+  var typed = pending
+  typed.add ev
+  var prefix = false
   var i = keymaps.len - 1
   while i >= 0:
     if isActive(keymaps[i]):
       let bs = keymaps[i].bindings
       for b in bs:
-        if matches(ev, b.chord):
+        if b.chords.len < typed.len:
+          continue
+        var same = true
+        for k in 0 ..< typed.len:
+          if not matches(typed[k], b.chords[k]):
+            same = false
+            break
+        if not same:
+          continue
+        if b.chords.len == typed.len:
+          pending.setLen(0)
           let act = b.action
           act()
           return true
+        prefix = true
       if keymaps[i].modal:
-        return false
+        break
     dec i
+  if prefix:
+    pending = typed
+    return true
+  if pending.len > 0:
+    pending.setLen(0)
+    return true
   false
 
 proc runKeymaps*() =

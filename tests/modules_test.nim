@@ -359,6 +359,8 @@ no = starts-with "hello" "lo"
 short = starts-with "he" "hello"
 at = find-char "hello" "l"
 none = find-char "hello" "z"
+last = find-last "a/b/c" "/"
+nolast = find-last "abc" "/"
 t = take "hello" 2
 d = drop "hello" 3
 """))
@@ -367,6 +369,8 @@ d = drop "hello" 3
   check not toBool(value(env, "short")), "starts-with is false when the string is shorter"
   check toNumber(value(env, "at")) == 2.0, "find-char returns the first index"
   check isNothing(value(env, "none")), "find-char returns nothing when absent"
+  check toNumber(value(env, "last")) == 3.0, "find-last returns the last index"
+  check isNothing(value(env, "nolast")), "find-last returns nothing when absent"
   check stringify(value(env, "t")) == "he", "take keeps the first characters"
   check stringify(value(env, "d")) == "lo", "drop removes the first characters"
 
