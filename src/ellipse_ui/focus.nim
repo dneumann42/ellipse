@@ -92,12 +92,14 @@ proc noteRegistration(id: uint32, tabIndex: int) =
   chainNow.add FocusEntry(id: id, tabIndex: tabIndex)
 
 proc registerFocus*(id: ElementId, tabIndex: int = 0,
-                    inside: ElementId = ElementId()) =
+                    inside: ElementId = ElementId(),
+                    inside2: ElementId = ElementId()) =
   ## Declare `id` focusable for this frame (call it while laying the
   ## widget out): it joins the Tab chain at `tabIndex`, and this frame's
   ## press folds in -- a press inside takes focus, a press elsewhere while
   ## it holds focus lets go. `inside` names a floating part that counts as
   ## the widget's own (a dropdown's popover): pressing it keeps focus.
+  ## `inside2` names a second such part (a popover's open submenu).
   if reloadFocusId != 0 and id.id == reloadFocusId:
     # Resolve restored focus as widgets register, after application startup
     # focus requests. This also keeps a restored popover from closing itself.
@@ -108,7 +110,9 @@ proc registerFocus*(id: ElementId, tabIndex: int = 0,
   if ctx.pointerData().state == pressedThisFrame:
     if pointerOver(id):
       setFocusId(id.id)
-    elif focusId == id.id and not (inside.id != 0'u32 and pointerOver(inside)):
+    elif focusId == id.id and not (
+        (inside.id != 0'u32 and pointerOver(inside)) or
+        (inside2.id != 0'u32 and pointerOver(inside2))):
       setFocusId(0'u32)
   if focusId == id.id:
     gainedId = if seenSerial != serial: id.id else: 0'u32

@@ -6,6 +6,7 @@ export clustered
 import billboards
 import fog
 import geometry
+import mist
 import planes
 import retro
 import shapes
@@ -19,6 +20,7 @@ import water
 export billboards
 export fog
 export geometry
+export mist
 export planes
 export retro
 export shapes
@@ -191,6 +193,7 @@ type
     fog: FogOptions
     sprites: BillboardPass ## upright sprites by the hundred thousand
     planes: PlanePass ## sprite planes: a held weapon, a painted sign
+    mist: MistPass ## drifting fog billboards, blended over the whole
     aspect: float32 ## width over height of the frame last presented: the
     ## sky spreads its rays by it, so the dome matches the frustum
     retro: RetroOptions
@@ -364,6 +367,7 @@ proc newArtist*(app: App): Artist3D =
     fog: newFogOptions(),
     sprites: newBillboardPass(device, app.gpuSwapchainFormat(), clusters),
     planes: newPlanePass(device, app.gpuSwapchainFormat()),
+    mist: newMistPass(device, app.gpuSwapchainFormat()),
     aspect: 1.0f,
     retro: newRetroOptions(),
     blowUpSampler: newSampler(device, pixelated = true),
@@ -399,6 +403,7 @@ proc reset*(a: Artist3D) =
   a.watering = false
   a.sprites.reset()
   a.planes.reset()
+  a.mist.reset()
   a.shapes2d.clearShapes()
 
 proc vertexCount*(a: Artist3D): int =
@@ -869,6 +874,23 @@ proc drawPlaneQuad*(a: Artist3D, corners: array[4, Vec3],
   ## sheet's uv at each, tinted by `color` and lit by nothing but it.
   a.planes.queueQuad(corners, uv, color)
 
+proc setMist*(a: Artist3D, options: MistOptions) =
+  ## The knobs of this frame's mist field: the noise's motion and shape,
+  ## the dither's grain, and the colour the puffs wear.
+  a.mist.options = options
+
+proc drawMist*(a: Artist3D, puffs: openArray[MistPuff]) =
+  ## Lay a mist field over the world: camera-facing ellipses of haze,
+  ## blended farthest-first over everything the scene drew, in one call
+  ## however many puffs come. They test against the world's depth -- fog
+  ## behind a wall stays behind it -- but write none of their own, so
+  ## neighbours merge into one body instead of occluding one another.
+  a.mist.queue(puffs)
+
+proc mistCount*(a: Artist3D): int =
+  ## Puffs asked for this frame.
+  a.mist.queued
+
 proc setSplatOptions*(a: Artist3D, options: SplatOptions) =
   a.splatOptions = options
 
@@ -1260,6 +1282,16 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   let water = a.waterUniforms()
   a.drawWater(cmd, pass, waterPipeline,
     proc () = cmd.pushFragmentUniforms(0, water), grounded = true)
+  # Mist last of all: every wall, sprite and wavefront is already in the
+  # depth it tests against, so the haze drifts where it should -- including
+  # over the water it was raised from. It reads the occlusion pass's depth
+  # replay (last frame's, and fog is the slowest thing on screen) to melt
+  # where the land rises through it. Wireframe frames leave it out: a
+  # field of soft noise has no edges worth outlining.
+  if a.mist.pending and not a.wireframe:
+    let (_, far) = a.nearFar()
+    a.mist.drawColour(cmd, pass, a.view, a.projection * a.view, fog, far,
+      if a.ssao.enabled: a.post.depthTexture() else: nil)
 
 proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   ## Every batch again, packing linear depth for the occlusion pass.
@@ -1539,13 +1571,15 @@ proc present*(a: Artist3D, app: var App, clearColor: ClearColor) =
     a.clusters.upload(frame.cmd)
     a.sprites.upload(frame.cmd)
     a.planes.upload(frame.cmd)
+    a.mist.upload(frame.cmd, a.eye)
     frame.cmd.upload(a.shapeBuffer, a.shapes2d.vertices)
     a.uploadStatics(frame.cmd)
     a.uploadStaticSplats(frame.cmd)
     if a.batches.len > 0 or a.statics.len > 0 or a.splatBatches.len > 0 or
         a.staticSplats.len > 0 or
         a.waterBatches.len > 0 or
-        a.sprites.pending or a.planes.pending or a.sky.enabled:
+        a.sprites.pending or a.planes.pending or a.mist.pending or
+        a.sky.enabled:
       a.refreshProjection(frame)
       if a.sky.enabled:
         a.syncSkybox(frame.cmd)

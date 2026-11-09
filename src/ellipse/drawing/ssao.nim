@@ -127,9 +127,13 @@ func newDepthUniformPusher*(p: SsaoPass, cmd: CommandBuffer, near, far,
   )
   proc () = cmd.pushFragmentUniforms(0, uniforms)
 
+func depthTexture*(p: SsaoPass): Texture =
+  ## The packed linear depth of the last completed replay, or nil before
+  ## the first: what the mist samples to dissolve where it meets the land.
+  p.depthData
+
 proc runOcclusion*(p: SsaoPass, cmd: CommandBuffer, options: SsaoOptions,
-    near, far, tanHalfFovY: float32) =
-  ## `tanHalfFovY` is the tangent of the perspective frustum's half-angle:
+    near, far, tanHalfFovY: float32) =  ## `tanHalfFovY` is the tangent of the perspective frustum's half-angle:
   ## the one number the pass needs to turn a reach in metres into the stride
   ## in screen space it walks at this depth.
   let pass = cmd.beginRender(p.occlusion, (1.0f, 1.0f, 1.0f, 1.0f))

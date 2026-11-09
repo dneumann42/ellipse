@@ -29,6 +29,7 @@ type
     exposure*: float32
     skybox*: SkyboxImage
     useSkybox*: bool ## the picture is wanted and there is one
+    skyboxStrength*: float32 ## 0..1: picture shown vs gradient beneath
 
   SkyboxState* = object
     ## The artist's GPU side of a skybox: the cube texture built from the
@@ -69,6 +70,7 @@ func newSkyOptions*(horizonColor = vec3(1.0f, 0.44f, 0.62f),
     exposure: max(exposure, 0.0f),
     skybox: skybox,
     useSkybox: not skybox.isNil,
+    skyboxStrength: 1.0f,
   )
 
 proc readSkybox*(path: string): SkyboxImage =
@@ -147,6 +149,7 @@ func skyUniforms*(options: SkyOptions, view: Mat4, viewportScale: Vec4,
     viewportScale: viewportScale,
     horizonExposure: vec4(options.horizonColor, max(options.exposure, 0.0f)),
     zenithUseSkybox: vec4(options.zenithColor,
-      if options.useSkybox and hasTexture: 1.0f else: 0.0f),
+      if options.useSkybox and hasTexture:
+        clamp(options.skyboxStrength, 0.0f, 1.0f) else: 0.0f),
     groundColor: vec4(options.groundColor, 0.0f),
   )

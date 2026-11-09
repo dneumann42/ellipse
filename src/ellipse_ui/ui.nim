@@ -315,6 +315,10 @@ var
   menuBarNow: seq[uint32] = @[]   ## menu buttons of the bar being laid out
   menuBarLast: seq[uint32] = @[]  ## ... and of the previous frame
   menuKeysGen = 0'u32      ## frame whose keys a menu already handled
+  curPopId = 0'u32         ## popover whose body is being laid out right now
+  subRowId = 0'u32         ## submenu row whose child is open
+  subPopId = 0'u32         ## that child's id, published while it renders
+  subOwner = 0'u32         ## the parent popover the published child belongs to
 
 persistUiState("ellipse/menus", (openMenuId, menuCursor))
 
@@ -398,7 +402,9 @@ proc menu*(label: string, blk: MenuBody) =
   let btnId = elementId("menu." & label)
   let popId = elementId("menu." & label & ".pop")
   menuBarNow.add btnId.id
-  registerFocus(btnId, 0, popId)
+  let subHot = subOwner == popId.id and subPopId != 0
+  registerFocus(btnId, 0, popId,
+                if subHot: elementIdFromId(subPopId) else: ElementId())
   let clicked = menuPressed()
   if clicked:
     if pointerOver(btnId):
@@ -406,7 +412,8 @@ proc menu*(label: string, blk: MenuBody) =
       else: openMenu(btnId.id)
       menuPress = true
     elif openMenuId == btnId.id:
-      if pointerOver(popId): menuPress = true   # press inside the popover
+      if pointerOver(popId) or (subHot and pointerOver(elementIdFromId(subPopId))):
+        menuPress = true   # press inside the popover or an open submenu
       else: openMenuId = 0'u32                  # press elsewhere: dismiss
   if focused(btnId):
     menuKeys(btnId)
@@ -445,6 +452,9 @@ proc menu*(label: string, blk: MenuBody) =
                   fitViewport = true))
     menuSelected = false
     menuItemIdx = 0
+    curPopId = popId.id
+    subPopId = 0
+    subOwner = 0
     if elementData(popId).found:
       # The shadow attaches to the popover's last-frame box; on the popover's
       # very first frame no box is published yet, so paint it transparent for
@@ -468,6 +478,65 @@ proc menu*(label: string, blk: MenuBody) =
     menuEnter = false
     if menuSelected:
       openMenuId = 0'u32
+      subRowId = 0
+    closeElement()
+
+proc subMenu*(label: string, blk: MenuBody) =
+  ## A menu row that opens a child popover while the pointer rests on it or
+  ## travels into it -- a submenu, arrow marker and all. The child floats out
+  ## to the row's right, and the engine's viewport fit flips it to the left
+  ## when the right has no room. Its rows are ordinary `menuItem`s; picking
+  ## one closes the whole menu. A submenu follows the pointer, not the
+  ## keyboard: the parent menu's Up/Down cursor walks the rows around it.
+  let t = activeTheme
+  let rowId = localId("submenu." & label)
+  let popId = localId("submenu." & label & ".pop")
+  if pointerOver(rowId):
+    subRowId = rowId.id
+  elif subRowId == rowId.id and not pointerOver(popId):
+    subRowId = 0                            # pointer left row and child
+  let isOpen = subRowId == rowId.id
+
+  openElement(rowId)
+  let press = pressing()
+  var d = row(width = grow(), height = fit(), gap = 16,
+              padding = squeeze(padAll(t.metrics.padMenuItem), press))
+  if press:
+    d.background = buttonPressBg
+  elif hovered() or isOpen:
+    d.background = buttonHoverBg
+  d.corner = allCorners(t.radii.inner)
+  configureOpenElement(d)
+  textElement(label, TextConfig(fontSize: t.text.menu, color: t.palette.textColor))
+  openElement()
+  configureOpenElement(row(width = grow(), height = fit(), alignX = right))
+  textElement("▶", TextConfig(fontSize: t.text.menu, color: t.palette.dimColor))
+  closeElement()
+  closeElement()
+
+  if isOpen:
+    subPopId = popId.id
+    subOwner = curPopId
+    openElement(popId)
+    configureOpenElement(col(width = fit(), height = fit(), gap = t.metrics.gapList,
+                             padding = padAll(t.metrics.padOption))
+        .bg(t.palette.panelBg).border(t.metrics.borderHairline, t.palette.panelBorder)
+        .corner(t.radii.popover)
+        .floating(attachElementId,
+                  # Two pixels of overlap keep the pointer's path from the
+                  # row into the child inside one of the two boxes, so the
+                  # submenu never falls through a gap mid-transit. The
+                  # vertical lift aligns the child's first row with the row.
+                  offset = vec2(-2.0, -float32(t.metrics.padOption)),
+                  zIndex = 101,
+                  points = AttachPoints(element: pointLeftTop,
+                                        parent: pointRightTop),
+                  parentId = rowId.id,
+                  fitViewport = true))
+    let saved = menuItemIdx
+    menuItemIdx = menuItemCount + 100   # out of the parent's cursor rotation
+    blk()
+    menuItemIdx = saved
     closeElement()
 
 proc menuSeparator*() =

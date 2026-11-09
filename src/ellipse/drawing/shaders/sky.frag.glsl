@@ -4,7 +4,9 @@
 // that direction and softened toward the horizon colour where the eye
 // grazes the horizon or dips below it; with no skybox the sky is painted
 // from three colours -- warm at the horizon, deep at the zenith, and a
-// ground band below. Exposure brightens whichever the frame draws.
+// ground band below. Exposure brightens whichever the frame draws. The
+// two mix into each other as the skybox's strength drops, so a picture
+// can melt into the night sky instead of snapping away.
 
 layout(location = 0) in vec3 vViewDirection;
 
@@ -44,6 +46,7 @@ vec3 skyboxSky(vec3 direction) {
 
 void main() {
   vec3 direction = normalize(vViewDirection);
-  vec3 color = uUseSkybox > 0.5 ? skyboxSky(direction) : proceduralSky(direction);
+  float blend = clamp(uUseSkybox, 0.0, 1.0);
+  vec3 color = mix(proceduralSky(direction), skyboxSky(direction), blend);
   outColor = vec4(color * max(uExposure, 0.0), 1.0);
 }
