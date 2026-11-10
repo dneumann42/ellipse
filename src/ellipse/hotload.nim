@@ -41,6 +41,8 @@
 ## the previous library serving. Windows has no inotify: the shell logs that
 ## hot-loading is unavailable, and `hotCall` reports "not loaded", which the
 ## generated call sites answer with a placeholder panel.
+{.push gcsafe.}
+
 
 import std/[syncio, os, dirs, strutils, envvars, osproc, sha1]
 import ./platform/[fdwatch, pacing, platform]
@@ -80,11 +82,12 @@ type
     wds: seq[int32]
 
 var
-  modules: seq[HotModule] = @[]
+  modules {.threadvar.}: seq[HotModule]
   enabled = false
   loadSeq = 0
-  watch: Watch
+  watch {.threadvar.}: Watch
   watchOk = false
+modules = @[]
 
 proc hotInvokeFn(fn: pointer; args: pointer): cint {.importc: "hot_invoke".}
 
@@ -145,20 +148,23 @@ proc hotEnabled*: bool = enabled
 var
   watchingWholeApp = false
   restartRequested = false
-  restartArgs*: seq[string] = @[]   ## how this process was launched, for a restart
-  buildCmd = ""
-  srcDirs: seq[string] = @[]      ## directories under watch, re-walked for
-                                  ## subdirectories created since we started
+  restartArgs* {.threadvar.}: seq[string]
+  buildCmd {.threadvar.}: string
+  srcDirs {.threadvar.}: seq[string]  ## directories under watch, re-walked for
+                                      ## subdirectories created since we started
   lastSourceChangeNs = 0'i64      ## monotonic ns of the newest change event
   quietNs = (if getEnv("ELLIPSE_HOT_QUIET").len > 0:
                parseInt(getEnv("ELLIPSE_HOT_QUIET")) * 1_000_000'i64
              else: 400_000_000'i64)  ## this long with no news means the editor
-                                  ## settled: build now
+                                     ## settled: build now
   projectWatchFd = -1'i32         ## the whole-app watcher's descriptor
   restarting = false              ## a rebuild landed; re-exec at the next
                                   ## safe moment (the host loop reads it)
   restartedAlready = false        ## set when `takeRestart` is honoured, stays
   buildStartedOnce = false          ## a rebuild has begun (a test's seam)
+restartArgs = @[]
+srcDirs = @[]
+buildCmd = ""
 
 when not defined(windows):
   const

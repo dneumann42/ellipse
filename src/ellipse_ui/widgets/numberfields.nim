@@ -1,5 +1,7 @@
 ## Numeric entry: a text field that parses, clamps and steps. See
 ## `documentation/nim-tutorial.md` §6.6 (Number fields).
+{.push gcsafe.}
+
 
 import clay
 import ../ui
@@ -7,7 +9,8 @@ import ../ui
 import ellipse/platform/platform
 import ./common
 
-var numBuffer = ""
+var numBuffer {.threadvar.}: string
+numBuffer = ""
 var numBufferId = 0'u32
 
 func clampTo(v, lo, hi: float): float =

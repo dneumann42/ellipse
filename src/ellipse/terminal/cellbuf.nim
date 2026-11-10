@@ -26,6 +26,8 @@
 ##
 ## A wide (CJK, emoji) glyph takes two cells: the second holds "" and is
 ## never written on its own.
+{.push gcsafe.}
+
 
 import std/math
 
@@ -54,7 +56,7 @@ type
     cellW*, cellH*: float32 ## virtual pixels per cell (clay's grid)
 
   CellPainter* = proc (buf: var CellBuffer; cmd: RenderCommand;
-                       area: CellRect) {.nimcall.}
+                       area: CellRect) {.nimcall, gcsafe.}
     ## Draws a `renderCustom` command on the terminal: `area` is its box
     ## (`buf.toCells(cmd.box)`) already clipped -- paint only inside it.
     ## A plain proc, not a closure: what it needs comes with the command --
@@ -69,9 +71,10 @@ var
   boldFrom*: uint16 = 20
     ## Text this size and up is drawn bold: headings stand out on a grid
     ## where every size is one row.
-  painters: seq[CellPainter] = @[]
+  painters {.threadvar.}: seq[CellPainter]
   pillRadius*: float32 = 12
     ## A one-row box rounded this much (virtual pixels) gets `( )` caps.
+painters = @[]
 
 proc registerCellPainter*(p: CellPainter): pointer =
   ## Make `p` the terminal form of the elements declared with

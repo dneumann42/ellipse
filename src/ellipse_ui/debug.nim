@@ -25,6 +25,8 @@
 ## render-only *overlay passes* twice a second that never run `update`. An
 ## idle app stays idle with the overlay up -- the timeline shows the gap
 ## and the counters fall to zero.
+{.push gcsafe.}
+
 
 import std/[tables, math]
 
@@ -64,9 +66,11 @@ type
 var
   installed = false
   active = false
-  history: seq[FrameRec] = @[]
-  widgetStats: Table[uint64, WidgetStat]
-  boxes: seq[WidgetBox] = @[]
+  history {.threadvar.}: seq[FrameRec]
+  widgetStats {.threadvar.}: Table[uint64, WidgetStat]
+  boxes {.threadvar.}: seq[WidgetBox]
+history = @[]
+boxes = @[]
 
 proc debugActive*(): bool =
   ## The overlay is showing.

@@ -1,5 +1,7 @@
 ## A multi-choice dropdown over a caller-owned bitmask. See
 ## `documentation/nim-tutorial.md` §6.4 (Multi-choice dropdown).
+{.push gcsafe.}
+
 
 import clay
 import ../ui

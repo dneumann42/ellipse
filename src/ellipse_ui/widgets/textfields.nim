@@ -1,5 +1,7 @@
 ## Text entry fields. See `documentation/nim-tutorial.md` §6.5 (Text fields
 ## and the editor).
+{.push gcsafe.}
+
 
 import clay
 import ../ui

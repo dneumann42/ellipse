@@ -137,11 +137,13 @@ build_owl: bin/owl
 run_owl: bin/owl
 	./bin/owl $(ARGS)
 
-# Build owl and install the binary into $(PREFIX)/bin. Its libraries and
-# scripts are embedded at compile time (embedFile), so the binary is all
-# that is needed.
-install: build_owl
+# Build owl and the engine's command line (its `image` tool previews
+# sprites in editors), and install the binaries into $(PREFIX)/bin. owl
+# embeds its libraries and scripts at compile time (embedFile), so the
+# binary is all that is needed.
+install: build_owl build_ellipse
 	install -Dm755 bin/owl $(DESTDIR)$(PREFIX)/bin/owl
+	install -Dm755 bin/ellipse $(DESTDIR)$(PREFIX)/bin/ellipse
 
 test_owl:
 	@mkdir -p build

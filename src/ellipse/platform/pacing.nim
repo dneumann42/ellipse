@@ -22,6 +22,8 @@
 ##
 ## Everything here is clock-injectable (`setClock`) and SDL-free, so the
 ## scheduler is unit-testable without a window.
+{.push gcsafe.}
+
 
 import std/[monotimes, tables]
 
@@ -59,7 +61,7 @@ const
   MaxDeadlines = 64
 
 type
-  ClockFn* = proc (): int64 {.closure.}
+  ClockFn* = proc (): int64 {.closure, gcsafe.}
 
 proc systemMono(): int64 = getMonoTime().ticks
 
@@ -77,8 +79,10 @@ proc systemWall(): int64 =
     int64(ts.tv_sec) * NsPerSec + int64(ts.tv_nsec)
 
 var
-  monoClock: ClockFn = systemMono
-  wallClock: ClockFn = systemWall
+  monoClock {.threadvar.}: ClockFn
+  wallClock {.threadvar.}: ClockFn
+monoClock = systemMono
+wallClock = systemWall
 
 proc setClock*(mono, wall: ClockFn) =
   ## Replace the monotonic and wall clocks (nanoseconds) -- the seam the
@@ -122,7 +126,7 @@ var
   wakePending = true          ## input since the last frame (first frame: yes)
   wantNext = false            ## `requestFrame` during this frame
   wantSettle = false          ## `requestSettleFrame` during this frame
-  deadlines: seq[int64] = @[] ## pending `requestFrameAt`s, ascending
+  deadlines {.threadvar.}: seq[int64]
 
   resizeActive = false
   resizeBegan = false         ## this frame is the first of a resize gesture
@@ -136,9 +140,11 @@ var
   reason = frInput
   frameDamagePx = 0'i64
   recordRefresh = false
-  refreshedNow: seq[uint64] = @[]   ## owners whose guard ran this frame
+  refreshedNow {.threadvar.}: seq[uint64]
   overlayDeadline = Never
   overlayPassOn = false
+deadlines = @[] ## pending `requestFrameAt`s, ascending
+refreshedNow = @[]   ## owners whose guard ran this frame
 
 proc frameNow*(): int64 =
   ## The current frame's monotonic time in ns. Stable for the whole frame,
@@ -410,11 +416,11 @@ proc takeStats*(): FrameStats =
 ## --- pointer motion ----------------------------------------------------------
 
 type
-  MotionFilter* = proc (x, y: float32; down: bool): bool {.closure.}
+  MotionFilter* = proc (x, y: float32; down: bool): bool {.closure, gcsafe.}
     ## Does a pointer move to (x, y) need a frame? Installed by the UI layer,
     ## which knows what the pointer was over in the last layout.
 
-var motionFilter: MotionFilter = nil
+var motionFilter {.threadvar.}: MotionFilter
 var trackingFrame = -1'i64
 
 proc setMotionFilter*(f: MotionFilter) =
@@ -481,7 +487,7 @@ type
     seen: int64         ## frame serial of the last check
 
 var
-  slots: Table[uint64, RefreshSlot]
+  slots {.threadvar.}: Table[uint64, RefreshSlot]
   lastSweep = 0'i64
 
 proc boundaryAfter(now, wallAtNow, interval, anchor: int64; wall: bool): int64 =

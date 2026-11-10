@@ -96,6 +96,8 @@
 ## Head shapes verified against the standard parser (see `meventgen`):
 ##   ObjConstr Name(field: T, ...), Call Name(), Ident Name. A modifier
 ##   wraps the head in a command: Command(focusable <head>).
+{.push gcsafe.}
+
 
 import std/[macros, strutils, envvars]
 import ./meventgen
@@ -154,12 +156,19 @@ proc withClosure(t: NimNode): NimNode =
   if pragmas != nil:
     for p in pragmas:
       if p.kind == nnkIdent and p.strVal == "closure":
+        var hasGcsafe = false
+        for q in pragmas:
+          if q.kind == nnkIdent and q.strVal == "gcsafe":
+            hasGcsafe = true
+        if not hasGcsafe:
+          pragmas.add newIdent("gcsafe")
         return result
     pragmas.add newIdent("closure")
+    pragmas.add newIdent("gcsafe")
   elif result.len > 1:
-    result[result.len - 1] = pragmaList(newIdent("closure"))
+    result[result.len - 1] = pragmaList(newIdent("closure"), newIdent("gcsafe"))
   else:
-    result.add pragmaList(newIdent("closure"))
+    result.add pragmaList(newIdent("closure"), newIdent("gcsafe"))
 
 proc paramType(p: WidgetParam): NimNode =
   if p.injected.len > 0:
@@ -486,7 +495,7 @@ proc ellipseWidgetSlots*(args: NimNode; implName: string;
     let e = parseExpr(sp)   # "name: Type" -> nnkExprColonExpr
     fp.add newTree(nnkIdentDefs, e[0], e[1], newEmptyNode())
   let slotProc = routine(nnkProcDef, slotSym, fp,
-    pragmaList(newIdent("closure")), newStmtList(slotVal))
+    pragmaList(newIdent("closure"), newIdent("gcsafe")), newStmtList(slotVal))
   for i, b in bound:
     if i != slotIdx:
       impl.add b

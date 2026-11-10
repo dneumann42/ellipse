@@ -1,3 +1,5 @@
+{.push gcsafe.}
+
 import std/[math]
 
 import ../platform/[gpu, sdl]
@@ -1099,7 +1101,7 @@ proc refreshProjection(a: Artist3D, frame: GpuFrame) =
     batch.uniforms.viewProj = viewProj
 
 proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
-                 pushFragment: proc () = nil, textured: bool = false,
+                 pushFragment: proc () {.closure, gcsafe.} = nil, textured: bool = false,
                  perBatchFog = false) =
   pass.bindPipeline(pipeline)
   pass.bindVertexBuffers([BufferBinding(buffer: a.vertexBuffer)])
@@ -1133,7 +1135,7 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
       pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
 proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
-                pushFragment: proc (); textured: bool) =
+                pushFragment: proc () {.closure, gcsafe.}; textured: bool) =
   if (a.splatBatches.len == 0 and a.staticSplats.len == 0) or a.splatTexture.isNil:
     return
   pass.bindPipeline(pipeline)
@@ -1162,7 +1164,7 @@ proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pip
       pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
 proc drawWater(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
-               pushFragment: proc (); grounded: bool) =
+               pushFragment: proc () {.closure, gcsafe.}; grounded: bool) =
   ## `grounded`: the pipeline's fragment stage reads the ground's heights.
   if a.waterBatches.len == 0:
     return

@@ -42,6 +42,8 @@
 ##
 ## POSIX only (the sockets here are Unix-domain); on Windows attached mode
 ## falls back to local windows and `connectDisplay` returns nil.
+{.push gcsafe.}
+
 
 import std/[json, os, envvars, strutils, base64, options, syncio, times]
 
@@ -740,7 +742,7 @@ type
     textureW, textureH: int
     textureFormat: PixelFormat
 
-var serverSlot: DisplaySlot
+var serverSlot {.threadvar.}: DisplaySlot
 
 proc paintWaiting(s: DisplaySlot) =
   ## No app attached: a dark field with a bar saying the slot is free.

@@ -117,7 +117,7 @@ proc beginDepth*(p: SsaoPass, cmd: CommandBuffer, depth: Texture): RenderPass =
   pass
 
 func newDepthUniformPusher*(p: SsaoPass, cmd: CommandBuffer, near, far,
-                            fogFade: float32): proc () =
+                            fogFade: float32): proc () {.closure, gcsafe.} =
   ## `fogFade` is the reach past which the scene has faded into the sky:
   ## geometry beyond it is not drawn into the depth either, so occlusion
   ## never darkens a haze the eye cannot see through.

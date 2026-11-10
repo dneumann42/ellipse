@@ -3,6 +3,9 @@
 ## `run`. See `documentation/nim-tutorial.md` §12 (The app shell and its
 ## hooks) and `documentation/README.md` for the two quick starts.
 
+{.push gcsafe.}
+
+
 import std/[envvars, syncio, os, tempfiles, base64, strutils]
 when defined(posix):
   import std/posix
@@ -44,7 +47,7 @@ type
     view*: AppFn           ## every frame, inside `layout`
     after*: AppFn          ## every frame, after the layout pass
 
-var current: App
+var current {.threadvar.}: App
 
 const reloadStateEnv = "ELLIPSE_RELOAD_STATE"
 const reloadPidEnv = "ELLIPSE_RELOAD_PID"

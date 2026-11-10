@@ -1,3 +1,5 @@
+{.push gcsafe.}
+
 import std/[os, strutils]
 
 import sdl3, sdl3_ttf, sdl3_image, chroma, errors, gpu, display

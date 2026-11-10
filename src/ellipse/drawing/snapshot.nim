@@ -52,17 +52,17 @@ proc appendChunk(data: var seq[byte], kind: string, body: openArray[byte]) =
   joined.add body
   appendU32be data, crc32(joined)
 
-proc writePng*(
-  path: string,
+proc encodePng*(
   width, height: int,
   pixels: openArray[byte],
   bgra: bool = false,
-): bool =
-  ## Save `width` x `height` 8-bit RGBA pixels (row 0 = top) as a PNG file.
+): seq[byte] =
+  ## Encode `width` x `height` 8-bit RGBA pixels (row 0 = top) as PNG bytes.
   ## Pass `bgra: true` when the source rows are ordered blue-first, as the
-  ## common swapchain formats are. Returns false on invalid dimensions.
+  ## common swapchain formats are. Returns an empty seq on invalid dimensions
+  ## so callers writing files or streams can check one return value.
   if width <= 0 or height <= 0 or pixels.len < width * height * 4:
-    return false
+    return @[]
   var png = @PngSignature
 
   var header = newSeq[byte]()
@@ -113,5 +113,19 @@ proc writePng*(
   png.appendChunk("IDAT", body)
 
   png.appendChunk("IEND", [])
+  return png
+
+proc writePng*(
+  path: string,
+  width, height: int,
+  pixels: openArray[byte],
+  bgra: bool = false,
+): bool =
+  ## Save `width` x `height` 8-bit RGBA pixels (row 0 = top) as a PNG file.
+  ## Pass `bgra: true` when the source rows are ordered blue-first, as the
+  ## common swapchain formats are. Returns false on invalid dimensions.
+  let png = encodePng(width, height, pixels, bgra)
+  if png.len == 0:
+    return false
   writeFile(path, png)
   return true

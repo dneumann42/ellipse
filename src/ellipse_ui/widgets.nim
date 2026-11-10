@@ -3,6 +3,9 @@
 ## `documentation/nim-tutorial.md` §6 (The widget set) and
 ## `documentation/reference-widgets.md` for the full signature tables.
 
+{.push gcsafe.}
+
+
 import ./widgets/[common, checkboxes, comboboxes, multiselects, textfields,
                   numberfields, headings, texts, editor, tabs, cards, scrollbars]
 

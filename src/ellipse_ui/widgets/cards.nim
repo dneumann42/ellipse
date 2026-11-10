@@ -1,3 +1,5 @@
+{.push gcsafe.}
+
 import clay
 import ../ui
 

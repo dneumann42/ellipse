@@ -1,3 +1,5 @@
+{.push gcsafe.}
+
 # Timings for the game
 
 import sdl3

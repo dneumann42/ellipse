@@ -7,6 +7,8 @@
 ## and is taken from the widgets; the next key either continues it, finishes
 ## it (the action runs), or -- bound to nothing after the prefix -- cancels
 ## it and is swallowed. `pendingKeys` names the prefix typed so far.
+{.push gcsafe.}
+
 
 import std/[syncio, strutils]
 
@@ -36,8 +38,10 @@ type
     modal*: bool
     bindings: seq[Binding]
 
-var keymaps: seq[Keymap] = @[]
-var pending: seq[KeyEvent] = @[]   ## the key sequence typed so far
+var keymaps {.threadvar.}: seq[Keymap]
+keymaps = @[]
+var pending {.threadvar.}: seq[KeyEvent]
+pending = @[]   ## the key sequence typed so far
 
 # --- chords ------------------------------------------------------------------
 

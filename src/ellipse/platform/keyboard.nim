@@ -1,6 +1,8 @@
 ## Polled keyboard state. The scancode names sdl3 uses stop in this file:
 ## a game asks for keys by name and never imports sdl3 itself, so the input
 ## backend can be swapped without touching the game.
+{.push gcsafe.}
+
 
 import sdl3
 

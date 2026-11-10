@@ -75,7 +75,7 @@ proc fromOwl*(v: owl.Object, sceneStack: var SceneStack) =
   v.field("unload").fromOwl(sceneStack.unload)
   v.field("stack").fromOwl(sceneStack.stack)
 
-var owlBaseEnv: ref Environment = nil
+var owlBaseEnv {.threadvar.}: ref Environment
 
 proc readOwl(source: string, filename: string): owl.Object =
   if owlBaseEnv == nil:

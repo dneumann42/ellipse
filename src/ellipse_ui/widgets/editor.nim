@@ -1,6 +1,8 @@
 ## The full text-editing surface -- the document area a Notepad-style app
 ## edits. See `documentation/nim-tutorial.md` §6.5 (Text fields and the
 ## editor) and `documentation/reference-widgets.md` §3.9.
+{.push gcsafe.}
+
 
 import std/[math, monotimes, strutils]
 
@@ -48,8 +50,8 @@ type
 
 var
   histId = 0'u32       ## the editor the undo history belongs to
-  undoStack: seq[Snap] = @[]
-  redoStack: seq[Snap] = @[]
+  undoStack {.threadvar.}: seq[Snap]
+  redoStack {.threadvar.}: seq[Snap]
   groupTick = 0'i64    ## when the current undo group last took an edit
   groupKind = 0        ## 1 grew, 2 shrank, 3 replaced -- what coalesces
   mOwner = 0'u32       ## the position mirror: which editor it belongs to
@@ -57,6 +59,8 @@ var
   mAnchor = 0
   pendingUndo = false  ## menu requests that arrive between frames
   pendingRedo = false
+undoStack = @[]
+redoStack = @[]
 
 ## --- position mirror ------------------------------------------------------------
 ##

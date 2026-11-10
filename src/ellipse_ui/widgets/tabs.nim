@@ -1,6 +1,8 @@
 ## The tabbed view container: a strip of tab buttons over one content
 ## panel that swaps pages with the selection. See
 ## `documentation/nim-tutorial.md` §6.8 (Tabs).
+{.push gcsafe.}
+
 
 import std/tables
 
@@ -11,7 +13,8 @@ import ellipse/platform/platform
 
 import ./common
 
-var tabState = initTable[uint32, int]()
+var tabState {.threadvar.}: typeof(initTable[uint32, int]())
+tabState = initTable[uint32, int]()
 
 type SavedTab = tuple[id: uint32, index: int]
 proc savedTabs(): seq[SavedTab] =

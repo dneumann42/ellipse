@@ -66,8 +66,8 @@ export serde, watch
 type
   SettingsTypeName* = string
 
-  LoadHook = proc (self: AbstractSettingsObject) {.closure.}
-  WriteHook = proc (self: AbstractSettingsObject): string {.closure.}
+  LoadHook = proc (self: AbstractSettingsObject) {.closure, gcsafe.}
+  WriteHook = proc (self: AbstractSettingsObject): string {.closure, gcsafe.}
 
   AbstractSettingsObject* = ref object of RootObj
     path: string

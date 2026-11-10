@@ -1,3 +1,5 @@
+{.push gcsafe.}
+
 import std/[rlocks, syncio]
 
 type
@@ -17,7 +19,7 @@ type
     onLog: proc(level: LogLevel; data: openArray[string]): LogResult {.closure.}
 
 var
-  logHandlers: seq[LogHandler]
+  logHandlers {.threadvar.}: seq[LogHandler]
   logLock: RLock
 
 initRLock logLock

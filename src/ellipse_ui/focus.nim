@@ -1,6 +1,8 @@
 ## Keyboard focus: one focus slot for the whole widget set, and the Tab
 ## chain that walks it. See `documentation/nim-tutorial.md` §7 (Focus and
 ## the keyboard) and §8 (Keymaps and shortcuts).
+{.push gcsafe.}
+
 
 import clay
 import ./reloadstate
@@ -17,10 +19,12 @@ var
   serial = 0'u32           ## bumped on every focus change
   seenSerial = 0'u32       ## the serial the focus holder last laid out with
   gainedId = 0'u32         ## the holder that saw focus arrive this frame
-  chainNow: seq[FocusEntry] = @[]   ## registrations of the frame in layout
+  chainNow {.threadvar.}: seq[FocusEntry]
   chainNowGen = 0'u32               ## clay generation `chainNow` belongs to
-  chainLast: seq[FocusEntry] = @[]  ## the frame before `chainNow`'s
+  chainLast {.threadvar.}: seq[FocusEntry]
   chainLastGen = 0'u32
+chainNow = @[]   ## registrations of the frame in layout
+chainLast = @[]  ## the frame before `chainNow`'s
 
 var reloadFocusId = 0'u32
 registerUiState("ellipse/focus", proc(): uint32 = focusId,

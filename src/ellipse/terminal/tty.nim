@@ -7,6 +7,8 @@
 ##
 ## POSIX only; on Windows `ttyIsTty` is false and the terminal backend runs
 ## headless.
+{.push gcsafe.}
+
 
 when defined(windows):
   proc ttyIsTty*(): bool = false

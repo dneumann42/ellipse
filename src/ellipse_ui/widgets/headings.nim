@@ -1,6 +1,8 @@
 ## A type scale: six heading levels plus a `Section` widget that wraps a
 ## heading and its content. See `documentation/nim-tutorial.md` §6.7
 ## (Headings and reading text).
+{.push gcsafe.}
+
 
 import clay
 import ../ui

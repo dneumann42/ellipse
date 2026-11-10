@@ -1,5 +1,7 @@
 ## Checkboxes: `checkbox` toggles a caller-owned bool. See
 ## `documentation/nim-tutorial.md` §6.2 (Checkboxes and switches).
+{.push gcsafe.}
+
 
 import clay
 import ../ui

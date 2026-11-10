@@ -1172,7 +1172,7 @@ proc setMeasureText*(ctx: Context; fn: MeasureFn) =
   ## every text element. Required before laying out text.
   ctx.measureText = fn
 
-proc setScrollQuery*(ctx: Context; fn: proc(id: uint32): Vec2 {.closure.}) =
+proc setScrollQuery*(ctx: Context; fn: proc(id: uint32): Vec2 {.closure, gcsafe.}) =
   ## Experimental: query scroll offsets from an external owner instead of
   ## letting Clay track them (pairs with `externalScrollHandling`).
   ctx.queryScrollOffset = fn

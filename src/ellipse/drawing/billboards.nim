@@ -614,7 +614,7 @@ proc uniformsFor(p: BillboardPass, view, viewProj: Mat4, eye, toLight: Vec3,
   )
 
 proc drawRuns(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
-              pipeline: Pipeline, base: BillboardUniforms, pushFragment: proc (),
+              pipeline: Pipeline, base: BillboardUniforms, pushFragment: proc () {.closure, gcsafe.},
               layeredPipeline: Pipeline = nil,
               textured: bool = true, clusters: ClusteredLights = nil) =
   pass.bindPipeline(pipeline)

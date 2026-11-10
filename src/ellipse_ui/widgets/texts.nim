@@ -3,6 +3,9 @@
 ## `documentation/nim-tutorial.md` §6.7 (Headings and reading text) and
 ## `documentation/reference-widgets.md` §2.
 
+{.push gcsafe.}
+
+
 import clay
 import ../ui
 

@@ -3,6 +3,9 @@
 ## §13.3 for the forms helpers below, and `documentation/owl-tutorial.md`
 ## §9 (App, dialogs and popups).
 
+{.push gcsafe.}
+
+
 import std/[strutils, syncio, os, cmdline, envvars]
 
 import clay
@@ -101,11 +104,11 @@ const
   ZBase = 30000             ## overlays sit over menus and scrollbars
 
 var
-  specNames: seq[string] = @[]
-  specs: seq[DialogSpec] = @[]
-  stack: seq[Instance] = @[]     ## inline dialogs, bottom to top
-  windows: seq[Instance] = @[]   ## dialogs out in child processes
-  toasts: seq[Toast] = @[]
+  specNames {.threadvar.}: seq[string]
+  specs {.threadvar.}: seq[DialogSpec]
+  stack {.threadvar.}: seq[Instance]
+  windows {.threadvar.}: seq[Instance]
+  toasts {.threadvar.}: seq[Toast]
   nextHandle = 1
   lastHandle = 0
   cur = -1                       ## the instance whose body is running
@@ -113,10 +116,15 @@ var
 
   # the child-process side
   childParsed = false
-  childReq = Fields()
+  childReq {.threadvar.}: Fields
   childEmitted = false
   childShown = false
   childFrames = 0
+specNames = @[]
+specs = @[]
+stack = @[]     ## inline dialogs, bottom to top
+windows = @[]   ## dialogs out in child processes
+toasts = @[]
 
 proc findSpec(name: string): int =
   var i = 0
@@ -370,11 +378,12 @@ proc request(inst: Instance; name: string): Fields =
   result.put("modal", inst.modal)
   result.put("title", inst.title)
 
-var dialogLauncher*: seq[string] = @[]
+var dialogLauncher* {.threadvar.}: seq[string]
   ## The command a window dialog's process starts with, before its
   ## `--ellipse-dialog=` argument; empty means this executable alone. A
   ## host that runs programs (an interpreter) puts its own command here,
   ## so the child runs the same program.
+dialogLauncher = @[]
 
 proc open*(d: Dialog; args = Fields(); mode = dmInline;
            onDone: DialogDone = nil; title = "";
@@ -867,9 +876,10 @@ proc toast*(message: string; seconds = 2.5) =
 ## button's label, `fields` carry "index" (the button) and "text".
 
 var
-  msgText = ""
-  msgButtons: seq[string] = @[]
+  msgText {.threadvar.}: string
+  msgButtons {.threadvar.}: seq[string]
   msgDefault = 0
+msgButtons = @[]
 
 proc msgField(): ElementId = elementId("dlg.msg.field")
 
@@ -911,7 +921,8 @@ proc msgFooter()  =
       msgFinish(i)
     inc i
 
-let messageDialog* = defineDialog("ellipse.message", DialogSpec(
+var messageDialog* {.threadvar.}: Dialog
+messageDialog = defineDialog("ellipse.message", DialogSpec(
   width: 440, body: msgBody, footer: msgFooter))
 
 proc messageBox*(message: string; buttons: openArray[string]; title = "";

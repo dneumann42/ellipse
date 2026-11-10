@@ -1,3 +1,5 @@
+{.push gcsafe.}
+
 import ./termmode
 export termmode
 
@@ -450,12 +452,12 @@ when withSdl:
       error id, " failed: ", detail
       raise Failure()
 
-var activeApp: PlatformApplication
+var activeApp {.threadvar.}: PlatformApplication
 
 type
-  CloseHandler* = proc (): bool {.closure.}
+  CloseHandler* = proc (): bool {.closure, gcsafe.}
 
-var closeHandler: CloseHandler = nil
+var closeHandler {.threadvar.}: CloseHandler
 
 proc setCloseHandler*(f: CloseHandler) =
   ## Ask `f` when the person asks to close the app -- a window's close
@@ -467,6 +469,7 @@ proc setCloseHandler*(f: CloseHandler) =
 var inputDebug = getEnv("ELLIPSE_INPUT_DEBUG") != ""
   ## When set, pumpEvents logs every raw SDL event (type + key fields),
   ## revealing exactly what the platform backend delivers.
+inputDebug = getEnv("ELLIPSE_INPUT_DEBUG") != ""
 
 when withSdl:
   proc sdlRenderer*(): ptr SDL_Renderer =
@@ -612,13 +615,14 @@ when withSdl:
 ## writes nothing.
 
 var
-  termDecoder: Decoder
+  termDecoder {.threadvar.}: Decoder
   termSigFd = -1'i32
   termHeadless = false
   termMods: tuple[ctrl, shift, alt: bool]
-  termClipboard = ""
+  termClipboard {.threadvar.}: string
   termLastClick = 0'i64
   termLastClickCell = (-1, -1)
+termClipboard = ""
 
 const DoubleClickNs = 400_000_000'i64
 
@@ -1633,7 +1637,7 @@ when withSdl:
   ## on-screen keyboards or gamepad text could feed input the same way the WM
   ## does). `pushKeyEvent` skips all of that; these do not.
 
-  var pushedTexts: seq[string] = @[]
+  var pushedTexts {.threadvar.}: seq[string]
     ## Keeps the TEXT_INPUT payload strings alive until SDL has polled them;
     ## the queue copies the struct, older SDL versions not the string.
 
@@ -1849,9 +1853,10 @@ proc waitFor(app: PlatformApplication; ns: int64) =
     elif ns > 0:
       SDL_DelayNS(uint64(ns))
 
-var statsDebug = getEnv("ELLIPSE_FRAME_STATS") != ""
+var statsDebug {.threadvar.}: typeof(getEnv("ELLIPSE_FRAME_STATS") != "")
   ## When set, the loop logs once per second what the pacer did: frames,
   ## presents, why each frame woke, repainted pixels.
+statsDebug = getEnv("ELLIPSE_FRAME_STATS") != ""
 
 proc reportStats(lastReport: var int64) =
   if not statsDebug:

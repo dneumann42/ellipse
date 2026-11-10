@@ -17,6 +17,8 @@
 ## callback that leaves data unread is called again.
 ##
 ## POSIX only; on Windows `watchFd` reports false and nothing is watched.
+{.push gcsafe.}
+
 
 type
   FdCallback* = proc () {.closure.}
@@ -25,7 +27,8 @@ type
     fd: int32
     cb: FdCallback
 
-var watchers: seq[Watcher] = @[]
+var watchers {.threadvar.}: seq[Watcher]
+watchers = @[]
 
 when defined(windows):
   proc watchFd*(fd: int32; cb: FdCallback): bool = false

@@ -94,12 +94,12 @@ type
     text*: string
     fontId*, fontSize*, letterSpacing*: uint16
 
-  MeasureFn* = proc(text: string; cfg: TextConfig): Size {.closure.}
+  MeasureFn* = proc(text: string; cfg: TextConfig): Size {.closure, gcsafe.}
     ## User-provided text measurement. Receives the exact slice to measure
     ## (a single word, `"\n"` as a zero-length probe, or `" "`) with the
     ## config it belongs to; returns that run's size.
 
-  HoverCallback* = proc(id: ElementId, pointer: PointerData) {.closure.}
+  HoverCallback* = proc(id: ElementId, pointer: PointerData) {.closure, gcsafe.}
     ## Bound to an element with `onHover`; fired next frame while the pointer
     ## is inside the element's stored bounding box.
 
@@ -130,7 +130,7 @@ type
 
     # --- host hooks
     measureText*: MeasureFn
-    queryScrollOffset*: nil (proc(id: uint32): Vec2 {.closure.})
+    queryScrollOffset*: nil (proc(id: uint32): Vec2 {.closure, gcsafe.})
     externalScrollHandling*: bool
     cullingEnabled*: bool = true
     grid*: Size                   ## cell size when laying out for a character

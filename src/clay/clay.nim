@@ -36,6 +36,11 @@
 ## Include order below is dependency order; fragments must not import each
 ## other or anything outside std.
 
+
+
+
+{.push gcsafe.}
+
 import std/[tables, algorithm, syncio, assertions, math, macros, hashes]
 
 include types
@@ -53,7 +58,7 @@ include interaction
 ## Every core routine takes an explicit `Context`; the DSL (and single-window
 ## apps) use these thin wrappers around an implicit current context.
 
-var currentCtx: Context
+var currentCtx {.threadvar.}: Context
 
 proc currentContext*(): Context =
   ## The context the DSL operates on. Lazily initialised (640x480) -- call
@@ -64,7 +69,7 @@ proc currentContext*(): Context =
     return currentContext()
   return existing
 
-proc setCurrentContext*(ctx: Context) =
+proc setCurrentContext*(ctx: Context)  =
   ## Swap contexts for multi-window use; queries and declarations follow the
   ## current one.
   currentCtx = ctx

@@ -3,6 +3,9 @@
 ## `documentation/nim-tutorial.md` §9 (Events) and
 ## `documentation/owl-tutorial.md` §6.
 
+{.push gcsafe.}
+
+
 import std/syncio
 
 import clay
@@ -52,17 +55,21 @@ proc `==`*(a, b: ElementId): bool =
 proc noHandler(kind: EventKind, payload: pointer): EventFlow = efPass
 
 var
-  frames: seq[EventFrame] = @[]
+  frames {.threadvar.}: seq[EventFrame]
   rootChildren = 0'u32       ## root-level widget frames pushed this frame
   rootGen = 0'u32            ## clay generation `rootChildren` counts for
   dispatchDepth = 0          ## nested `dispatchEvent` calls in flight
   dispatchStart = -1         ## while a handler runs: the frame to start at
   reemitRequested = false
-  logNow: seq[EventRecord] = @[]
+  logNow {.threadvar.}: seq[EventRecord]
   logNowGen = 0'u32
-  logLast: seq[EventRecord] = @[]
+  logLast {.threadvar.}: seq[EventRecord]
   logLastGen = 0'u32
-  kinds: seq[KindEntry] = @[]
+  kinds {.threadvar.}: seq[KindEntry]
+frames = @[]
+logNow = @[]
+logLast = @[]
+kinds = @[]
 
 # --- kinds ---------------------------------------------------------------------
 
@@ -110,9 +117,11 @@ type
 
 var
   traceOn = false
-  traceNow: seq[WidgetTrace] = @[]
+  traceNow {.threadvar.}: seq[WidgetTrace]
   traceGen = 0'u32
-  traceStack: seq[int] = @[]
+  traceStack {.threadvar.}: seq[int]
+traceNow = @[]
+traceStack = @[]
 
 proc setWidgetTrace*(on: bool) =
   traceOn = on

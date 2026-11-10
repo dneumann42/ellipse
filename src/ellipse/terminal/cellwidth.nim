@@ -3,6 +3,8 @@
 ## joiners take none, East Asian wide/fullwidth ranges and emoji take two,
 ## everything else one. Tabs count one (the renderer draws a space); other
 ## control characters none.
+{.push gcsafe.}
+
 
 func decodeRune*(s: string; i: int): tuple[cp: int32, len: int] =
   ## The code point starting at byte `i` and its byte length. Malformed

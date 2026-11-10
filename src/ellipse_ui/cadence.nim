@@ -1,6 +1,8 @@
 ## Widget cadences: how often each part of the UI refreshes. See
 ## `documentation/nim-tutorial.md` §11 (Cadence, animation and the frame
 ## loop).
+{.push gcsafe.}
+
 
 import std/[tables, math]
 
@@ -30,7 +32,7 @@ type
     gen: uint32
     n: uint64
 
-var guardCounts: Table[uint64, GuardCount]
+var guardCounts {.threadvar.}: Table[uint64, GuardCount]
 
 proc nextGuardKey(owner: uint64): uint64 =
   ## The n-th unlabelled guard of `owner` this frame.
@@ -103,7 +105,7 @@ type
     seen: int64
 
 var
-  anims: Table[uint64, Anim]
+  anims {.threadvar.}: Table[uint64, Anim]
   animSweep = 0'i64
 
 proc sweepAnims() =

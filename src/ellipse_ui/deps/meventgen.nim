@@ -50,6 +50,8 @@
 ## module the macro expands into -- exactly where the nimony plugin emitted
 ## its idents, and where `ellipse_ui/events` (re)exported symbols are in
 ## scope at every use site.
+{.push gcsafe.}
+
 
 import std/[macros, strutils]
 

@@ -3,6 +3,9 @@
 ## the caret edit engine. See `documentation/nim-tutorial.md` §6 (The widget
 ## set) and `documentation/reference-widgets.md`.
 
+{.push gcsafe.}
+
+
 import std/[monotimes, strutils]
 
 import clay
@@ -57,7 +60,7 @@ type
     text*: string = ""
     outcome*: EditOutcome = eoNone
 
-  ValidCharFn* = proc(c: char): bool
+  ValidCharFn* = proc(c: char): bool {.nimcall, gcsafe.}
 
 proc acceptAll*(c: char): bool = true
 
@@ -71,7 +74,7 @@ proc acceptAll*(c: char): bool = true
 var
   bootTime = getMonoTime().ticks
   blinkStart = bootTime  ## the caret's blink phase restarts here on input
-  snapshot = ""          ## the text as it was when focused (Escape target)
+  snapshot {.threadvar.}: string  ## the text as it was when focused (Escape target)
   caret = 0
   selAnchor = 0
   caretSerial = 0'u32    ## the focus session the caret state belongs to
@@ -233,7 +236,8 @@ proc gotoLine(s: string, delta: int, extend = false) =
 ## single-slot kill buffer; consecutive kills accumulate, so `C-k C-k` then
 ## `C-y` yanks both lines. Inserting or yanking closes the accumulation.
 
-var killBuf = ""
+var killBuf {.threadvar.}: string
+killBuf = ""
 var killAppend = false
 
 proc sliceOf(s: string, lo, hi: int): string =
@@ -411,7 +415,7 @@ proc clipboardPaste*(s: var string, valid: ValidCharFn = acceptAll) =
   ## through the same validator the keystroke path uses.
   pasteInto(s, valid)
 
-var keyFilter: proc (evs: seq[KeyEvent]): seq[KeyEvent] {.closure.}
+var keyFilter {.threadvar.}: proc (evs: seq[KeyEvent]): seq[KeyEvent] {.closure.}
   ## The app's key-routing seam (see `installKeyFilter`).
 var keyFilterOn = false     ## whether a filter lives in the slot above
 
@@ -716,7 +720,8 @@ type FollowMark = object
 
 const followFrames = 3   ## geometry lags a frame; chase until it settles
 
-var followMarks: seq[FollowMark] = @[]
+var followMarks {.threadvar.}: seq[FollowMark]
+followMarks = @[]
 
 proc caretNeedsFollow(id: uint32, pos, len: int): bool =
   ## Whether `id`'s caret should pull the view this frame: only after the

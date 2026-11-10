@@ -1,5 +1,7 @@
 ## A single-choice dropdown. See `documentation/nim-tutorial.md` §6.3
 ## (Single-choice dropdown).
+{.push gcsafe.}
+
 
 import clay
 import ../ui

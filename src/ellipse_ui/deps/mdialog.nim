@@ -31,6 +31,8 @@
 ## Shapes verified against the standard parser: the head is
 ## Call(Name, StrLit, ExprEqExpr...); a section is Call/Command(footer,
 ## StmtList).
+{.push gcsafe.}
+
 
 import std/[macros, strutils]
 

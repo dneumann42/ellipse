@@ -12,6 +12,8 @@
 ## Bytes that end mid-sequence wait in the decoder for the next read; a
 ## lone ESC at the end of a read is the Escape key (escape sequences
 ## arrive whole in practice).
+{.push gcsafe.}
+
 
 import ../platform/keyevents
 import ./cellwidth

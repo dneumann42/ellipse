@@ -4,6 +4,8 @@
 ## so the base library owns the small `time.h` binding -- apps should not
 ## hand-`importc` libc the way Duck used to. `stamp`-style formatting is
 ## the app's business; `now()` hands back the broken-down local time.
+{.push gcsafe.}
+
 
 type
   CTm {.importc: "struct tm", header: "<time.h>".} = object

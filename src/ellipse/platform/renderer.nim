@@ -13,6 +13,8 @@
 ##
 ## Requires `initialize()` (the platform window/renderer) to have run first;
 ## links against SDL3_ttf, which is part of the SDL3 ecosystem setup.
+{.push gcsafe.}
+
 
 import ./termmode
 
@@ -133,34 +135,38 @@ when withSdl:
 ## --- state -----------------------------------------------------------------------
 
 var
-  fontPath*: string = "assets/fonts/inter/Inter-Regular.ttf"
+  fontPath* {.threadvar.}: string
     ## UI font, resolved relative to the working directory (the repo root
     ## when run via `make run`). Set before `initializeRenderer` to override;
     ## `vendoredFontPath` and then `fontFallbackPaths` are tried if this one
     ## cannot be opened.
 
-  fontFallbackPaths = @[
-    "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
-    "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+  fontFallbackPaths {.threadvar.}: seq[string]
     ## System fallbacks (Arch, Fedora, Debian layouts) so text still renders
     ## if the vendored font is missing.
 
-  monoFontPaths*: seq[string] = @[
-    "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf",
-    "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
-    "/usr/share/fonts/liberation-mono-fonts/LiberationMono-Regular.ttf",
-    "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/System/Library/Fonts/Menlo.ttc",
-    "C:/Windows/Fonts/consola.ttf"]
+  monoFontPaths* {.threadvar.}: seq[string]
     ## Candidates for `MonoFont` text (code), the first that opens wins;
     ## the UI font stands in when none does. A terminal is monospaced
     ## anyway.
+
+fontPath = "assets/fonts/inter/Inter-Regular.ttf"
+fontFallbackPaths = @[
+  "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+  "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
+  "/usr/share/fonts/TTF/DejaVuSans.ttf",
+  "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+monoFontPaths = @[
+  "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf",
+  "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+  "/usr/share/fonts/liberation-mono-fonts/LiberationMono-Regular.ttf",
+  "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
+  "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+  "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+  "/System/Library/Fonts/Menlo.ttc",
+  "C:/Windows/Fonts/consola.ttf"]
 
 const
   vendoredFontPath = currentSourcePath().parentDir.parentDir.parentDir.parentDir /
@@ -188,10 +194,11 @@ when withSdl:
       used: int64         ## paint serial that last drew it
 
   var
-    fonts: Table[int, ptr TTF_Font]
-    texts: Table[TextKey, CachedText]
+    fonts {.threadvar.}: Table[int, ptr TTF_Font]
+    texts {.threadvar.}: Table[TextKey, CachedText]
     textEngine: ptr TTF_TextEngine
-    clipStack: seq[SDL_Rect] = @[]
+    clipStack {.threadvar.}: seq[SDL_Rect]
+      ## empty until the first clip: thread vars cannot carry an initializer
     cullBox: Rect             ## where painting can land now: the SDL clip
     culling = false           ## ... when one is set
     paintSerial = 0'i64
@@ -210,7 +217,7 @@ when withSdl:
       if result != nil:
         return
 
-  proc fontFor(size: int; id = 0'u16): ptr TTF_Font =
+  proc fontFor(size: int; id = 0'u16): ptr TTF_Font {.gcsafe.} =
     ## One opened TTF font per pixel size and font (TTF point size == pixel
     ## size at the renderer's default 72 dpi): the UI font, or `MonoFont`.
     ## Returns nil when no font could be opened (the measure/draw paths
@@ -634,7 +641,7 @@ proc initializeRenderer*()  =
     # alpha-enabled fills for translucent backgrounds and glyph edges
     discard SDL_SetRenderDrawBlendMode(sdlRenderer(), BlendModeBlend)
 
-proc measureText*(text: string; cfg: TextConfig): Size =
+proc measureText*(text: string; cfg: TextConfig): Size {.gcsafe.} =
   if terminalMode():
     # One cell per column the text takes, one row high, whatever its size.
     return Size(width: float32(displayWidth(text)) * cellWidth,
@@ -662,7 +669,7 @@ proc bootContext(width, height: float32)  =
     w = winW
     h = winH
   setCurrentContext(initContext(size(w, h)))
-  setMeasureText(measureText)
+  setMeasureText(currentContext(), measureText)
   if terminalMode():
     setGrid(size(cellWidth, cellHeight))
 
@@ -781,7 +788,7 @@ when withSdl:
 var
   clearColor* = rgb(0, 0, 0)
     ## What the window shows where no command paints.
-  lastSigs: seq[CmdSig] = @[]
+  lastSigs {.threadvar.}: seq[CmdSig]
   lastValid = false          ## `retained` holds `lastSigs`' picture
   termValid = false          ## the terminal shows `termFront`
 
@@ -967,10 +974,10 @@ proc readPainted*(bytes: var seq[uint8]):
       inc y
 
 type
-  OverlayFn* = proc () {.closure.}
+  OverlayFn* = proc () {.closure, gcsafe.}
 
 var
-  overlayHook: OverlayFn
+  overlayHook {.threadvar.}: OverlayFn
   contentPaintedFlag = false
 
 proc setOverlay*(f: OverlayFn) =
@@ -1108,7 +1115,7 @@ when withSdl:
 ## `ELLIPSE_TUI_COLORS=true|256|16` overrides).
 
 var
-  termFront: CellBuffer      ## what the terminal shows
+  termFront {.threadvar.}: CellBuffer      ## what the terminal shows
   termColors = cmTrue
   termColorsKnown = false
   textColorDefault = rgb(230, 232, 238)
@@ -1140,7 +1147,8 @@ proc terminalPicture*(): CellBuffer =
                           toRgb(clearColor), toRgb(textColorDefault))
   result.paint(renderCommands())
 
-var termCursor = ""   ## the cursor state last sent (see `cursorSeq`)
+var termCursor {.threadvar.}: string   ## the cursor state last sent (see `cursorSeq`)
+termCursor = ""
 
 proc cursorSeq(): string =
   ## Where the terminal's cursor goes after this frame: at the caret a

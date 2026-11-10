@@ -1,3 +1,5 @@
+{.push gcsafe.}
+
 import std/[syncio, math]
 
 import clay
@@ -66,7 +68,8 @@ proc smoothedWheel*(rawY: float32, dt: float32): float32 =
 ## on, so `pressing`/`clickedIn` can answer over the whole hold. See
 ## `documentation/nim-tutorial.md` §5 (Interaction primitives).
 
-var pressHeld: seq[uint32] = @[]
+var pressHeld {.threadvar.}: seq[uint32]
+pressHeld = @[]
 
 proc notePressState*() =
   ## Fold this frame's pointer edge into the held-press snapshot: the down
@@ -128,7 +131,8 @@ var motionFilterInstalled = false
 
 type InputHook* = proc () {.closure.}
 
-var inputHooks: seq[InputHook] = @[]
+var inputHooks {.threadvar.}: seq[InputHook]
+inputHooks = @[]
 var wheelHeld = false
 
 proc holdWheel*() =
@@ -312,13 +316,15 @@ var
   menuItemIdx = 0          ## items declared so far by the open menu
   menuItemCount = 0        ## items the open menu declared last frame
   menuEnter = false        ## Enter picks the highlighted item this frame
-  menuBarNow: seq[uint32] = @[]   ## menu buttons of the bar being laid out
-  menuBarLast: seq[uint32] = @[]  ## ... and of the previous frame
+  menuBarNow {.threadvar.}: seq[uint32]
+  menuBarLast {.threadvar.}: seq[uint32]
   menuKeysGen = 0'u32      ## frame whose keys a menu already handled
   curPopId = 0'u32         ## popover whose body is being laid out right now
   subRowId = 0'u32         ## submenu row whose child is open
   subPopId = 0'u32         ## that child's id, published while it renders
   subOwner = 0'u32         ## the parent popover the published child belongs to
+menuBarNow = @[]   ## menu buttons of the bar being laid out
+menuBarLast = @[]  ## ... and of the previous frame
 
 persistUiState("ellipse/menus", (openMenuId, menuCursor))
 

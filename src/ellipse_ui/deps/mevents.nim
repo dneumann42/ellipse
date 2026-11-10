@@ -16,6 +16,8 @@
 ## Shapes verified against the standard parser (see `meventgen`): a trailing
 ## block attaches to the command it follows, so an `event` section arrives
 ## as Command(event, <head>, StmtList).
+{.push gcsafe.}
+
 
 import std/[macros, strutils]
 import ./meventgen

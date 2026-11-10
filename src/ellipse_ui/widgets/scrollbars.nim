@@ -1,5 +1,7 @@
 ## Floating, draggable scrollbars for clay clip/scroll containers. See
 ## `documentation/nim-tutorial.md` §6.9 (Scrollbars and scrollPanel).
+{.push gcsafe.}
+
 
 import std/[math]
 
@@ -22,7 +24,8 @@ type
     axis: BarAxis
     grab: float32
 
-var drags: seq[Drag] = @[]
+var drags {.threadvar.}: seq[Drag]
+drags = @[]
 
 type
   BarGeom = object

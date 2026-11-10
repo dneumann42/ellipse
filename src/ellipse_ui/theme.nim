@@ -1,6 +1,8 @@
 ## Theming for the ellipse_ui widget set. See
 ## `documentation/nim-tutorial.md` §10 (The theme) and
 ## `documentation/owl-tutorial.md` §8 (Themes).
+{.push gcsafe.}
+
 
 import clay
 import ellipse/platform/termmode
@@ -243,7 +245,8 @@ proc forSurface(t: sink Theme): Theme =
 
 var activeTheme*: Theme = forSurface(defaultTheme())
 
-var themeStack: seq[Theme] = @[]
+var themeStack {.threadvar.}: seq[Theme]
+themeStack = @[]
 
 proc setTheme*(theme: sink Theme) =
   ## Replace the live theme outright (no snapshot; `setTheme(defaultTheme())`

@@ -1,6 +1,8 @@
 ## Durable widget state shared by every UI app's whole-process hot reload.
 ## Register values once in the module that owns them. Stable element IDs
 ## identify widget instances; frame caches, callbacks and handles stay local.
+{.push gcsafe.}
+
 import std/[json, jsonutils]
 export json
 
@@ -11,7 +13,7 @@ type
     save: proc(): JsonNode {.closure.}
     prepare: proc(value: JsonNode): UiReloadCommit {.closure.}
 
-var uiReloadHooks: seq[UiReloadHook]
+var uiReloadHooks {.threadvar.}: seq[UiReloadHook]
 
 proc registerUiState*[T](key: string; read: proc(): T {.closure.};
                          apply: proc(value: T) {.closure.}) =
