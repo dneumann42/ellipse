@@ -102,6 +102,7 @@ type
     clusters: ClusteredLights
     pointLights: seq[PointLight]
     lightOccluders: seq[LightOccluder]
+    shadowGeometry: ShadowGeometry
     lightFocus: Vec3
     environmentRooms: seq[EnvironmentRoom]
     pipeline: Pipeline
@@ -377,10 +378,12 @@ proc newArtist*(app: App): Artist3D =
   )
 
 proc setPointLights*(a: Artist3D, lights: openArray[PointLight], focus: Vec3,
-                     occluders: openArray[LightOccluder] = []) =
+                     occluders: openArray[LightOccluder] = [],
+                     staticGeometry: ShadowGeometry = nil) =
   ## Call each frame; focus is the explorer position. RGB and intensity are linear.
   a.pointLights = @lights
   a.lightOccluders = @occluders
+  a.shadowGeometry = staticGeometry
   a.lightFocus = focus
 
 proc setEnvironmentRooms*(a: Artist3D, rooms: openArray[EnvironmentRoom]) =
@@ -540,6 +543,10 @@ proc setColor*(a: Artist3D, color: Vec4) =
 proc setColor*(a: Artist3D, r, g, b: float32, alpha: float32 = 1) =
   a.current.color = vec4(r, g, b, alpha)
 
+proc setVertexOcclusion*(a: Artist3D, occlusion: float32) =
+  ## Shade ambient/directional light per vertex without dimming local lights.
+  a.current.occlusion = clamp(occlusion,0f,1f)
+
 proc setNormal*(a: Artist3D, normal: Vec3) =
   a.current.normal = normal
 
@@ -629,6 +636,7 @@ proc vertex*(a: Artist3D, v: Vec3) =
     normal: a.current.normal,
     color: a.current.color,
     uv: a.current.uv,
+    occlusion: a.current.occlusion,
   )
   case a.mode
   of Triangles:
@@ -1569,7 +1577,7 @@ proc present*(a: Artist3D, app: var App, clearColor: ClearColor) =
     if a.waterGroundStaged:
       a.uploadWaterGround(frame.cmd)
     a.clusters.build(a.pointLights, a.lightOccluders, a.lightFocus,
-      rooms = a.environmentRooms)
+      rooms = a.environmentRooms, staticGeometry = a.shadowGeometry)
     a.clusters.upload(frame.cmd)
     a.sprites.upload(frame.cmd)
     a.planes.upload(frame.cmd)

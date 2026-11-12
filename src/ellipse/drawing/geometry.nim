@@ -20,6 +20,7 @@ type
     normal*: Vec3
     color*: Vec4
     uv*: Vec2
+    occlusion*: float32 ## sky occlusion, 0 outdoors; local lights stay independent
 
   Mesh* = object
     vertices*: seq[Vec3]
@@ -36,6 +37,7 @@ const
     Attribute(location: 1, offset: 12, format: Float3),
     Attribute(location: 2, offset: 24, format: Float4),
     Attribute(location: 3, offset: 40, format: Float2),
+    Attribute(location: 4, offset: 48, format: Float32),
   ]
   VertexStride* = uint32 sizeof(Vertex)
 

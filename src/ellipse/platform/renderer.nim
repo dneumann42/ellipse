@@ -68,6 +68,7 @@ when withSdl:
     BlendModeNone = 0'i32    # SDL_BLENDMODE_NONE
     BlendModeBlend = 1'i32   # SDL_BLENDMODE_BLEND
     PixelFormatARGB8888 = 0x16362004'u32
+    TextureAccessStatic = 0'i32
     TextureAccessTarget = 2'i32
     ScaleModeNearest = 0'i32
 
@@ -107,6 +108,9 @@ when withSdl:
     importc: "SDL_SetTextureBlendMode", header: "<SDL3/SDL.h>".}
   proc SDL_SetTextureScaleMode(tex: ptr SDL_Texture; mode: int32): bool {.
     importc: "SDL_SetTextureScaleMode", header: "<SDL3/SDL.h>".}
+  proc SDL_UpdateTexture(tex: ptr SDL_Texture; rect: pointer;
+                         pixels: pointer; pitch: cint): bool {.
+    importc: "SDL_UpdateTexture", header: "<SDL3/SDL.h>".}
   proc SDL_GetRenderOutputSize(ren: ptr SDL_Renderer; w, h: ptr int32): bool {.
     importc: "SDL_GetRenderOutputSize", header: "<SDL3/SDL.h>".}
   proc SDL_FlushRenderer(ren: ptr SDL_Renderer): bool {.
@@ -1259,6 +1263,56 @@ proc overlayUnclip*() =
   if terminalMode(): return
   when withSdl:
     discard SDL_SetRenderClipRect(sdlRenderer(), nil)
+
+## --- icon textures ---------------------------------------------------------------
+##
+## Small static ARGB images drawn through the overlay pass: tray icons and
+## other pixmap content that is not a solid clay element background. Created
+## once per image, drawn scaled with the renderer's default filter.
+
+type
+  Icon* = ref object
+    ## An opaque uploaded ARGB8888 image; nil when loading was impossible
+    ## (terminal mode, headless build, or a bad pixmap).
+    w*, h*: int32
+    data: pointer   # ptr SDL_Texture behind the withSdl curtain
+
+proc loadIcon*(argb: openArray[uint32]; width, height: int32): Icon =
+  ## Upload `width`x`height` native-order ARGB pixels (0xAARRGGBB). The
+  ## buffer is copied by the driver: callers may free `argb` afterwards.
+  if terminalMode() or width <= 0 or height <= 0 or
+      argb.len < int(width) * int(height):
+    return nil
+  when withSdl:
+    let tex = SDL_CreateTexture(sdlRenderer(), PixelFormatARGB8888,
+                                TextureAccessStatic, width, height)
+    if tex == nil:
+      return nil
+    discard SDL_SetTextureBlendMode(tex, BlendModeBlend)
+    var buf = newSeq[uint32](int(width) * int(height))
+    for i in 0 ..< buf.len: buf[i] = argb[i]
+    if not SDL_UpdateTexture(tex, nil, addr buf[0], width * 4):
+      SDL_DestroyTexture(tex)
+      return nil
+    Icon(w: width, h: height, data: tex)
+  else:
+    nil
+
+proc overlayIcon*(icon: Icon; r: Rect) =
+  ## Draw `icon` into `r` (scaled to fit), blend-alpha, on the overlay pass.
+  if icon == nil or icon.data == nil or terminalMode(): return
+  when withSdl:
+    var dst = SDL_FRect(x: r.x, y: r.y, w: r.width, h: r.height)
+    discard SDL_RenderTexture(sdlRenderer(),
+                              cast[ptr SDL_Texture](icon.data), nil, addr dst)
+
+proc freeIcon*(icon: Icon) =
+  ## Release the GPU texture. Safe on nil.
+  if icon == nil: return
+  when withSdl:
+    if icon.data != nil:
+      SDL_DestroyTexture(cast[ptr SDL_Texture](icon.data))
+      icon.data = nil
 
 proc frameChecksum*(): uint64  =
   ## FNV-1a over the backbuffer's pixels: what the next present would show.

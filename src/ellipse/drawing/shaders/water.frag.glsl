@@ -14,6 +14,7 @@
 // reach the shallows, spill foam behind them, and leave a lace of it on the
 // sand as the wash drains back.
 
+layout(location = 4) in float skyExposure;
 layout(location = 0) in vec3 worldPosition;
 layout(location = 1) in vec3 worldNormal;
 layout(location = 2) in vec4 water; // xy: flow over x and z, z: depth, w: foam
@@ -247,8 +248,8 @@ void main() {
   float foam = smoothstep(1.0 - broken, 1.0 - broken + 0.12, pattern) * smoothstep(0.0, 0.05, broken);
   foam *= 0.85;
 
-  vec3 colour = mix(body, sky, fresnel) + glint + mix(uShallow.rgb, uDeep.rgb, 0.5) * pointLighting(worldPosition, n);
-  colour = mix(colour, vec3(0.9, 0.94, 0.96) * light, foam);
+  vec3 colour = (mix(body, sky, fresnel) + glint)*skyExposure + mix(uShallow.rgb, uDeep.rgb, 0.5) * pointLighting(worldPosition, n);
+  colour = mix(colour, vec3(0.9, 0.94, 0.96) * light * skyExposure, foam);
 
   float alpha = mix(0.3, 0.94, murk) + fresnel * 0.5 + foam;
   alpha = max(alpha, churn * 0.6);

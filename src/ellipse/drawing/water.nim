@@ -22,6 +22,7 @@ type
     foam*: float32 ## 0 smooth .. 1 white water
     surf*: float32 ## 0 sheltered .. 1 open sea, where waves break on the shore
     shore*: float32 ## metres out from the shore the surf runs onto
+    occlusion*: float32 ## sky occlusion, 0 outdoors; local lights stay independent
 
   WaterGround* = object
     ## The ground under the water: a square of `size` by `size` heights,
@@ -54,6 +55,7 @@ const
     Attribute(location: 2, offset: 24, format: Float4),
     Attribute(location: 3, offset: 40, format: Float32),
     Attribute(location: 4, offset: 44, format: Float32),
+    Attribute(location: 5, offset: 48, format: Float32),
   ]
   WaterStride* = uint32 sizeof(WaterVertex)
 

@@ -8,6 +8,7 @@ layout(location = 1) in vec3 normal;
 layout(location = 2) in vec4 low;
 layout(location = 3) in vec4 high;
 layout(location = 4) in float extra;
+layout(location = 5) in float occlusion;
 
 layout(set = 1, binding = 0) uniform Uniforms {
   mat4 model;
@@ -37,5 +38,5 @@ void main() {
   weightsLow = low;
   weightsHigh = high;
   weightsExtra = extra;
-  lighting = vec4(u.color.rgb * (u.params.x + diffuse), specular);
+  lighting = vec4(u.color.rgb * (u.params.x + diffuse), specular)*(1.0-clamp(occlusion,0.0,1.0));
 }

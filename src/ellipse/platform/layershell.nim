@@ -40,6 +40,9 @@ type
     margin*: int32 = 0
     keyboard*: KeyboardMode = keyboardOnDemand
     namespace*: string = "ellipse"
+    anchorEnd*: bool = false   ## also pin the perpendicular end: a top dock
+                               ## with `length` hugs the right edge (trays)
+    marginEnd*: int32 = 0      ## inset from that end (with `anchorEnd`)
 
 const
   AnchorTop = 1'i32
@@ -87,6 +90,10 @@ when defined(linux) and withSdl:
     importc: "ellipse_layer_attach".}
   proc ellipse_layer_take_size(w, h: ptr int32): int32 {.
     importc: "ellipse_layer_take_size".}
+  proc ellipse_layer_resize(width, height: int32): int32 {.
+    importc: "ellipse_layer_resize".}
+  proc ellipse_layer_remargin(mt, mr, mb, ml: int32): int32 {.
+    importc: "ellipse_layer_remargin".}
   proc ellipse_layer_closed(): int32 {.importc: "ellipse_layer_closed".}
   proc ellipse_layer_destroy() {.importc: "ellipse_layer_destroy".}
 
@@ -106,8 +113,17 @@ when defined(linux) and withSdl:
     of edgeBottom: mb = cfg.margin
     of edgeLeft: ml = cfg.margin
     of edgeRight: mr = cfg.margin
+    var anchor = anchorFor(cfg.edge, cfg.length <= 0)
+    if cfg.anchorEnd:
+      case cfg.edge
+      of edgeTop, edgeBottom:
+        anchor = anchor or AnchorRight
+        mr = cfg.marginEnd
+      of edgeLeft, edgeRight:
+        anchor = anchor or AnchorBottom
+        mb = cfg.marginEnd
     ellipse_layer_attach(display, surface, ns.cstring, int32(ord(cfg.level)),
-      anchorFor(cfg.edge, cfg.length <= 0), w, h, excl, mt, mr, mb, ml,
+      anchor, w, h, excl, mt, mr, mb, ml,
       int32(ord(cfg.keyboard))) != 0
 
   proc takeLayerSize*(): tuple[changed: bool, width, height: int32] =
@@ -115,6 +131,16 @@ when defined(linux) and withSdl:
     var w, h = 0'i32
     let c = ellipse_layer_take_size(addr w, addr h)
     (c != 0, w, h)
+
+  proc remarginLayer*(marginTop, marginRight, marginBottom, marginLeft: int32): bool =
+    ## Re-set margins on an attached layer surface (applies at next commit).
+    ellipse_layer_remargin(marginTop, marginRight, marginBottom, marginLeft) != 0
+
+  proc requestLayerSize*(width, height: int32): bool =
+    ## Resize an attached layer surface: the request applies at the next
+    ## commit and the compositor confirms through takeLayerSize. Lets a
+    ## tray strip grow around an opened menu and shrink back.
+    ellipse_layer_resize(width, height) != 0
 
   proc layerClosed*(): bool = ellipse_layer_closed() != 0
 
@@ -124,5 +150,7 @@ else:
   proc attachLayer*(display, surface: pointer; cfg: LayerConfig): bool = false
   proc takeLayerSize*(): tuple[changed: bool, width, height: int32] =
     (false, 0'i32, 0'i32)
+  proc requestLayerSize*(width, height: int32): bool = false
+  proc remarginLayer*(marginTop, marginRight, marginBottom, marginLeft: int32): bool = false
   proc layerClosed*(): bool = false
   proc destroyLayer*() = discard

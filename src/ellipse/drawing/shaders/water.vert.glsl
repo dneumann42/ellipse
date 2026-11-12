@@ -16,6 +16,7 @@ layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec4 stream; // xy: flow over x and z, z: depth, w: foam
 layout(location = 3) in float surf;  // 0 sheltered .. 1 open sea
+layout(location = 5) in float occlusion;
 layout(location = 4) in float shore; // metres out from the shore
 
 layout(set = 1, binding = 0) uniform Uniforms {
@@ -26,6 +27,7 @@ layout(set = 1, binding = 0) uniform Uniforms {
   vec4 params; // x: seconds; y: wave height; z: seconds between waves; w: metres out they rise from
 } u;
 
+layout(location = 4) out float skyExposure;
 layout(location = 0) out vec3 worldPosition;
 layout(location = 1) out vec3 worldNormal;
 layout(location = 2) out vec4 water; // as `stream`, but depth under the heaved surface
@@ -88,6 +90,7 @@ float wavePhase(vec2 xz, float shore, float time, float period, float spacing) {
 }
 
 void main() {
+  skyExposure = 1.0-clamp(occlusion,0.0,1.0);
   vec4 world = u.model * vec4(position, 1.0);
   float depth = stream.z;
   float lift = 0.0;

@@ -133,6 +133,28 @@ int ellipse_layer_take_size(int *width, int *height) {
     return changed;
 }
 
+/* Ask for a new size on an attached layer surface (a tray strip grows when
+ * its menu opens). The compositor answers with a configure, picked up by
+ * ellipse_layer_take_size; the size applies at the surface's next commit,
+ * which SDL performs when the frame is drawn. Returns 0 when there is no
+ * layer surface. */
+int ellipse_layer_resize(int width, int height) {
+    if (!st.layer) return 0;
+    zwlr_layer_surface_v1_set_size(st.layer, (uint32_t)width, (uint32_t)height);
+    return 1;
+}
+
+/* Re-set the margins on an attached layer surface (the tray re-docks when
+ * the bar-buttons gain or lose entries). Applies at the next commit, like
+ * set_size; SDL commits when the frame is drawn. */
+int ellipse_layer_remargin(int margin_top, int margin_right,
+                           int margin_bottom, int margin_left) {
+    if (!st.layer) return 0;
+    zwlr_layer_surface_v1_set_margin(st.layer, (uint32_t)margin_top,
+        (uint32_t)margin_right, (uint32_t)margin_bottom, (uint32_t)margin_left);
+    return 1;
+}
+
 /* The compositor closed the surface (output gone, shell asked). */
 int ellipse_layer_closed(void) { return st.closed; }
 

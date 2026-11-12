@@ -4,6 +4,7 @@ layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec4 color;
 layout(location = 3) in vec2 uv;
+layout(location = 4) in float occlusion;
 
 layout(set = 1, binding = 0) uniform Uniforms {
   mat4 model;
@@ -33,6 +34,7 @@ void main() {
   float specular = pow(max(dot(reflect(-l, n), normalize(-world.xyz)), 0.0), u.params.y) * u.params.z;
 
   vertexColor = vec4(u.color.rgb * color.rgb * (u.params.x + diffuse) + specular, u.color.a * color.a);
+  vertexColor.rgb *= 1.0-clamp(occlusion,0.0,1.0);
   fragmentUv = uv;
   worldPosition = world.xyz;
   fragmentCell = u.params.w;
