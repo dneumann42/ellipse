@@ -1,5 +1,6 @@
 import sdl3, errors
 import uploadstaging
+import gifrecorder
 
 {.push cdecl, dynlib: LibName.}
 proc acquireSwapchainTextureRaw(
@@ -40,6 +41,10 @@ type
     fence: GPUFence
     depth: Texture
     depthWidth, depthHeight: uint32
+    gifTarget: Texture
+    gifDownload: TextureDownload
+    gifWidth, gifHeight: uint32
+    gifTick: int
     freeTextures: seq[Texture]
     freeBuffers: seq[GPUBuffer]
     pictureTransfers: array[TextureUploadBuckets, GPUTransferBuffer]
@@ -254,12 +259,16 @@ proc forget*(device: Device) =
   if not device.isNil:
     device.raw = nil
 
+proc finishGifDownload*(device: Device) {.gcsafe.}
+
 proc acquireCommandBuffer*(device: Device): CommandBuffer =
   if not device.fence.isNil:
     checkSdl waitForGPUFences(device.raw, true, [device.fence]), "Failed to wait for GPU fence"
     releaseGPUFence(device.raw, device.fence)
     device.fence = nil
     collectGarbage(device)
+  device.finishGifDownload()
+  pumpRecorder()
   let raw = acquireGPUCommandBuffer(device.raw)
   if raw.isNil:
     raiseSdlError("Failed to acquire command buffer")
@@ -827,6 +836,38 @@ proc finishDownload*(device: Device, download: TextureDownload): seq[uint8] =
   unmapGPUTransferBuffer(device.raw, download.transfer)
   releaseGPUTransferBuffer(device.raw, download.transfer)
 
+proc finishGifDownload*(device: Device) =
+  # Caller has already waited the normal frame fence; no additional wait.
+  if device.gifDownload != nil:
+    let download = device.gifDownload
+    device.gifDownload = nil
+    offerPixels(device.finishDownload(download), download.width.int,
+      download.height.int, device.gifTick)
+
+proc stageGif(frame: GpuFrame) =
+  if not frame.valid or not captureDue(): return
+  let device = frame.cmd.device
+  if device.gifDownload != nil: return
+  if device.gifTarget == nil:
+    # Fit within 640x360, preserving aspect and bounding RAM even for tall windows.
+    let scale = min(1.0, min(640.0 / frame.width.float, 360.0 / frame.height.float))
+    device.gifWidth = max(1, int(frame.width.float * scale)).uint32
+    device.gifHeight = max(1, int(frame.height.float * scale)).uint32
+    device.gifTarget = device.newColorTexture(device.gifWidth, device.gifHeight, R8G8B8A8)
+  let fit = min(device.gifWidth.float / frame.width.float,
+    device.gifHeight.float / frame.height.float)
+  let w = max(1, int(frame.width.float * fit)).uint32
+  let h = max(1, int(frame.height.float * fit)).uint32
+  var blit = GPUBlitInfo(
+    source: GPUBlitRegion(texture: cast[ptr GPUTexture](frame.target.raw),
+      w: frame.width, h: frame.height),
+    destination: GPUBlitRegion(texture: cast[ptr GPUTexture](device.gifTarget.raw),
+      x: (device.gifWidth - w) div 2, y: (device.gifHeight - h) div 2, w: w, h: h),
+    load_op: GPU_LOADOP_CLEAR, clear_color: FColor(a: 1), filter: GPU_FILTER_LINEAR)
+  blitGPUTexture(frame.cmd.raw, addr blit)
+  device.gifTick = recordingTick()
+  device.gifDownload = frame.cmd.stageDownload(device.gifTarget, device.gifWidth, device.gifHeight)
+
 proc bindPipeline*(pass: RenderPass, pipeline: Pipeline) =
   bindGPUGraphicsPipeline(pass.raw, pipeline.raw)
 
@@ -898,6 +939,7 @@ proc readbackPixels*(frame: GpuFrame): seq[uint8] =
   let device = frame.cmd.device
   if not frame.pass.isNil:
     frame.pass.endRender()
+  frame.stageGif()
   let pass = beginOverlay(frame.cmd, frame.target)
   let download = frame.cmd.stageDownload(frame.target, frame.width, frame.height)
   endRender(pass)
@@ -914,5 +956,6 @@ proc beginRender*(frame: GpuFrame, clearColor: ClearColor) =
 proc endFrame*(frame: GpuFrame) =
   if not frame.pass.isNil:
     frame.pass.endRender()
+  frame.stageGif()
   frame.cmd.submit()
 

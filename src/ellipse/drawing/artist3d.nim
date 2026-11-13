@@ -56,6 +56,10 @@ type
     uploaded: bool
     vertexTotal: int
 
+  InstanceDraw = object
+    mesh: StaticMesh
+    models: seq[Mat4]
+
   StaticSplatMesh* = ref object
     ## Terrain geometry retained on the GPU; shading is supplied by each frame.
     vertexBuffer, indexBuffer: DynamicBuffer
@@ -116,6 +120,8 @@ type
     translucentPipeline: Pipeline
     translucent: bool ## the batch being built is translucent
     pending: Batch
+    instancePipeline, instanceWireframePipeline, instanceDepthPipeline: Pipeline
+    instanceDraws: seq[InstanceDraw]
     statics: seq[StaticMesh] ## recorded meshes drawn this frame
     record: Recording
     splatRecord: Recording
@@ -408,6 +414,7 @@ proc reset*(a: Artist3D) =
   a.translucentBatches.setLen(0)
   a.translucent = false
   a.statics.setLen(0)
+  a.instanceDraws.setLen(0)
   a.staticSplats.setLen(0)
   a.face.setLen(0)
   a.building = false
@@ -430,6 +437,7 @@ proc vertexCount*(a: Artist3D): int =
   for mesh in a.statics:
     recorded += mesh.vertexTotal
   for mesh in a.staticSplats: recorded += mesh.vertexTotal
+  for draw in a.instanceDraws: recorded += draw.mesh.vertexTotal * draw.models.len
   a.vertices.len + recorded + a.splatVertices.len + a.waterVertices.len +
     (if a.sprites.isNil: 0 else: a.sprites.queued * 6) +
     (if a.planes.isNil: 0 else: a.planes.queued)
@@ -1060,19 +1068,50 @@ proc drawStatic*(a: Artist3D, mesh: StaticMesh) =
   if not mesh.isNil and mesh.batches.len > 0:
     a.statics.add mesh
 
+proc uploadStatic(a: Artist3D, cmd: CommandBuffer, mesh: StaticMesh) =
+  if mesh.uploaded:
+    return
+  mesh.vertexBuffer = newDynamicBuffer(a.device, {VertexData},
+    max(mesh.vertices.len * sizeof(Vertex), 1).uint32)
+  mesh.indexBuffer = newDynamicBuffer(a.device, {IndexData},
+    max(mesh.indices.len * sizeof(uint32), 1).uint32)
+  cmd.upload(mesh.vertexBuffer, mesh.vertices)
+  cmd.upload(mesh.indexBuffer, mesh.indices)
+  mesh.vertices = @[]
+  mesh.indices = @[]
+  mesh.uploaded = true
+
 proc uploadStatics(a: Artist3D, cmd: CommandBuffer) =
   for mesh in a.statics:
-    if mesh.uploaded:
-      continue
-    mesh.vertexBuffer = newDynamicBuffer(a.device, {VertexData},
-      max(mesh.vertices.len * sizeof(Vertex), 1).uint32)
-    mesh.indexBuffer = newDynamicBuffer(a.device, {IndexData},
-      max(mesh.indices.len * sizeof(uint32), 1).uint32)
-    cmd.upload(mesh.vertexBuffer, mesh.vertices)
-    cmd.upload(mesh.indexBuffer, mesh.indices)
-    mesh.vertices = @[]
-    mesh.indices = @[]
-    mesh.uploaded = true
+    a.uploadStatic(cmd, mesh)
+  for draw in a.instanceDraws:
+    a.uploadStatic(cmd, draw.mesh)
+
+proc drawStaticInstances*(a: Artist3D, mesh: StaticMesh, models: sink seq[Mat4]) =
+  ## One resident mesh, one transform per instance. Reuses the mesh batches'
+  ## materials and texture cells in colour, wireframe and SSAO depth passes.
+  if mesh.isNil or mesh.batches.len == 0 or models.len == 0: return
+  if a.instancePipeline.isNil:
+    const
+      vertex = staticRead("shaders/spv/mesh_instanced.vert.spv")
+      colour = staticRead("shaders/spv/mesh.frag.spv")
+      depth = staticRead("shaders/spv/depth.frag.spv")
+    let vs = newShader(a.device, vertex.toOpenArrayByte(0, vertex.high),
+      VertexShader, numUniformBuffers = 2)
+    let fs = newShader(a.device, colour.toOpenArrayByte(0, colour.high),
+      FragmentShader, numUniformBuffers = 1, numSamplers = 2)
+    let ds = newShader(a.device, depth.toOpenArrayByte(0, depth.high),
+      FragmentShader, numUniformBuffers = 1)
+    var desc = PipelineDesc(vertex: vs, fragment: fs, attributes: VertexAttributes,
+      stride: VertexStride, colorFormat: a.colorFormat, depthFormat: Depth32,
+      blend: true, cull: CullBack)
+    a.instancePipeline = newPipeline(a.device, desc)
+    a.instanceWireframePipeline = newPipeline(a.device, desc.asWireframe())
+    desc.fragment = ds
+    desc.colorFormat = Rgba8
+    desc.blend = false
+    a.instanceDepthPipeline = newPipeline(a.device, desc)
+  a.instanceDraws.add InstanceDraw(mesh: mesh, models: move(models))
 
 proc uploadStaticSplats(a: Artist3D, cmd: CommandBuffer) =
   for mesh in a.staticSplats:
@@ -1175,6 +1214,39 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
       if not pushFragment.isNil:
         pushFragment()
       pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+
+proc drawInstances(a: Artist3D, cmd: CommandBuffer, pass: RenderPass,
+    depth = false) =
+  if a.instanceDraws.len == 0: return
+  pass.bindPipeline(if depth: a.instanceDepthPipeline
+    elif a.wireframe: a.instanceWireframePipeline else: a.instancePipeline)
+  if not depth:
+    let sampler = if a.retro.pixelatedTextures: a.meshPixelSampler else: a.meshSampler
+    pass.bindFragmentSamplers([(texture: a.meshTexture, sampler: sampler),
+      (texture: a.clusters.texture, sampler: a.clusters.sampler)])
+    cmd.pushFragmentUniforms(0, fogUniforms(a.fog, a.eye))
+  else:
+    let (near, far) = a.nearFar()
+    a.post.newDepthUniformPusher(cmd, near, far, depthFogFade(a.fog))()
+  let frameState = a.uniformState(identity(), a.projection * a.view)
+  for draw in a.instanceDraws:
+    pass.bindVertexBuffers([BufferBinding(buffer: draw.mesh.vertexBuffer)])
+    pass.bindIndexBuffer(draw.mesh.indexBuffer)
+    # A bounded uniform block avoids a per-instance upload buffer and fits
+    # within the portable 16 KiB uniform limit. Large groups use more chunks.
+    for first in countup(0, draw.models.high, 64):
+      var transforms: array[64, Mat4]
+      let count = min(64, draw.models.len - first)
+      for n in 0 ..< count: transforms[n] = draw.models[first + n]
+      cmd.pushVertexUniforms(1, transforms)
+      for batch in draw.mesh.batches:
+        var uniforms = frameState
+        uniforms.model = batch.uniforms.model
+        uniforms.color = batch.uniforms.color
+        uniforms.params.w = batch.uniforms.params.w
+        cmd.pushVertexUniforms(0, uniforms)
+        pass.drawIndexed(batch.indexCount, instanceCount = count.uint32,
+          firstIndex = batch.firstIndex)
 
 proc drawTranslucent(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   ## The `beginTranslucent` batches, in the order they were queued.
@@ -1331,6 +1403,7 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
       a.splatOptions.heightContrast, 0),
     fog: fog,
   )
+  a.drawInstances(cmd, pass)
   a.drawSplats(cmd, pass, splat,
     proc () = cmd.pushFragmentUniforms(0, uniforms), textured = true)
   a.sprites.drawColour(cmd, pass, a.view, a.projection * a.view, a.eye,
@@ -1359,6 +1432,7 @@ proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
     (near, far) = a.nearFar()
     pushDepth = a.post.newDepthUniformPusher(cmd, near, far, depthFogFade(a.fog))
   a.drawBatches(cmd, pass, a.post.depthPipeline, pushDepth)
+  a.drawInstances(cmd, pass, depth = true)
   a.drawSplats(cmd, pass, a.splatDepthPipeline, pushDepth, textured = false)
   a.sprites.drawDepth(cmd, pass, a.view, a.projection * a.view, a.eye, near,
     far, depthFogFade(a.fog))
@@ -1636,7 +1710,7 @@ proc present*(a: Artist3D, app: var App, clearColor: ClearColor) =
     a.uploadStatics(frame.cmd)
     a.uploadStaticSplats(frame.cmd)
     if a.batches.len > 0 or a.translucentBatches.len > 0 or
-        a.statics.len > 0 or a.splatBatches.len > 0 or
+        a.statics.len > 0 or a.instanceDraws.len > 0 or a.splatBatches.len > 0 or
         a.staticSplats.len > 0 or
         a.waterBatches.len > 0 or
         a.sprites.pending or a.planes.pending or a.mist.pending or

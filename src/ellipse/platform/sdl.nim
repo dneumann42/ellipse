@@ -1,6 +1,7 @@
 {.push gcsafe.}
 
 import std/[os, strutils]
+import gifrecorder, keyboard
 
 import sdl3, sdl3_ttf, sdl3_image, chroma, errors, gpu, display
 export chroma
@@ -201,6 +202,10 @@ proc servedQuitAsked*(app: var App): bool =
 
 proc `=copy`*(app: var App, source: App) {.error.}
 proc `=destroy`*(app: var App) =
+  if app.device != nil:
+    app.device.waitLastFence()
+    app.device.finishGifDownload()
+  closeRecorder()
   app.device.forget() # resources outliving the app must not touch its device
   if not app.renderer.isNil:
     destroyRenderer(app.renderer)
@@ -242,6 +247,8 @@ proc pixelSize*(app: App): tuple[width, height: int] =
   else:
     (app.width, app.height)
 
+var gifKeyHeld = false
+
 proc processEvents*(running: var bool): void =
   ## Drain SDL's event queue once through the UI platform (see
   ## `ellipse/platform/platform`): widgets need the pointer, keys, wheel
@@ -250,5 +257,8 @@ proc processEvents*(running: var bool): void =
   ## pumping it here would starve the other -- so this loop only turns
   ## the quit signal into `running = false`.
   platform.pumpEvents()
+  let gifKey = keyHeld(keyF5)
+  if gifKey and not gifKeyHeld: toggleRecording()
+  gifKeyHeld = gifKey
   if platform.quitAsked():
     running = false

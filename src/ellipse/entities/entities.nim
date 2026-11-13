@@ -1,6 +1,9 @@
-import std/[typetraits, tables, algorithm, macros, sysrand]
+import std/[typetraits, tables, algorithm, macros, sysrand, hashes]
 
 type
+  ComponentKey = object
+    label: string
+    digest: Hash
   EntityId* = uint64
   AbstractComponentBuffer* = ref object of RootObj
     entityIndex: Table[EntityId, int]
@@ -13,8 +16,14 @@ type
     index: Table[EntityId, int]
   EntityManager* = object
     entities: seq[EntityId]
-    componentBuffers: Table[string, AbstractComponentBuffer]
+    entityIndex: Table[EntityId, int]
+    componentBuffers: Table[ComponentKey, AbstractComponentBuffer]
     views: seq[View]
+
+func hash(key: ComponentKey): Hash = key.digest
+
+func componentKey(label: string): ComponentKey =
+  ComponentKey(label: label, digest: hash(label))
 
 proc initEntityManager*(): EntityManager =
   result = EntityManager()
@@ -62,13 +71,13 @@ proc remove*(self: AbstractComponentBuffer, entityId: EntityId): bool =
   self.entityIndex.del(entityId)
   return true
 
-proc hasComponent(self: EntityManager, entityId: EntityId, component: string): bool =
+proc hasComponent(self: EntityManager, entityId: EntityId, component: ComponentKey): bool =
   let buffer = self.componentBuffers.getOrDefault(component)
   not buffer.isNil and buffer.hasEntity(entityId)
 
 proc matches(self: View, manager: EntityManager, entityId: EntityId): bool =
   for component in self.required:
-    if not manager.hasComponent(entityId, component):
+    if not manager.hasComponent(entityId, componentKey(component)):
       return false
   return true
 
@@ -100,6 +109,7 @@ proc refreshViews(self: var EntityManager, entityId: EntityId) =
 
 proc spawn*(self: var EntityManager): EntityId =
   result = generateNextId()
+  self.entityIndex[result] = self.entities.len
   self.entities.add(result)
   self.refreshViews(result)
 
@@ -108,40 +118,42 @@ proc adopt*(self: var EntityManager, entityId: EntityId): bool =
   ## its ids stable, so components and scene state that name an id still
   ## find their entity. False when the roster already holds it; the id
   ## gets no second copy and no views change.
-  if self.entities.contains(entityId):
+  if self.entityIndex.hasKey(entityId):
     return false
+  self.entityIndex[entityId] = self.entities.len
   self.entities.add(entityId)
   self.refreshViews(entityId)
   return true
 
 proc add*[T](self: var EntityManager, entityId: EntityId, component: T) =
-  if not self.componentBuffers.hasKey(name(T)):
-    self.componentBuffers[name(T)] = AbstractComponentBuffer(ComponentBuffer[T]())
-  var buffer = cast[ComponentBuffer[T]](self.componentBuffers[name(T)])
+  const key = componentKey(name(T))
+  if not self.componentBuffers.hasKey(key):
+    self.componentBuffers[key] = AbstractComponentBuffer(ComponentBuffer[T]())
+  var buffer = cast[ComponentBuffer[T]](self.componentBuffers[key])
   buffer.add(entityId, component)
   self.refreshViews(entityId)
 
 proc get*[T](self: EntityManager, entityId: EntityId): var T =
-  cast[ComponentBuffer[T]](self.componentBuffers[name(T)]).get(entityId)
+  const key = componentKey(name(T))
+  cast[ComponentBuffer[T]](self.componentBuffers[key]).get(entityId)
 
 proc exists*(self: EntityManager, entityId: EntityId): bool =
-  entityId in self.entities
+  self.entityIndex.hasKey(entityId)
 
 proc has*[T](self: EntityManager, entityId: EntityId): bool =
-  self.hasComponent(entityId, name(T))
+  const key = componentKey(name(T))
+  self.hasComponent(entityId, key)
 
 proc despawn*(self: var EntityManager, entityId: EntityId): bool =
   ## Forget an entity for good: it leaves the roster, every component buffer
   ## frees its slot, and every view cache evicts it.
-  var found = -1
-  for index, entity in self.entities:
-    if entity == entityId:
-      found = index
-      break
+  let found = self.entityIndex.getOrDefault(entityId, -1)
   if found < 0:
     return false
-
-  self.entities[found] = self.entities[^1]
+  let last = self.entities[^1]
+  self.entities[found] = last
+  self.entityIndex[last] = found
+  self.entityIndex.del(entityId)
   self.entities.setLen(self.entities.len - 1)
   for buffer in self.componentBuffers.values:
     discard buffer.remove(entityId)
