@@ -20,10 +20,18 @@ type
     width*, height*, faceSize*: int
     pixels*: seq[uint8]
 
+  CloudOptions* = object
+    ## Optional procedural cloud deck in the existing fullscreen sky pass.
+    ## Disabled by default; no extra meshes, textures, or depth writes.
+    enabled*: bool
+    seconds*, coverage*, daylight*: float32
+    sunDirection*: Vec3
+
   SkyOptions* = object
     ## What a frame's sky is made of. The colours are the gradient the sky
     ## falls back to when no skybox shows; `exposure` brightens whichever
     ## the frame draws.
+    clouds*: CloudOptions
     enabled*: bool ## whether a frame draws any sky at all
     horizonColor*, zenithColor*, groundColor*: Vec3
     exposure*: float32
@@ -42,6 +50,7 @@ type
     ## The block both sky stages push: packed here, opaque out.
     cameraRotation: Mat4
     viewportScale, horizonExposure, zenithUseSkybox, groundColor: Vec4
+    cloudWeather, cloudSun: Vec4
 
 const
   CrossColumns = 4
@@ -152,4 +161,7 @@ func skyUniforms*(options: SkyOptions, view: Mat4, viewportScale: Vec4,
       if options.useSkybox and hasTexture:
         clamp(options.skyboxStrength, 0.0f, 1.0f) else: 0.0f),
     groundColor: vec4(options.groundColor, 0.0f),
+    cloudWeather: vec4(options.clouds.seconds, clamp(options.clouds.coverage, 0f, 1f),
+      clamp(options.clouds.daylight, 0f, 1f), if options.clouds.enabled: 1f else: 0f),
+    cloudSun: vec4(options.clouds.sunDirection, 0f),
   )

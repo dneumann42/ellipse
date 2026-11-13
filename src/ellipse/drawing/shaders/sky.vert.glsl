@@ -13,6 +13,8 @@ layout(set = 1, binding = 0) uniform Sky {
   vec4 uHorizonExposure;
   vec4 uZenithUseSkybox;
   vec4 uGroundColorValue;
+  vec4 uCloudWeather; // seconds, coverage, daylight, enabled
+  vec4 uCloudSun; // direction toward sun
 };
 
 void main() {

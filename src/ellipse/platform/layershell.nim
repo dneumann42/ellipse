@@ -43,6 +43,9 @@ type
     anchorEnd*: bool = false   ## also pin the perpendicular end: a top dock
                                ## with `length` hugs the right edge (trays)
     marginEnd*: int32 = 0      ## inset from that end (with `anchorEnd`)
+    output*: string            ## sway output name to create the surface on
+                               ## ("" = the compositor's pick: the focused
+                               ## output under sway). Per-monitor bars set it.
 
 const
   AnchorTop = 1'i32
@@ -84,6 +87,8 @@ when defined(linux) and withSdl:
 
   proc ellipse_layer_available(display: pointer): int32 {.
     importc: "ellipse_layer_available".}
+  proc ellipse_layer_set_output(name: cstring): int32 {.
+    importc: "ellipse_layer_set_output".}
   proc ellipse_layer_attach(display, surface: pointer; ns: cstring;
                             layer, anchor, width, height, exclusive,
                             mt, mr, mb, ml, keyboard: int32): int32 {.
@@ -101,11 +106,23 @@ when defined(linux) and withSdl:
     ## The compositor behind `display` (a `wl_display*`) offers layer shell.
     ellipse_layer_available(display) != 0
 
+  proc setLayerOutput*(name: string): bool =
+    ## Remember `name` (a sway output name) as the output the next
+    ## `attachLayer` asks the compositor to place its surface on. True when
+    ## an output with that name is known; a false answer does not block the
+    ## attach, it just means the surface will land on the compositor's pick.
+    if name.len == 0: return true
+    ellipse_layer_set_output(name.cstring) != 0
+
   proc attachLayer*(display, surface: pointer; cfg: LayerConfig): bool =
     ## Make `surface` (SDL's roleless `wl_surface*`) a layer surface and
     ## wait for the compositor's first configure.
     let (w, h) = requestSize(cfg)
     let excl = if cfg.exclusive < 0: cfg.thickness else: cfg.exclusive
+    if cfg.output.len > 0:
+      # The registry roundtrip inside `layerShellAvailable` (run before
+      # this by the platform) has collected the output names by now.
+      discard ellipse_layer_set_output(cfg.output.cstring)
     var ns = cfg.namespace
     var mt, mr, mb, ml = 0'i32
     case cfg.edge
@@ -148,6 +165,7 @@ when defined(linux) and withSdl:
 else:
   proc layerShellAvailable*(display: pointer): bool = false
   proc attachLayer*(display, surface: pointer; cfg: LayerConfig): bool = false
+  proc setLayerOutput*(name: string): bool = false
   proc takeLayerSize*(): tuple[changed: bool, width, height: int32] =
     (false, 0'i32, 0'i32)
   proc requestLayerSize*(width, height: int32): bool = false

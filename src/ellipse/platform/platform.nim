@@ -86,6 +86,8 @@ when withSdl:
     ButtonLeftMask = 1'u32     ## SDL_BUTTON_LMASK, the `state` bit for it
     ButtonRight = 3'u8         ## SDL_BUTTON_RIGHT, the 3D views' look key
     ButtonRightMask = 4'u32    ## SDL_BUTTON_RMASK, the `state` bit for it
+    ButtonMiddle = 2'u8        ## SDL_BUTTON_MIDDLE, the bar's back-and-forth key
+    ButtonMiddleMask = 2'u32   ## SDL_BUTTON_MMASK, the `state` bit for it
 
   const
     ## SDL3 scancodes for the keys the UI edits with (USB HID usage page 0x07).
@@ -399,7 +401,7 @@ type
     ## seen by `pumpEvents`. The UI's layout root is the window, so the
     ## position is also clay-relative.
     x*, y*: float32
-    down*, rightDown*: bool
+    down*, rightDown*, middleDown*: bool
 
 type
   PlatformApplication* = object
@@ -1238,6 +1240,29 @@ proc mouseLeftDown*(): bool =
   else:
     false
 
+proc mouseMiddleDown*(): bool =
+  ## Whether the middle button is held, as of the most recent event pump
+  ## (see `mouseLeftDown`). The sway bar replacement polls its edges for
+  ## the middle-click-anywhere workspace gesture.
+  when withSdl:
+    if terminalMode():
+      return false
+    activeApp.pointer.middleDown
+  else:
+    false
+
+proc pointerPosition*(): tuple[x, y: float32] =
+  ## The primary pointer's position in window pixels, as of the most
+  ## recent event pump -- the same coordinates clay hit-tests against.
+  ## (-1e6, -1e6) while the pointer is outside the window, matching the
+  ## state `pumpEvents` parks it in on leave.
+  when withSdl:
+    if terminalMode():
+      return (-1.0e6'f32, -1.0e6'f32)
+    (activeApp.pointer.x, activeApp.pointer.y)
+  else:
+    (-1.0e6'f32, -1.0e6'f32)
+
 when withSdl:
   proc pumpSdlEvents(app: var PlatformApplication) =
     ## Drain SDL's queue into the app state, and tell the pacer which events
@@ -1312,6 +1337,7 @@ when withSdl:
         app.pointer.y = e.y
         app.pointer.down = (e.state and ButtonLeftMask) != 0
         app.pointer.rightDown = (e.state and ButtonRightMask) != 0
+        app.pointer.middleDown = (e.state and ButtonMiddleMask) != 0
         if not frameWanted(monoNow()) and
             motionWakes(e.x, e.y, app.pointer.down):
           wake()
@@ -1323,6 +1349,8 @@ when withSdl:
             app.doublePending = true
         elif e.button == ButtonRight:
           app.pointer.rightDown = true
+        elif e.button == ButtonMiddle:
+          app.pointer.middleDown = true
         wake()
       elif kind == EventMouseButtonUp:
         let e = cast[ptr SDL_MouseButtonEvent](addr event)[]
@@ -1330,6 +1358,8 @@ when withSdl:
           app.pointer.down = false
         elif e.button == ButtonRight:
           app.pointer.rightDown = false
+        elif e.button == ButtonMiddle:
+          app.pointer.middleDown = false
         wake()
       elif kind == EventKeyDown:
         let e = cast[ptr SDL_KeyboardEvent](addr event)[]

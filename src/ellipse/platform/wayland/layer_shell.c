@@ -35,7 +35,55 @@ static struct {
     int closed;
     uint32_t width, height;                  /* last configure */
     int size_changed;
+    /* Outputs advertised on this display, for `ellipse_layer_set_output`:
+     * sway places a layer surface with a NULL output on the focused one,
+     * so a per-monitor bar names the output it belongs to instead. */
+    struct wl_output *outputs[16];
+    char output_names[16][64];
+    char want_output[64];                    /* requested name, may be empty */
 } st;
+
+static void output_name(void *data, struct wl_output *output,
+                        const char *name) {
+    (void)output;
+    for (unsigned i = 0; i < sizeof st.outputs / sizeof st.outputs[0]; i++) {
+        if (st.outputs[i] == data && name) {
+            strncpy(st.output_names[i], name, sizeof st.output_names[i] - 1);
+            st.output_names[i][sizeof st.output_names[i] - 1] = '\0';
+            return;
+        }
+    }
+}
+
+static void output_noop(void *data, struct wl_output *output) {
+    (void)data; (void)output;   /* `done` is the only argument-less event */
+}
+
+static void output_geometry(void *d, struct wl_output *o, int32_t x, int32_t y,
+                            int32_t pw, int32_t ph, int32_t subpixel,
+                            const char *make, const char *model,
+                            int32_t transform) {
+    (void)d; (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)subpixel;
+    (void)make; (void)model; (void)transform;
+}
+
+static void output_mode(void *d, struct wl_output *o, uint32_t flags,
+                        int32_t w, int32_t h, int32_t refresh) {
+    (void)d; (void)o; (void)flags; (void)w; (void)h; (void)refresh;
+}
+
+static void output_scale(void *d, struct wl_output *o, int32_t f) {
+    (void)d; (void)o; (void)f;
+}
+
+static void output_description(void *d, struct wl_output *o, const char *s) {
+    (void)d; (void)o; (void)s;
+}
+
+static const struct wl_output_listener output_listener = {
+    .geometry = output_geometry, .mode = output_mode, .done = output_noop,
+    .scale = output_scale, .name = output_name, .description = output_description,
+};
 
 static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
                             const char *iface, uint32_t version) {
@@ -44,6 +92,17 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
         st.shell_version = version < 4 ? version : 4;
         st.shell = wl_registry_bind(reg, name, &zwlr_layer_shell_v1_interface,
                                     st.shell_version);
+    } else if (strcmp(iface, wl_output_interface.name) == 0) {
+        /* v4 carries the `name` event we match per-output bars against. */
+        for (unsigned i = 0; i < sizeof st.outputs / sizeof st.outputs[0]; i++) {
+            if (st.outputs[i] == NULL) {
+                uint32_t v = version < 4 ? version : 4;
+                st.outputs[i] = wl_registry_bind(reg, name, &wl_output_interface, v);
+                wl_output_add_listener(st.outputs[i], &output_listener,
+                                       st.outputs[i]);
+                break;
+            }
+        }
     }
 }
 
@@ -89,6 +148,21 @@ int ellipse_layer_available(void *display) {
     return st.shell != NULL;
 }
 
+/* Ask that the layer surface be created on the output whose sway name is
+ * `name` (an empty string or a never-matching name means "compositor's
+ * pick", today's default). Returns 1 when a known output carries that
+ * name after the registry roundtrip, 0 otherwise. Call before attach. */
+int ellipse_layer_set_output(const char *name) {
+    st.want_output[0] = '\0';
+    if (name && name[0])
+        strncpy(st.want_output, name, sizeof st.want_output - 1);
+    if (st.want_output[0] == '\0') return 1;
+    for (unsigned i = 0; i < sizeof st.outputs / sizeof st.outputs[0]; i++)
+        if (st.outputs[i] && strcmp(st.output_names[i], st.want_output) == 0)
+            return 1;
+    return 0;
+}
+
 /* Give `surface` the layer-surface role and wait for the first configure.
  * `anchor` is a zwlr_layer_surface_v1 anchor bitmask, `layer` a
  * zwlr_layer_shell_v1 layer, `keyboard` 0 none / 1 exclusive / 2 on-demand.
@@ -100,8 +174,17 @@ int ellipse_layer_attach(void *display, void *surface, const char *ns,
                          int margin_bottom, int margin_left, int keyboard) {
     if (!ellipse_layer_available(display) || !surface) return 0;
     st.surface = surface;
+    struct wl_output *output = NULL;
+    if (st.want_output[0]) {
+        for (unsigned i = 0; i < sizeof st.outputs / sizeof st.outputs[0]; i++)
+            if (st.outputs[i] &&
+                strcmp(st.output_names[i], st.want_output) == 0) {
+                output = st.outputs[i];
+                break;
+            }
+    }
     st.layer = zwlr_layer_shell_v1_get_layer_surface(
-        st.shell, st.surface, NULL, (uint32_t)layer, ns ? ns : "ellipse");
+        st.shell, st.surface, output, (uint32_t)layer, ns ? ns : "ellipse");
     if (!st.layer) return 0;
     zwlr_layer_surface_v1_add_listener(st.layer, &layer_listener, NULL);
     zwlr_layer_surface_v1_set_anchor(st.layer, (uint32_t)anchor);

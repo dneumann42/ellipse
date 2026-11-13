@@ -17,7 +17,7 @@ const
   MaxEnvironmentRooms* = 512
   RoomPortals* = 8
   ClusterRooms* = 16
-  RoomStride = 8 + RoomPortals * 10
+  RoomStride = 8 + RoomPortals * 10 + 6
   RoomOffset = GridOffset + ClusterCount * (ClusterLights + 1)
   RoomGridOffset = RoomOffset + MaxEnvironmentRooms * RoomStride
   TextureWidth = 1024
@@ -35,7 +35,9 @@ type
     low*, high*, inward*: Vec3
     transmission*: float32
   EnvironmentRoom* = object
-    low*, high*: Vec3
+    low*, high*: Vec3 ## world-space broad-phase bounds
+    center*, half*: Vec3 ## oriented rectangle in the x/z plane
+    rotation*: Vec2 ## cosine/sine; zero preserves legacy axis-aligned rooms
     portals*: seq[LightPortal]
   ShadowSelection = object
     count: int
@@ -79,6 +81,11 @@ func environmentExposure*(room: EnvironmentRoom, p: Vec3): float32 =
   if p.x < room.low.x or p.y < room.low.y or p.z < room.low.z or
       p.x > room.high.x or p.y > room.high.y or p.z > room.high.z:
     return 1
+  if room.rotation.x*room.rotation.x+room.rotation.y*room.rotation.y > 0.5f:
+    let d = p-room.center
+    let local = vec2(room.rotation.x*d.x+room.rotation.y*d.z,
+      -room.rotation.y*d.x+room.rotation.x*d.z)
+    if abs(local.x) > room.half.x or abs(local.y) > room.half.z: return 1
   result = 0.04f
   for i in 0 ..< min(room.portals.len, RoomPortals):
     result = max(result, 0.04f + 0.96f * room.portals[i].portalExposure(p))
@@ -322,6 +329,9 @@ proc build*(grid: ClusteredLights, lights: openArray[PointLight],
     for axis, value in [room.low.x, room.low.y, room.low.z,
                          room.high.x, room.high.y, room.high.z]:
       grid.data[base + axis] = value
+    for axis, value in [room.center.x,room.center.z,room.half.x,room.half.z,
+                         room.rotation.x,room.rotation.y]:
+      grid.data[base + 8 + RoomPortals*10 + axis] = value
     let count = min(room.portals.len, RoomPortals)
     grid.data[base + 6] = count.float32
     for i in 0 ..< count:

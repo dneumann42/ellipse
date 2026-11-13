@@ -112,6 +112,9 @@ type
     vertices: seq[Vertex]
     indices: seq[uint32]
     batches: seq[Batch]
+    translucentBatches: seq[Batch] ## see `beginTranslucent`
+    translucentPipeline: Pipeline
+    translucent: bool ## the batch being built is translucent
     pending: Batch
     statics: seq[StaticMesh] ## recorded meshes drawn this frame
     record: Recording
@@ -288,6 +291,13 @@ proc newArtist*(app: App): Artist3D =
       blend: true,
     )
     pipeline = newPipeline(device, meshDesc)
+    # Translucent batches blend over the finished scene and leave its depth
+    # alone, so thin streaks never hide what lies behind them.
+    translucentDesc = block:
+      var desc = meshDesc
+      desc.depthWrite = false
+      desc.cull = NoCulling
+      desc
     wireframePipeline = newPipeline(device, meshDesc.asWireframe())
     splatWireframePipeline = newPipeline(device, splatDesc.asWireframe())
     waterWireframePipeline = newPipeline(device, waterDesc.asWireframe())
@@ -295,6 +305,7 @@ proc newArtist*(app: App): Artist3D =
     device: device,
     clusters: clusters,
     pipeline: pipeline,
+    translucentPipeline: newPipeline(device, translucentDesc),
     wireframePipeline: wireframePipeline,
     vertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
     indexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
@@ -394,6 +405,8 @@ proc reset*(a: Artist3D) =
   a.vertices.setLen(0)
   a.indices.setLen(0)
   a.batches.setLen(0)
+  a.translucentBatches.setLen(0)
+  a.translucent = false
   a.statics.setLen(0)
   a.staticSplats.setLen(0)
   a.face.setLen(0)
@@ -488,6 +501,13 @@ proc setSky*(a: Artist3D, options: SkyOptions) =
   ## before the scene, and the skybox cube is rebuilt at the next present
   ## when `options.skybox` is a picture the artist has not seen.
   a.sky = options
+
+proc setClouds*(a: Artist3D, options: CloudOptions, replaceSkybox = false) =
+  ## Set after setSky; the next sky draw includes this deck at infinity.
+  ## A dynamic sky can replace a picture containing baked clouds or suns.
+  a.sky.clouds = options
+  if options.enabled and replaceSkybox:
+    a.sky.useSkybox = false
 
 proc setRetro*(a: Artist3D, options: RetroOptions) =
   ## Draw the scene small and blow it up, its textures unfiltered -- or,
@@ -614,7 +634,11 @@ proc `end`*(a: Artist3D) =
   a.orientTriangles(a.pending.firstIndex.int)
   a.pending.indexCount = a.indices.len.uint32 - a.pending.firstIndex
   if a.pending.indexCount > 0:
-    a.batches.add a.pending
+    if a.translucent:
+      a.translucentBatches.add a.pending
+    else:
+      a.batches.add a.pending
+  a.translucent = false
 
 proc begin*(a: Artist3D, mode: DrawMode = Triangles) =
   if a.building:
@@ -627,6 +651,14 @@ proc begin*(a: Artist3D, mode: DrawMode = Triangles) =
     uniforms: a.uniformState(a.model, a.projection * a.view),
     fog: fogUniforms(a.fog, a.eye),
   )
+
+proc beginTranslucent*(a: Artist3D, mode: DrawMode = Quads) =
+  ## Like `begin`, but the batch is drawn after the water, blended over
+  ## everything opaque, without writing depth and without entering the
+  ## occlusion pass: rain streaks, sparks, glints. Faces are not culled.
+  ## Batches drawn this way are not sorted among themselves.
+  a.begin(mode)
+  a.translucent = true
 
 proc vertex*(a: Artist3D, v: Vec3) =
   if not a.building or a.splatting or a.watering:
@@ -1103,6 +1135,8 @@ proc refreshProjection(a: Artist3D, frame: GpuFrame) =
   let viewProj = a.projection * a.view
   for batch in a.batches.mitems:
     batch.uniforms.viewProj = viewProj
+  for batch in a.translucentBatches.mitems:
+    batch.uniforms.viewProj = viewProj
   for batch in a.splatBatches.mitems:
     batch.uniforms.viewProj = viewProj
   for batch in a.waterBatches.mitems:
@@ -1141,6 +1175,20 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
       if not pushFragment.isNil:
         pushFragment()
       pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+
+proc drawTranslucent(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
+  ## The `beginTranslucent` batches, in the order they were queued.
+  pass.bindPipeline(a.translucentPipeline)
+  pass.bindVertexBuffers([BufferBinding(buffer: a.vertexBuffer)])
+  pass.bindIndexBuffer(a.indexBuffer)
+  let sampler =
+    if a.retro.pixelatedTextures: a.meshPixelSampler else: a.meshSampler
+  pass.bindFragmentSamplers([(texture: a.meshTexture, sampler: sampler),
+    (texture: a.clusters.texture, sampler: a.clusters.sampler)])
+  for batch in a.translucentBatches:
+    cmd.pushVertexUniforms(0, batch.uniforms)
+    cmd.pushFragmentUniforms(0, batch.fog)
+    pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
 proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
                 pushFragment: proc () {.closure, gcsafe.}; textured: bool) =
@@ -1292,6 +1340,8 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   let water = a.waterUniforms()
   a.drawWater(cmd, pass, waterPipeline,
     proc () = cmd.pushFragmentUniforms(0, water), grounded = true)
+  if a.translucentBatches.len > 0 and not a.wireframe:
+    a.drawTranslucent(cmd, pass)
   # Mist last of all: every wall, sprite and wavefront is already in the
   # depth it tests against, so the haze drifts where it should -- including
   # over the water it was raised from. It reads the occlusion pass's depth
@@ -1585,7 +1635,8 @@ proc present*(a: Artist3D, app: var App, clearColor: ClearColor) =
     frame.cmd.upload(a.shapeBuffer, a.shapes2d.vertices)
     a.uploadStatics(frame.cmd)
     a.uploadStaticSplats(frame.cmd)
-    if a.batches.len > 0 or a.statics.len > 0 or a.splatBatches.len > 0 or
+    if a.batches.len > 0 or a.translucentBatches.len > 0 or
+        a.statics.len > 0 or a.splatBatches.len > 0 or
         a.staticSplats.len > 0 or
         a.waterBatches.len > 0 or
         a.sprites.pending or a.planes.pending or a.mist.pending or

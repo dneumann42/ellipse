@@ -4,19 +4,26 @@ layout(set = 2, binding = 1) uniform sampler2D uClusters;
 float clusterValue(int i) { return texelFetch(uClusters, ivec2(i % 1024, i / 1024), 0).r; }
 vec3 clusterVec(int i) { return vec3(clusterValue(i), clusterValue(i+1), clusterValue(i+2)); }
 
-// RoomOffset=425988, RoomStride=88, RoomGridOffset=471044 (clustered.nim).
+// RoomOffset=425988, RoomStride=94, RoomGridOffset=474116 (clustered.nim).
 // No camera-dependent exposure: only the receiver's world position matters.
 float environmentExposure(vec3 p) {
   float cell = clusterValue(3);
   if (cell <= 0.0) return 1.0;
   ivec3 c = ivec3(floor((p - clusterVec(0)) / cell));
   if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(32,16,32)))) return 1.0;
-  int at = 471044 + (c.x + 32 * (c.y + 16 * c.z)) * 17;
+  int at = 474116 + (c.x + 32 * (c.y + 16 * c.z)) * 17;
   int count = min(int(clusterValue(at)), 16);
   for (int i = 0; i < count; ++i) {
-    int b = 425988 + int(clusterValue(at + 1 + i)) * 88;
+    int b = 425988 + int(clusterValue(at + 1 + i)) * 94;
     vec3 lo = clusterVec(b), hi = clusterVec(b + 3);
     if (any(lessThan(p,lo)) || any(greaterThan(p,hi))) continue;
+    vec2 rotation = vec2(clusterValue(b+92),clusterValue(b+93));
+    if (dot(rotation,rotation) > 0.5) {
+      vec2 delta = p.xz-vec2(clusterValue(b+88),clusterValue(b+89));
+      vec2 local = vec2(dot(delta,rotation),dot(delta,vec2(-rotation.y,rotation.x)));
+      vec2 halfSize = vec2(clusterValue(b+90),clusterValue(b+91));
+      if (any(greaterThan(abs(local),halfSize))) continue;
+    }
     float exposure = 0.04;
     int portals = min(int(clusterValue(b + 6)), 8);
     for (int j = 0; j < portals; ++j) {

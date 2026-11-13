@@ -122,7 +122,9 @@ void main() {
   }
   float skirt = (1.0 - r2) * (1.0 - r2);
   float att = exp2(-mix(1.6, 3.4, clamp(uDither.y, 0.0, 1.0)) * r2) * skirt;
-  if (att <= 0.004) {
+  if (att <= 0.0008) {
+    // The floor is far under anything the eye can pick out even where a
+    // stack of puffs overlaps, so its contour can never outline a rim.
     discard;
   }
 
@@ -164,10 +166,19 @@ void main() {
     vec2 res = textureSize(uSceneDepth, 0);
     float scene = unpackDepth(texture(uSceneDepth, gl_FragCoord.xy / res)) *
                   uSoft.x;
-    alpha *= clamp((scene - viewDepth) / uDither.w, 0.0, 1.0);
-    if (alpha <= 0.002) {
-      discard; // the land is here; the mist is not
-    }
+    // Smoothstep, not a clamp: the dissolve eases off at both ends, so
+    // where the land crosses a puff there is no knee in the fade to read
+    // as a line running along the intersection.
+    alpha *= smoothstep(0.0, uDither.w, scene - viewDepth);
+  }
+
+  // The floor, taken by subtraction: alpha is eased to nothing before it
+  // is thrown away rather than cut at a constant value. A hard discard
+  // leaves a step there -- and a step of even a few tenths of a percent
+  // repeats along every puff's rim, and the eye reads the rims as lines.
+  alpha = max(alpha - 0.0015, 0.0);
+  if (alpha <= 0.0) {
+    discard; // nothing to lay: cost the frame a pixel less
   }
 
   // The dither, and its smooth twin: the blend weight is first landed on
