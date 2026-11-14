@@ -29,6 +29,7 @@ layout(location = 1) out float fragmentLayer;
 layout(location = 2) out vec3 fragmentLight;
 layout(location = 3) out vec3 worldPosition;
 layout(location = 4) out float fragmentBlink;
+layout(location = 10) out float fragmentShade;
 
 const vec2 corners[6] = vec2[](
   vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
@@ -55,9 +56,12 @@ void main() {
   fragmentUv = vec2(mix(rect.x, rect.z, c.x), mix(rect.w, rect.y, c.y));
   fragmentLayer = float(layer);
 
-  float sun = u.light.w * (0.55 + 0.45 * clamp(u.light.y, 0.0, 1.0));
+  // Average Lambert response over a spherical sprite volume: 1/4.
+  // The camera-facing quad is presentation geometry, not a surface normal.
+  float sun = u.light.w * 0.25;
   float foot = mix(0.62, 1.0, smoothstep(0.0, 0.55, c.y));
-  fragmentLight = vec3((u.params.x + sun) * iShade * foot);
+  fragmentShade = iShade * foot;
+  fragmentLight = vec3((u.params.x + sun) * fragmentShade);
   worldPosition = world;
   fragmentBlink = iBlink;
 }

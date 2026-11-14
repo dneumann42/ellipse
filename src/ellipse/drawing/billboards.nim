@@ -453,7 +453,10 @@ proc upload*(p: BillboardPass, cmd: CommandBuffer) =
         for layer in run.first ..< run.first+run.count: inc p.sourceVersions[layer]
     let bytes = atlas.width * atlas.height * 4 * atlas.layers
     p.residentPixels.setLen(bytes)
-    copyMem(addr p.residentPixels[0], unsafeAddr atlas.pixels[0], bytes)
+    for run in runs:
+      let first = run.first * atlas.width * atlas.height * 4
+      let count = run.count * atlas.width * atlas.height * 4
+      copyMem(addr p.residentPixels[first], unsafeAddr atlas.pixels[first], count)
     p.residentWidth = atlas.width
     p.residentHeight = atlas.height
     p.residentLayers = atlas.layers
@@ -516,15 +519,21 @@ proc upload*(p: BillboardPass, cmd: CommandBuffer) =
         neededLayers = max(neededLayers,entry.slot+1)
 
   if p.texture.isNil or sizeChanged or neededLayers > p.textureLayers:
-    if not p.texture.isNil: p.device.retire(p.texture)
+    let previous = p.texture
+    let previousLayers = p.textureLayers
     p.textureLayers = textureCapacityFor(p.textureLayers,neededLayers,p.compositions.maximum)
     var levels = 1'u32
     while (max(p.residentWidth,p.residentHeight).uint32 shr levels) > 0: inc levels
     p.texture = newLayeredTexture(p.device,p.residentWidth.uint32,
       p.residentHeight.uint32,p.textureLayers.uint32,levels,R8G8B8A8)
-    runs = @[(first:0,count:p.residentLayers)]
-    for entry in p.compositions.slots:
-      if not entry.isNil: entry.resident = false
+    if not previous.isNil and not sizeChanged:
+      cmd.copyLayeredTexture(previous,p.texture,p.residentWidth.uint32,
+        p.residentHeight.uint32,previousLayers.uint32,levels)
+    else:
+      runs = @[(first:0,count:p.residentLayers)]
+      for entry in p.compositions.slots:
+        if not entry.isNil: entry.resident = false
+    if not previous.isNil: p.device.retire(previous)
   var filteredRuns: seq[tuple[first,count:int]]
   for run in runs:
     var first = -1

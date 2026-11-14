@@ -1,6 +1,6 @@
 ## CPU-binned world-space clustered forward lights. Fixed budgets bound both
-## upload size and fragment work; no per-light draw calls or shadow maps.
-import std/[algorithm, math, tables]
+## light lists and upload size; shared BVH shadows need no per-light passes.
+import std/[algorithm, math]
 import ellipse/drawing/geometry
 import ellipse/platform/gpu
 
@@ -10,8 +10,7 @@ const
   ClusterCell* = 8'f32
   ClusterLights* = 24
   MaxPointLights* = 512
-  ShadowBoxes* = 4
-  LightStride = 8 + ShadowBoxes * 6
+  LightStride = 8
   GridOffset = 4 + MaxPointLights * LightStride
   ClusterCount = ClusterSide * ClusterSide * ClusterHeight
   MaxEnvironmentRooms* = 512
@@ -20,8 +19,11 @@ const
   RoomStride = 8 + RoomPortals * 10 + 6
   RoomOffset = GridOffset + ClusterCount * (ClusterLights + 1)
   RoomGridOffset = RoomOffset + MaxEnvironmentRooms * RoomStride
+  ShadowTreeOffset = RoomGridOffset + ClusterCount * (ClusterRooms + 1)
+  MaxShadowNodes = 262144
+  ShadowNodeStride = 14
   TextureWidth = 1024
-  TextureHeight = (RoomGridOffset + ClusterCount * (ClusterRooms + 1) + TextureWidth - 1) div TextureWidth
+  TextureHeight = (ShadowTreeOffset + 1 + MaxShadowNodes * ShadowNodeStride + TextureWidth - 1) div TextureWidth
 
 type
   PointLight* = object
@@ -29,7 +31,9 @@ type
     radius*, intensity*: float32
     shadows*: bool
   LightOccluder* = object
-    low*, high*: Vec3
+    low*, high*: Vec3 ## world bounds for BVH traversal
+    center*, half*: Vec3 ## exact local box for rotated geometry
+    rotation*: Vec2 ## cosine/sine; zero means axis aligned
   LightPortal* = object
     ## Axis-aligned opening at the inner wall face; normal points indoors.
     low*, high*, inward*: Vec3
@@ -39,14 +43,9 @@ type
     center*, half*: Vec3 ## oriented rectangle in the x/z plane
     rotation*: Vec2 ## cosine/sine; zero preserves legacy axis-aligned rooms
     portals*: seq[LightPortal]
-  ShadowSelection = object
-    count: int
-    indices: array[ShadowBoxes, int]
-    distances: array[ShadowBoxes, float32]
   OccluderNode = object
     bounds: LightOccluder
     first, count, left, right: int
-  ShadowKey = tuple[x, y, z, radius: float32]
   ShadowGeometry* = ref object
     ## Immutable CPU spatial index, prepared before interactive rendering.
     index: ClusteredLights
@@ -54,14 +53,16 @@ type
     indexedBoxes: seq[LightOccluder]
     boxOrder: seq[int]
     boxNodes: seq[OccluderNode]
-    shadowCache: Table[ShadowKey, ShadowSelection]
-    staticShadowCache: Table[ShadowKey, ShadowSelection]
     staticGeometry: ShadowGeometry
+    staticShadowNodes: int
+    shadowRegion: Vec3
+    shadowRadius: float32
     indexBuilds*: int ## diagnostic: dynamic/legacy index rebuilds
     texture*: gpu.Texture
     sampler*: Sampler
     data*: seq[float32]
     activeCount*, overflowCount*: int
+    shadowNodeCount*: int
     roomCount*, roomOverflowCount*: int
 
 func portalExposure*(portal: LightPortal, p: Vec3): float32 =
@@ -141,72 +142,50 @@ proc syncOccluders(grid: ClusteredLights, boxes: openArray[LightOccluder]) =
   if same: return
   inc grid.indexBuilds
   grid.indexedBoxes = @boxes
-  grid.shadowCache.clear()
   grid.boxNodes.setLen(0)
   grid.boxOrder.setLen(boxes.len)
   for i in 0 ..< boxes.len: grid.boxOrder[i] = i
   if boxes.len > 0: discard grid.buildBoxNode(0, boxes.len)
-
-proc nearestBoxes(grid: ClusteredLights, p: Vec3, radius: float32): ShadowSelection =
-  let radius2 = radius * radius
-  proc visit(nodeIndex: int, selected: var ShadowSelection) =
-    let node = grid.boxNodes[nodeIndex]
-    let limit = if selected.count == ShadowBoxes: min(radius2, selected.distances[ShadowBoxes-1]) else: radius2
-    if boxDistance2(p, node.bounds) > limit: return
-    if node.left < 0:
-      for j in node.first ..< node.first + node.count:
-        let index = grid.boxOrder[j]
-        let d = boxDistance2(p, grid.indexedBoxes[index])
-        if d <= 0.0001f or d >= radius2: continue
-        var at = 0
-        # Input index breaks ties exactly as the old stable full sort did.
-        while at < selected.count and (selected.distances[at] < d or
-            (selected.distances[at] == d and selected.indices[at] < index)):
-          inc at
-        if at >= ShadowBoxes: continue
-        var move = min(selected.count, ShadowBoxes-1)
-        while move > at:
-          selected.indices[move] = selected.indices[move-1]
-          selected.distances[move] = selected.distances[move-1]
-          dec move
-        selected.indices[at] = index
-        selected.distances[at] = d
-        selected.count = min(selected.count+1, ShadowBoxes)
-    else:
-      let ld = boxDistance2(p, grid.boxNodes[node.left].bounds)
-      let rd = boxDistance2(p, grid.boxNodes[node.right].bounds)
-      if ld <= rd:
-        visit(node.left, selected)
-        visit(node.right, selected)
-      else:
-        visit(node.right, selected)
-        visit(node.left, selected)
-  if grid.boxNodes.len > 0: visit(0, result)
 
 proc prepareShadowGeometry*(boxes: openArray[LightOccluder]): ShadowGeometry =
   ## CPU-only. The result is immutable and may be prepared on a loader thread.
   result = ShadowGeometry(index: ClusteredLights())
   result.index.syncOccluders(boxes)
 
-func mergeShadows(fixed, dynamic: ShadowSelection, offset: int): ShadowSelection =
-  ## Static IDs precede dynamic IDs for deterministic ties.
-  result = fixed
-  for i in 0..<dynamic.count:
-    let index = dynamic.indices[i]+offset
-    let d = dynamic.distances[i]
-    var at = 0
-    while at < result.count and (result.distances[at] < d or
-        (result.distances[at] == d and result.indices[at] < index)):
-      inc at
-    if at >= ShadowBoxes: continue
-    var move = min(result.count,ShadowBoxes-1)
-    while move > at:
-      result.indices[move] = result.indices[move-1]
-      result.distances[move] = result.distances[move-1]
-      dec move
-    result.indices[at] = index
-    result.distances[at] = d
-    result.count = min(result.count+1,ShadowBoxes)
+proc writeShadowTree(grid: ClusteredLights, source: ClusteredLights,
+                     focus: Vec3, radius: float32) =
+  # Threaded BVH: each node stores its escape index. The GPU can traverse
+  # the complete nearby scene without a stack or a per-light wall budget.
+  proc emit(bounds: LightOccluder, leaf: bool): int =
+    if grid.shadowNodeCount >= MaxShadowNodes:
+      raise newException(ValueError, "Nearby light shadow geometry exceeds texture capacity")
+    result = grid.shadowNodeCount
+    inc grid.shadowNodeCount
+    let at = ShadowTreeOffset + 1 + result * ShadowNodeStride
+    for i, value in [bounds.low.x,bounds.low.y,bounds.low.z,
+                     bounds.high.x,bounds.high.y,bounds.high.z]:
+      grid.data[at+i] = value
+    grid.data[at+7] = (if leaf: 1'f32 else: 0'f32)
+    for i, value in [bounds.center.x,bounds.center.z,bounds.half.x,
+                     bounds.half.z,bounds.rotation.x,bounds.rotation.y]:
+      grid.data[at+8+i] = value
+  proc finish(index: int) =
+    grid.data[ShadowTreeOffset+1+index*ShadowNodeStride+6] = grid.shadowNodeCount.float32
+  proc visit(index: int) =
+    let node = source.boxNodes[index]
+    if boxDistance2(focus,node.bounds) > radius*radius: return
+    let parent = emit(node.bounds,false)
+    if node.left >= 0:
+      visit(node.left)
+      visit(node.right)
+    else:
+      for i in node.first..<node.first+node.count:
+        let box = source.indexedBoxes[source.boxOrder[i]]
+        if boxDistance2(focus,box) > radius*radius: continue
+        let leaf = emit(box,true)
+        finish(leaf)
+    finish(parent)
+  if source.boxNodes.len > 0: visit(0)
 
 proc build*(grid: ClusteredLights, lights: openArray[PointLight],
             occluders: openArray[LightOccluder], focus: Vec3, distance = 112'f32,
@@ -214,12 +193,30 @@ proc build*(grid: ClusteredLights, lights: openArray[PointLight],
             staticGeometry: ShadowGeometry = nil) =
   ## Stable nearest-first ordering makes overflow favour the explorer. A
   ## sphere/AABB test bins each light conservatively in all three dimensions.
+  if grid.data.len < TextureWidth*TextureHeight:
+    grid.data.setLen(TextureWidth*TextureHeight)
   grid.syncOccluders(occluders)
-  var nextCache, nextStaticCache: Table[ShadowKey, ShadowSelection]
-  if grid.staticGeometry != staticGeometry:
-    grid.staticShadowCache.clear()
+  var maxRadius = 0'f32
+  for light in lights:
+    if light.shadows and light.intensity > 0 and
+        distance2(light.position,focus) < distance*distance:
+      maxRadius = max(maxRadius,light.radius)
+  # A stationary observer reuses the serialized static tree. A padded,
+  # quantized region avoids rewriting it for every small camera movement.
+  let region = vec3(floor(focus.x/16)*16,floor(focus.y/16)*16,floor(focus.z/16)*16)
+  let radius = distance+maxRadius+28
+  if grid.staticGeometry != staticGeometry or grid.shadowRegion != region or
+      grid.shadowRadius != radius:
+    grid.shadowNodeCount = 0
+    if not staticGeometry.isNil:
+      grid.writeShadowTree(staticGeometry.index,region,radius)
+    grid.staticShadowNodes = grid.shadowNodeCount
     grid.staticGeometry = staticGeometry
-  let staticCount = if staticGeometry.isNil: 0 else: staticGeometry.index.indexedBoxes.len
+    grid.shadowRegion = region
+    grid.shadowRadius = radius
+  grid.shadowNodeCount = grid.staticShadowNodes
+  if maxRadius > 0: grid.writeShadowTree(grid,region,radius)
+  grid.data[ShadowTreeOffset] = (if maxRadius > 0: grid.shadowNodeCount.float32 else: 0'f32)
   # The shader reads a cluster's list only up to its count, and a light or
   # room record only through such a list. Clearing the counts is enough;
   # zeroing the whole ~3 MB texture each frame is not needed.
@@ -257,32 +254,7 @@ proc build*(grid: ClusteredLights, lights: openArray[PointLight],
     grid.data[base+4] = max(0'f32, light.color.x) * light.intensity * fade
     grid.data[base+5] = max(0'f32, light.color.y) * light.intensity * fade
     grid.data[base+6] = max(0'f32, light.color.z) * light.intensity * fade
-    grid.data[base+7] = 0 # shadow box count; set below for shadowed lights
-    if light.shadows:
-      let key: ShadowKey = (light.position.x, light.position.y, light.position.z, light.radius)
-      var nearest: ShadowSelection
-      if key in grid.shadowCache:
-        nearest = grid.shadowCache[key]
-      else:
-        nearest = grid.nearestBoxes(light.position, light.radius)
-      nextCache[key] = nearest
-      if not staticGeometry.isNil:
-        let fixed = if key in grid.staticShadowCache: grid.staticShadowCache[key]
-          else: staticGeometry.index.nearestBoxes(light.position,light.radius)
-        nextStaticCache[key] = fixed
-        nearest = mergeShadows(fixed,nearest,staticCount)
-      grid.data[base+7] = nearest.count.float32
-      for i in 0..<nearest.count:
-        let index = nearest.indices[i]
-        let b = if index < staticCount: staticGeometry.index.indexedBoxes[index]
-          else: occluders[index-staticCount]
-        let at = base + 8 + i * 6
-        grid.data[at] = b.low.x
-        grid.data[at+1] = b.low.y
-        grid.data[at+2] = b.low.z
-        grid.data[at+3] = b.high.x
-        grid.data[at+4] = b.high.y
-        grid.data[at+5] = b.high.z
+    grid.data[base+7] = (if light.shadows: 1'f32 else: 0'f32)
     let local = (light.position - origin) * (1 / ClusterCell)
     let r = light.radius / ClusterCell
     for z in max(0, floor(local.z-r).int)..min(31, floor(local.z+r).int):
@@ -298,10 +270,6 @@ proc build*(grid: ClusteredLights, lights: openArray[PointLight],
             grid.data[at+1+count] = id.float32
             grid.data[at] = (count+1).float32
           else: inc grid.overflowCount
-
-  # Retain only this frame's active lights, bounding cache growth during travel.
-  grid.shadowCache = move(nextCache)
-  grid.staticShadowCache = move(nextStaticCache)
 
   # Rooms use the existing world-space index and texture binding. Only the
   # rooms overlapping a fragment's cluster are tested, regardless of where
@@ -353,4 +321,6 @@ proc build*(grid: ClusteredLights, lights: openArray[PointLight],
           else: inc grid.roomOverflowCount
 
 proc upload*(grid: ClusteredLights, cmd: CommandBuffer) =
-  cmd.uploadPicture(grid.texture, addr grid.data[0], TextureWidth, TextureHeight)
+  let used = ShadowTreeOffset+1+grid.shadowNodeCount*ShadowNodeStride
+  let rows = (used+TextureWidth-1) div TextureWidth
+  cmd.uploadPicture(grid.texture,addr grid.data[0],TextureWidth,rows.uint32)

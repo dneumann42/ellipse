@@ -9,6 +9,7 @@ layout(location = 0) in vec2 fragmentUv;
 layout(location = 1) in float fragmentLayer;
 layout(location = 2) in vec3 fragmentLight;
 layout(location = 3) in vec3 worldPosition;
+layout(location = 10) in float fragmentShade;
 layout(location = 4) in float fragmentBlink; // damage-flash intensity 0..1
 
 layout(location = 5) flat in vec4 clothingLayers;
@@ -68,9 +69,10 @@ void main() {
   if (visibility <= 0.001) {
     discard;
   }
-  vec3 n = normalize(uFogEye.xyz-worldPosition);
+  // Zero normal requests the camera-independent spherical diffuse average.
+  vec3 n = vec3(0.0);
   float sky = environmentExposure(worldPosition);
-  vec3 colour = texel.rgb * (fragmentLight * sky + pointLighting(worldPosition,n));
+  vec3 colour = texel.rgb * (fragmentLight * sky + pointLighting(worldPosition,n) * fragmentShade);
   // damage flash: blend toward bright red by fragmentBlink
   colour = mix(colour, vec3(1.4, 0.35, 0.25) * fragmentLight * sky,
               clamp(fragmentBlink, 0.0, 1.0));

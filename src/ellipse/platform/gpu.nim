@@ -548,6 +548,21 @@ proc uploadLayers*(cmd: CommandBuffer, texture: Texture, data: pointer,
   endGPUCopyPass(copyPass)
   releasePictureTransfer(cmd.device,transfer,size)
 
+proc copyLayeredTexture*(cmd: CommandBuffer, source, destination: Texture,
+                         width, height, layers, levels: uint32) =
+  ## Preserve resident source and composed layers when an array grows. Copy
+  ## every mip on the GPU rather than rebuilding unchanged pixels on the CPU.
+  let pass = beginGPUCopyPass(cmd.raw)
+  for level in 0'u32 ..< levels:
+    for layer in 0'u32 ..< layers:
+      var src = GPUTextureLocation(texture: cast[ptr GPUTexture](source.raw),
+        mip_level: level, layer: layer)
+      var dst = GPUTextureLocation(texture: cast[ptr GPUTexture](destination.raw),
+        mip_level: level, layer: layer)
+      copyGPUTextureToTexture(pass, addr src, addr dst,
+        max(1'u32, width shr level), max(1'u32, height shr level), 1, false)
+  endGPUCopyPass(pass)
+
 proc generateMipmaps*(cmd: CommandBuffer, texture: Texture) =
   ## Fill every mip level below the top one by halving it, layer by layer.
   generateMipmapsForGPUTexture(cmd.raw, texture.raw)

@@ -10,6 +10,7 @@ import fog
 import geometry
 import mist
 import planes
+import worldtextpass
 import retro
 import shapes
 import sky
@@ -204,6 +205,7 @@ type
     skybox: SkyboxState ## the cube texture the sky samples, and what made it
     fog: FogOptions
     sprites: BillboardPass ## upright sprites by the hundred thousand
+    worldText: WorldTextPass
     planes: PlanePass ## sprite planes: a held weapon, a painted sign
     mist: MistPass ## drifting fog billboards, blended over the whole
     aspect: float32 ## width over height of the frame last presented: the
@@ -386,6 +388,7 @@ proc newArtist*(app: App): Artist3D =
     skyPixelSampler: newSampler(device, pixelated = true),
     fog: newFogOptions(),
     sprites: newBillboardPass(device, app.gpuSwapchainFormat(), clusters),
+    worldText: newWorldTextPass(device, app.gpuSwapchainFormat()),
     planes: newPlanePass(device, app.gpuSwapchainFormat()),
     mist: newMistPass(device, app.gpuSwapchainFormat()),
     aspect: 1.0f,
@@ -428,6 +431,7 @@ proc reset*(a: Artist3D) =
   a.watering = false
   a.sprites.reset()
   a.planes.reset()
+  a.worldText.reset()
   a.mist.reset()
   a.shapes2d.clearShapes()
 
@@ -924,6 +928,16 @@ proc drawPlaneQuad*(a: Artist3D, corners: array[4, Vec3],
   ## sheet's uv at each, tinted by `color` and lit by nothing but it.
   a.planes.queueQuad(corners, uv, color)
 
+proc setWorldTextAtlas*(a: Artist3D, width, height: int,
+                        pixels: openArray[uint8]) =
+  ## Linear-filtered signed distances in alpha, boundary at 0.5.
+  a.worldText.setTexture(width, height, pixels)
+
+proc drawWorldTextQuad*(a: Artist3D, corners: array[4, Vec3],
+                        uv: array[4, Vec2], color: Vec4 = vec4(1, 0.94, 0.8, 1)) =
+  ## Depth-tested lettering, independent of retro sprite filtering and HUD.
+  a.worldText.queueQuad(corners, uv, color)
+
 proc setMist*(a: Artist3D, options: MistOptions) =
   ## The knobs of this frame's mist field: the noise's motion and shape,
   ## the dither's grain, and the colour the puffs wear.
@@ -1410,6 +1424,7 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
     vec3(-a.lightDir.x, -a.lightDir.y, -a.lightDir.z), a.lightIntensity,
     a.ambient, fog, a.clusters)
   a.planes.drawColour(cmd, pass, a.projection * a.view, fog)
+  a.worldText.drawColour(cmd, pass, a.projection * a.view, fog)
   let water = a.waterUniforms()
   a.drawWater(cmd, pass, waterPipeline,
     proc () = cmd.pushFragmentUniforms(0, water), grounded = true)
@@ -1705,6 +1720,7 @@ proc present*(a: Artist3D, app: var App, clearColor: ClearColor) =
     a.clusters.upload(frame.cmd)
     a.sprites.upload(frame.cmd)
     a.planes.upload(frame.cmd)
+    a.worldText.upload(frame.cmd)
     a.mist.upload(frame.cmd, a.eye)
     frame.cmd.upload(a.shapeBuffer, a.shapes2d.vertices)
     a.uploadStatics(frame.cmd)
@@ -1713,7 +1729,7 @@ proc present*(a: Artist3D, app: var App, clearColor: ClearColor) =
         a.statics.len > 0 or a.instanceDraws.len > 0 or a.splatBatches.len > 0 or
         a.staticSplats.len > 0 or
         a.waterBatches.len > 0 or
-        a.sprites.pending or a.planes.pending or a.mist.pending or
+        a.sprites.pending or a.planes.pending or a.worldText.pending or a.mist.pending or
         a.sky.enabled:
       a.refreshProjection(frame)
       if a.sky.enabled:

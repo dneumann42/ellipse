@@ -12,6 +12,8 @@ type
     data: seq[T]
   View* = ref object
     required: seq[string]
+    excluded: seq[string]
+    revision*: uint64
     entities: seq[EntityId]
     index: Table[EntityId, int]
   EntityManager* = object
@@ -76,6 +78,8 @@ proc hasComponent(self: EntityManager, entityId: EntityId, component: ComponentK
   not buffer.isNil and buffer.hasEntity(entityId)
 
 proc matches(self: View, manager: EntityManager, entityId: EntityId): bool =
+  for component in self.excluded:
+    if manager.hasComponent(entityId, componentKey(component)): return false
   for component in self.required:
     if not manager.hasComponent(entityId, componentKey(component)):
       return false
@@ -84,6 +88,7 @@ proc matches(self: View, manager: EntityManager, entityId: EntityId): bool =
 proc addEntity(self: View, entityId: EntityId) =
   self.index[entityId] = self.entities.len
   self.entities.add(entityId)
+  inc self.revision
 
 proc removeEntity(self: View, entityId: EntityId) =
   if not self.index.hasKey(entityId):
@@ -96,9 +101,13 @@ proc removeEntity(self: View, entityId: EntityId) =
   if last != entityId:
     self.index[last] = slot
   self.entities.setLen(self.entities.len - 1)
+  inc self.revision
 
 proc refreshView(self: View, manager: EntityManager, entityId: EntityId) =
-  if not self.index.hasKey(entityId) and self.matches(manager, entityId):
+  let matches = self.matches(manager, entityId)
+  if entityId in self.index:
+    if not matches: self.removeEntity(entityId)
+  elif matches:
     self.addEntity(entityId)
 
 proc refreshViews(self: var EntityManager, entityId: EntityId) =
@@ -136,6 +145,12 @@ proc add*[T](self: var EntityManager, entityId: EntityId, component: T) =
 proc get*[T](self: EntityManager, entityId: EntityId): var T =
   const key = componentKey(name(T))
   cast[ComponentBuffer[T]](self.componentBuffers[key]).get(entityId)
+
+proc componentBuffer*[T](self: EntityManager): ComponentBuffer[T] =
+  ## Resolve a typed buffer once outside hot entity loops. Empty views may
+  ## have no buffer yet; callers must tolerate nil in that case.
+  const key = componentKey(name(T))
+  cast[ComponentBuffer[T]](self.componentBuffers.getOrDefault(key))
 
 proc exists*(self: EntityManager, entityId: EntityId): bool =
   self.entityIndex.hasKey(entityId)
@@ -184,7 +199,7 @@ proc viewFromNames*(self: var EntityManager, required: seq[string]): View =
       components.add(component)
 
   for view in self.views:
-    if view.required == components:
+    if view.required == components and view.excluded.len == 0:
       return view
 
   result = View(required: components)
@@ -192,6 +207,21 @@ proc viewFromNames*(self: var EntityManager, required: seq[string]): View =
     if result.matches(self, entityId):
       result.addEntity(entityId)
   self.views.add(result)
+
+proc withoutNames*(self: var EntityManager, matching: View, excluded: seq[string]): View =
+  var names = excluded
+  names.sort()
+  for view in self.views:
+    if view.required == matching.required and view.excluded == names: return view
+  result = View(required: matching.required, excluded: names)
+  for id in matching.entities:
+    if result.matches(self, id): result.addEntity(id)
+  self.views.add result
+
+macro without*(self: var EntityManager, matching: View, components: varargs[typed]): untyped =
+  var names = newTree(nnkBracket)
+  for component in components: names.add newCall(bindSym"name", component)
+  result = newCall(bindSym"withoutNames", self, matching, newTree(nnkPrefix, ident"@", names))
 
 macro view*(self: var EntityManager, components: varargs[typed]): untyped =
   func isComponentType(comp: NimNode): bool =

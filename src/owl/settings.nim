@@ -20,6 +20,10 @@
 #   width = scale 1024 75
 #   title = "editor"
 #
+# `newSettings(bindings = true)` uses that form for loading, reloading and
+# saving every file registered in the repository. `writeBindingsText` writes
+# a single record in the same form. The default mode still reads the last form.
+#
 # Files are registered by type with `add`, which hands back a mutable borrow of
 # the data, and read back through `get`. Both borrow, so writing to one writes
 # to the stored settings:
@@ -71,6 +75,7 @@ type
 
   AbstractSettingsObject* = ref object of RootObj
     path: string
+    bindings: bool
     typeName: SettingsTypeName
     sandbox: Library        # the modules this file may `use`
     root: ref Environment   # the names it has without asking for any
@@ -90,6 +95,7 @@ type
     hot: bool
     quiet: bool
     opened: bool
+    bindings: bool
 
 const
   allowedModules = ["base", "math", "list", "strings", "iterators"]
@@ -180,7 +186,10 @@ proc readValue*(self: AbstractSettingsObject): Object =
     source = readFile(self.path)
   except CatchableError:
     err("cannot read settings: " & self.path)
-  evaluate(self.sandbox, self.root, self.path, source)
+  if self.bindings:
+    evaluateBindings(self.sandbox, self.root, self.path, source)
+  else:
+    evaluate(self.sandbox, self.root, self.path, source)
 
 proc settingsText*(name: SettingsTypeName, text: string): string =
   ## The file's contents: a line saying what it holds, then the data.
@@ -192,6 +201,16 @@ proc settingsText*(name: SettingsTypeName, text: string): string =
 template writeText*[T](x: T): string =
   ## A value as the text of its settings file.
   settingsText(name(T), owlText(x))
+
+proc bindingsText*(value: Object): string =
+  ## A record as top-level assignments, keeping nested values as Owl literals.
+  if not isRecord(value):
+    raise newException(ValueError, "bindings settings need a record")
+  for field in recordFields(value):
+    result.add toCode(field) & "\n"
+
+template writeBindingsText*[T](x: T): string =
+  settingsText(name(T), bindingsText(encode(x)))
 
 # Files ------------------------------------------------------------------------
 
@@ -236,14 +255,17 @@ proc nameFor(T: type): SettingsTypeName =
 
 # The repository ---------------------------------------------------------------
 
-proc newSettings*(hot: bool = false, quiet: bool = false): SettingsRepository =
+proc newSettings*(hot: bool = false, quiet: bool = false,
+    bindings: bool = false): SettingsRepository =
   ## An empty repository. `hot` starts watching every file added to it.
+  ## `bindings` reads top-level assignments and saves records as assignments.
   result = SettingsRepository(
     settings: initTable[SettingsTypeName, AbstractSettingsObject](),
     sandbox: settingsLibrary(),
     root: settingsRoot(),
     hot: hot,
-    quiet: quiet)
+    quiet: quiet,
+    bindings: bindings)
   evaluate(result.sandbox)
 
 proc prepare(repo: var SettingsRepository) =
@@ -284,7 +306,10 @@ template loadHook*(T: typedesc): LoadHook =
 template writeHook*(T: typedesc): WriteHook =
   ## The data as the file's text.
   proc (self: AbstractSettingsObject): string =
-    writeText(cast[SettingsObject[T]](self).data)
+    if self.bindings:
+      writeBindingsText(cast[SettingsObject[T]](self).data)
+    else:
+      writeText(cast[SettingsObject[T]](self).data)
 
 proc borrow[T](repo: var SettingsRepository, t: typedesc[T],
     key: SettingsTypeName): var T =
@@ -304,8 +329,8 @@ proc register[T](repo: var SettingsRepository, path: string, t: typedesc[T],
       err("settings: " & key & " is already registered from " &
         repo.settings[key].path)
     return repo.borrow(t, key)
-  var obj = SettingsObject[T](path: path, typeName: key, sandbox: repo.sandbox,
-    root: repo.root, load: load, write: write)
+  var obj = SettingsObject[T](path: path, bindings: repo.bindings, typeName: key,
+    sandbox: repo.sandbox, root: repo.root, load: load, write: write)
   repo.settings[key] = obj
   if fileExists(path):
     obj.stamp = stampOf(path)
