@@ -1,12 +1,22 @@
-import std/[typetraits, tables, algorithm, macros, sysrand, hashes]
+import std/[typetraits, tables, algorithm, macros, sysrand, hashes, atomics]
 
 type
   ComponentKey = object
     label: string
     digest: Hash
   EntityId* = uint64
+  EntitySlots = ref object
+    ## Stable small numbers for entity ids, shared by a manager and its
+    ## component buffers, which index plain arrays by them.
+    slots: Table[EntityId, int32]
+    free: seq[int32]
+    next: int32
+    generation: uint64 ## changes whenever an id gains or loses its slot
+    serial: uint64 ## unique per table, so a remembered lookup never
+      ## outlives the table it came from
   AbstractComponentBuffer* = ref object of RootObj
-    entityIndex: Table[EntityId, int]
+    ids: EntitySlots
+    sparse: seq[int32] ## entity slot -> component index + 1; 0: none
     dead: seq[int] ## freed component slots, handed to the next add
   ComponentBuffer*[T] = ref object of AbstractComponentBuffer
     data: seq[T]
@@ -19,16 +29,84 @@ type
   EntityManager* = object
     entities: seq[EntityId]
     entityIndex: Table[EntityId, int]
+    ids: EntitySlots
     componentBuffers: Table[ComponentKey, AbstractComponentBuffer]
+    bySlot: seq[AbstractComponentBuffer] ## the same buffers, by `typeSlot`
     views: seq[View]
 
 func hash(key: ComponentKey): Hash = key.digest
 
+func `==`(a, b: ComponentKey): bool =
+  a.digest == b.digest and a.label == b.label
+
+var nextTypeSlot: Atomic[int]
+
+proc typeSlot[T](): int {.inline.} =
+  ## A small process-wide number per component type, so typed lookups index
+  ## a seq instead of hashing and comparing the type's name.
+  var slot {.global.}: Atomic[int] # 0: not assigned yet; else slot + 1
+  # Assigning the number once is the only effect, and it is invisible:
+  # every later call for T returns the same slot.
+  {.cast(gcsafe), cast(noSideEffect).}:
+    let known = slot.load(moRelaxed)
+    if known != 0: return known - 1
+    var expected = 0
+    let fresh = nextTypeSlot.fetchAdd(1) + 1
+    if slot.compareExchange(expected, fresh): return fresh - 1
+    return expected - 1
+
+proc slotBuffer[T](self: EntityManager): AbstractComponentBuffer {.inline.} =
+  let slot = typeSlot[T]()
+  if slot < self.bySlot.len: self.bySlot[slot] else: nil
+
 func componentKey(label: string): ComponentKey =
   ComponentKey(label: label, digest: hash(label))
 
+var slotTables: Atomic[uint64]
+
+proc newEntitySlots(): EntitySlots =
+  EntitySlots(serial: slotTables.fetchAdd(1) + 1)
+
 proc initEntityManager*(): EntityManager =
-  result = EntityManager()
+  result = EntityManager(ids: newEntitySlots())
+
+var lastLookup {.threadvar.}: tuple[serial: uint64, id: EntityId, slot: int32,
+                                    generation: uint64]
+
+proc slotOf(ids: EntitySlots, id: EntityId): int32 {.inline.} =
+  ## The id's slot, or -1. Systems read several components of one entity in
+  ## a row; the last lookup is remembered per thread, so they hash once.
+  if ids.isNil: return -1
+  {.cast(gcsafe), cast(noSideEffect).}:
+    if lastLookup.serial == ids.serial and lastLookup.id == id and
+        lastLookup.generation == ids.generation:
+      return lastLookup.slot
+    result = ids.slots.getOrDefault(id, -1)
+    lastLookup = (ids.serial, id, result, ids.generation)
+
+proc claimSlot(ids: EntitySlots, id: EntityId): int32 =
+  result = ids.slots.getOrDefault(id, -1)
+  if result >= 0: return
+  if ids.free.len > 0: result = ids.free.pop()
+  else:
+    result = ids.next
+    inc ids.next
+  ids.slots[id] = result
+  inc ids.generation
+
+proc releaseSlot(ids: EntitySlots, id: EntityId) =
+  var slot: int32
+  if ids.slots.pop(id, slot):
+    ids.free.add slot
+    inc ids.generation
+
+proc ensureIds(self: var EntityManager) {.inline.} =
+  if self.ids.isNil: self.ids = newEntitySlots()
+
+proc indexOf(self: AbstractComponentBuffer, entityId: EntityId): int {.inline.} =
+  ## The entity's component index in this buffer, or -1.
+  let slot = self.ids.slotOf(entityId)
+  if slot < 0 or slot >= self.sparse.len: -1 else: self.sparse[slot].int - 1
 
 proc randomUint64(): uint64 =
   var bytes: array[8, byte]
@@ -53,24 +131,31 @@ proc nextComponentIndex*[T](self: ComponentBuffer[T]): int =
     self.data.setLen(self.data.len + 1)
 
 proc add*[T](self: ComponentBuffer[T], entityId: EntityId, component: T) =
-  let index = self.nextComponentIndex()
+  let slot = self.ids.claimSlot(entityId)
+  if slot >= self.sparse.len: self.sparse.setLen(slot + 1)
+  var index = self.sparse[slot].int - 1
+  if index < 0:
+    index = self.nextComponentIndex()
+    self.sparse[slot] = int32(index + 1)
   self.data[index] = component
-  self.entityIndex[entityId] = index
 
 proc get*[T](self: ComponentBuffer[T], entityId: EntityId): var T =
-  self.data[self.entityIndex[entityId]]
+  let index = self.indexOf(entityId)
+  if index < 0:
+    raise newException(KeyError, "entity has no " & $T)
+  self.data[index]
 
 proc hasEntity*(self: AbstractComponentBuffer, entityId: EntityId): bool =
-  self.entityIndex.hasKey(entityId)
+  self.indexOf(entityId) >= 0
 
 proc remove*(self: AbstractComponentBuffer, entityId: EntityId): bool =
   ## Forget one entity's slot: the index goes back to the dead pool for the
   ## next add, and the mapping is dropped so the view can be evicted cleanly.
-  if not self.entityIndex.hasKey(entityId):
+  let index = self.indexOf(entityId)
+  if index < 0:
     return false
-
-  self.dead.add(self.entityIndex[entityId])
-  self.entityIndex.del(entityId)
+  self.dead.add(index)
+  self.sparse[self.ids.slotOf(entityId)] = 0
   return true
 
 proc hasComponent(self: EntityManager, entityId: EntityId, component: ComponentKey): bool =
@@ -117,7 +202,9 @@ proc refreshViews(self: var EntityManager, entityId: EntityId) =
     view.refreshView(self, entityId)
 
 proc spawn*(self: var EntityManager): EntityId =
+  self.ensureIds()
   result = generateNextId()
+  discard self.ids.claimSlot(result)
   self.entityIndex[result] = self.entities.len
   self.entities.add(result)
   self.refreshViews(result)
@@ -129,6 +216,8 @@ proc adopt*(self: var EntityManager, entityId: EntityId): bool =
   ## gets no second copy and no views change.
   if self.entityIndex.hasKey(entityId):
     return false
+  self.ensureIds()
+  discard self.ids.claimSlot(entityId)
   self.entityIndex[entityId] = self.entities.len
   self.entities.add(entityId)
   self.refreshViews(entityId)
@@ -136,28 +225,34 @@ proc adopt*(self: var EntityManager, entityId: EntityId): bool =
 
 proc add*[T](self: var EntityManager, entityId: EntityId, component: T) =
   const key = componentKey(name(T))
+  self.ensureIds()
   if not self.componentBuffers.hasKey(key):
-    self.componentBuffers[key] = AbstractComponentBuffer(ComponentBuffer[T]())
-  var buffer = cast[ComponentBuffer[T]](self.componentBuffers[key])
+    self.componentBuffers[key] = AbstractComponentBuffer(ComponentBuffer[T](ids: self.ids))
+  let slot = typeSlot[T]()
+  if slot >= self.bySlot.len: self.bySlot.setLen(slot + 1)
+  if self.bySlot[slot].isNil: self.bySlot[slot] = self.componentBuffers[key]
+  var buffer = cast[ComponentBuffer[T]](self.bySlot[slot])
   buffer.add(entityId, component)
   self.refreshViews(entityId)
 
 proc get*[T](self: EntityManager, entityId: EntityId): var T =
-  const key = componentKey(name(T))
-  cast[ComponentBuffer[T]](self.componentBuffers[key]).get(entityId)
+  let buffer = self.slotBuffer[:T]()
+  if buffer.isNil:
+    const key = componentKey(name(T))
+    raise newException(KeyError, "no component " & key.label)
+  cast[ComponentBuffer[T]](buffer).get(entityId)
 
 proc componentBuffer*[T](self: EntityManager): ComponentBuffer[T] =
   ## Resolve a typed buffer once outside hot entity loops. Empty views may
   ## have no buffer yet; callers must tolerate nil in that case.
-  const key = componentKey(name(T))
-  cast[ComponentBuffer[T]](self.componentBuffers.getOrDefault(key))
+  cast[ComponentBuffer[T]](self.slotBuffer[:T]())
 
 proc exists*(self: EntityManager, entityId: EntityId): bool =
   self.entityIndex.hasKey(entityId)
 
 proc has*[T](self: EntityManager, entityId: EntityId): bool =
-  const key = componentKey(name(T))
-  self.hasComponent(entityId, key)
+  let buffer = self.slotBuffer[:T]()
+  not buffer.isNil and buffer.hasEntity(entityId)
 
 proc despawn*(self: var EntityManager, entityId: EntityId): bool =
   ## Forget an entity for good: it leaves the roster, every component buffer
@@ -174,6 +269,7 @@ proc despawn*(self: var EntityManager, entityId: EntityId): bool =
     discard buffer.remove(entityId)
   for view in self.views:
     view.removeEntity(entityId)
+  self.ids.releaseSlot(entityId)
   return true
 
 iterator entities*(self: EntityManager): EntityId =

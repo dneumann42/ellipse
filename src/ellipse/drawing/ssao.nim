@@ -105,14 +105,20 @@ proc ensureSize*(p: SsaoPass, width, height: uint32) =
   p.depthData = newColorTexture(p.device, width, height, Rgba8)
   p.occlusion = newColorTexture(p.device, width, height, Rgba8)
 
-proc beginScene*(p: SsaoPass, cmd: CommandBuffer, clearColor: ClearColor, depth: Texture): RenderPass =
+proc beginScene*(p: SsaoPass, cmd: CommandBuffer, clearColor: ClearColor, depth: Texture,
+                 loadDepth = false, keepDepth = false): RenderPass =
   ## The scene pass renders into the offscreen colour target; artist code
-  ## draws its batches, then ends the pass.
-  cmd.beginRender(p.sceneColor, clearColor, depth)
+  ## draws its batches, then ends the pass. `loadDepth` starts from a depth
+  ## prepass, so hidden fragments are rejected before they are shaded.
+  cmd.beginRender(p.sceneColor, clearColor, depth, loadDepth = loadDepth,
+    keepDepth = keepDepth)
 
-proc beginDepth*(p: SsaoPass, cmd: CommandBuffer, depth: Texture): RenderPass =
+proc beginDepth*(p: SsaoPass, cmd: CommandBuffer, depth: Texture,
+                 load = false, keepDepth = false): RenderPass =
   ## Geometry is replayed with the depth pipeline, packing linear view depth.
-  let pass = cmd.beginRender(p.depthData, farClear, depth)
+  ## `load` adds to the packed depth and depth buffer an earlier pass left.
+  let pass = cmd.beginRender(p.depthData, farClear, depth, loadColor = load,
+    loadDepth = load, keepDepth = keepDepth)
   pass.bindPipeline(p.depthPipeline)
   pass
 

@@ -23,7 +23,7 @@ layout(location = 0) out vec4 outColor;
 layout(set = 2, binding = 0) uniform sampler2DArray uSprites;
 
 layout(set = 3, binding = 0) uniform Fragment {
-  vec4 uCut;      // x: opacity under which a texel is cut away
+  vec4 uCut;      // x: legacy cutoff; y: coverage filter; z: fringe pass
   vec4 uFogEye;   // xyz: the eye
   vec4 uFogNear;  // rgb: the haze at the edge of sight; a: density
   vec4 uFogFar;   // rgb: the haze far in; a: falloff
@@ -44,7 +44,10 @@ float fogVisibility(float reach) {
 
 #include "clustered.glsl.inc"
 
+#include "character_filter.glsl.inc"
+
 vec4 dressedTexel() {
+  if (uCut.y > 0.5) return coverageTexel();
   // Accumulate premultiplied color, then return straight color for lighting.
   vec4 body = texture(uSprites,vec3(fragmentUv,fragmentLayer));
   vec4 result = vec4(body.rgb*body.a,body.a);
@@ -61,7 +64,9 @@ vec4 dressedTexel() {
 
 void main() {
   vec4 texel = dressedTexel();
-  if (texel.a < uCut.x) {
+  // Coverage mode: opaque core writes depth; sorted fringe never does.
+  if (uCut.y > 0.5 ? (uCut.z < 0.5 ? texel.a < 0.99999 :
+      (texel.a <= 0.00001 || texel.a >= 0.99999)) : texel.a < uCut.x) {
     discard;
   }
   float reach = length(uFogEye.xyz - worldPosition);
@@ -78,5 +83,5 @@ void main() {
               clamp(fragmentBlink, 0.0, 1.0));
   float amount = fogAmount(reach);
   vec3 hazed = mix(colour, mix(uFogNear.rgb, uFogFar.rgb, amount), amount);
-  outColor = vec4(hazed, visibility);
+  outColor = vec4(hazed, visibility * (uCut.y > 0.5 ? texel.a : 1.0));
 }

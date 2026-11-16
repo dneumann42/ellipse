@@ -182,6 +182,9 @@ const
   R32Float* = TextureFormat(ord(GPU_TEXTUREFORMAT_R32_FLOAT).int32)
     ## One 32-bit float a texel: four bytes, so `uploadPicture` takes it
     ## as it takes RGBA8. Read it with `texelFetch`; it need not filter.
+  Rgba32Float* = TextureFormat(ord(GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT).int32)
+    ## Four 32-bit floats a texel: pass `pixelBytes = 16` to
+    ## `uploadPictureArea`. Read it with `texelFetch`.
 
 proc swapchainFormat*(device: Device, window: Window): TextureFormat =
   TextureFormat(ord(getGPUSwapchainTextureFormat(device.raw, window)).int32)
@@ -403,16 +406,18 @@ proc uploadPicture*(cmd: CommandBuffer, texture: Texture, data: pointer,
   releasePictureTransfer(cmd.device,transfer,size)
 
 proc uploadPictureArea*(cmd: CommandBuffer, texture: Texture, data: pointer,
-                        width: uint32, x0, y0, x1, y1: uint32) =
+                        width: uint32, x0, y0, x1, y1: uint32,
+                        pixelBytes = 4'u32) =
   ## `uploadPicture` for the columns `x0 ..< x1` and rows `y0 ..< y1` of a
   ## picture `width` pixels across: only those rows' spans are copied out
-  ## and sent, the rest of the texture keeps what it held.
+  ## and sent, the rest of the texture keeps what it held. `pixelBytes` is
+  ## 4 for RGBA8/R32F and 16 for RGBA32F.
   if x1 <= x0 or y1 <= y0:
     return
   let
     w = x1 - x0
     h = y1 - y0
-    span = w * 4
+    span = w * pixelBytes
   let transfer = pictureTransfer(cmd.device, span * h)
   let mapped = mapGPUTransferBuffer(cmd.device.raw, transfer, true)
   if mapped.isNil:
@@ -422,7 +427,7 @@ proc uploadPictureArea*(cmd: CommandBuffer, texture: Texture, data: pointer,
     dst = cast[uint](mapped)
   for row in 0'u32 ..< h:
     copyMem(cast[pointer](dst + uint(row * span)),
-            cast[pointer](src + uint(((y0 + row) * width + x0) * 4)), span.int)
+            cast[pointer](src + uint(((y0 + row) * width + x0) * pixelBytes)), span.int)
   unmapGPUTransferBuffer(cmd.device.raw, transfer)
   var source = GPUTextureTransferInfo(
     transfer_buffer: cast[ptr GPUTransferBuffer](transfer),
@@ -602,21 +607,25 @@ proc newSampler*(device: Device, repeat = false, mipmaps = false,
     raiseSdlError("Failed to create sampler")
   Sampler(device: device, raw: raw)
 
-proc beginRender*(cmd: CommandBuffer, target: Texture, clearColor: ClearColor, depth: Texture): RenderPass =
+proc beginRender*(cmd: CommandBuffer, target: Texture, clearColor: ClearColor, depth: Texture,
+                  loadColor = false, loadDepth = false, keepDepth = false): RenderPass =
+  ## `loadColor`/`loadDepth` continue what an earlier pass left in the
+  ## targets instead of clearing them; `keepDepth` stores the depth for a
+  ## later pass (a depth prepass, or a pass that adds to its depth).
   var colorInfo = GPUColorTargetInfo(
     texture: cast[ptr GPUTexture](target.raw),
     clear_color: FColor(r: clearColor.r, g: clearColor.g, b: clearColor.b, a: clearColor.a),
-    load_op: GPU_LOADOP_CLEAR,
+    load_op: (if loadColor: GPU_LOADOP_LOAD else: GPU_LOADOP_CLEAR),
     store_op: GPU_STOREOP_STORE,
   )
   var depthInfo = GPUDepthStencilTargetInfo(
     texture: cast[ptr GPUTexture](depth.raw),
     clear_depth: 1.0,
-    load_op: GPU_LOADOP_CLEAR,
-    store_op: GPU_STOREOP_DONT_CARE,
+    load_op: (if loadDepth: GPU_LOADOP_LOAD else: GPU_LOADOP_CLEAR),
+    store_op: (if keepDepth: GPU_STOREOP_STORE else: GPU_STOREOP_DONT_CARE),
     stencil_load_op: GPU_LOADOP_DONT_CARE,
     stencil_store_op: GPU_STOREOP_DONT_CARE,
-    cycle: true,
+    cycle: not loadDepth, # cycling would discard the loaded contents
   )
   let raw = beginGPURenderPass(cmd.raw, addr colorInfo, 1, addr depthInfo)
   if raw.isNil:
@@ -776,11 +785,12 @@ proc grow(buffer: DynamicBuffer, size: uint32) =
   buffer.transfer = createTransferBuffer(buffer.device, capacity)
   buffer.capacity = capacity
 
-proc upload*(cmd: CommandBuffer, buffer: DynamicBuffer, data: pointer, size: uint32) =
+proc upload*(cmd: CommandBuffer, buffer: DynamicBuffer, data: pointer, size: uint32,
+             offset: uint32 = 0) =
   if size == 0:
     return
-  if size > buffer.capacity:
-    grow(buffer, size)
+  if offset + size > buffer.capacity:
+    grow(buffer, offset + size)
   let mapped = mapGPUTransferBuffer(cmd.device.raw, buffer.transfer, true)
   if mapped.isNil:
     raiseSdlError("Failed to map transfer buffer")
@@ -792,16 +802,44 @@ proc upload*(cmd: CommandBuffer, buffer: DynamicBuffer, data: pointer, size: uin
   )
   var destination = GPUBufferRegion(
     buffer: cast[ptr GPUBuffer](buffer.raw),
-    offset: 0,
+    offset: offset,
     size: size,
   )
   let copyPass = beginGPUCopyPass(cmd.raw)
   uploadToGPUBuffer(copyPass, addr source, addr destination, true)
   endGPUCopyPass(copyPass)
 
-proc upload*[T](cmd: CommandBuffer, buffer: DynamicBuffer, data: openArray[T]) =
+proc newFixedBuffer*(device: Device, usages: set[BufferUsage], capacity: uint32): DynamicBuffer =
+  ## A GPU buffer written in parts with `uploadInto`. It keeps no staging
+  ## copy of its own: each write borrows a pooled transfer buffer.
+  DynamicBuffer(device: device, raw: createRawBuffer(device, capacity, usages),
+    capacity: capacity, usages: usages)
+
+proc uploadInto*(cmd: CommandBuffer, buffer: DynamicBuffer, data: pointer,
+                 size, offset: uint32) =
+  ## Write `size` bytes at `offset` and keep the rest of the buffer: the
+  ## destination is not cycled, so other ranges stay valid for every draw.
+  if size == 0: return
+  assert offset + size <= buffer.capacity
+  let transfer = pictureTransfer(cmd.device, size)
+  let mapped = mapGPUTransferBuffer(cmd.device.raw, transfer, true)
+  if mapped.isNil:
+    raiseSdlError("Failed to map transfer buffer")
+  copyMem(mapped, data, size)
+  unmapGPUTransferBuffer(cmd.device.raw, transfer)
+  var source = GPUTransferBufferLocation(
+    transfer_buffer: cast[ptr GPUTransferBuffer](transfer), offset: 0)
+  var destination = GPUBufferRegion(
+    buffer: cast[ptr GPUBuffer](buffer.raw), offset: offset, size: size)
+  let copyPass = beginGPUCopyPass(cmd.raw)
+  uploadToGPUBuffer(copyPass, addr source, addr destination, false)
+  endGPUCopyPass(copyPass)
+  releasePictureTransfer(cmd.device, transfer, size)
+
+proc upload*[T](cmd: CommandBuffer, buffer: DynamicBuffer, data: openArray[T],
+                offset: uint32 = 0) =
   if data.len > 0:
-    cmd.upload(buffer, unsafeAddr data[data.low], (data.len * sizeof(T)).uint32)
+    cmd.upload(buffer, unsafeAddr data[data.low], (data.len * sizeof(T)).uint32, offset)
 
 proc waitLastFence*(device: Device) =
   ## Block until the most recently submitted command buffer finishes,

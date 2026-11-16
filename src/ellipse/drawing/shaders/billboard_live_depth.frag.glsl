@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // A billboard into the occlusion pass's packed linear depth: cut out exactly
 // as the colour pass cuts it, so the shade it casts matches its outline.
@@ -19,7 +20,7 @@ layout(set = 2, binding = 0) uniform sampler2DArray uSprites;
 layout(set = 3, binding = 0) uniform Depth {
   vec4 uNearFar; // x = near, y = far
   vec4 uFogFade; // x: metres past which geometry stops occluding
-  vec4 uCut;     // x: opacity under which a texel is cut away
+  vec4 uCut;     // x: occlusion cutoff; y: coverage filter
 };
 
 vec4 packDepth(float value) {
@@ -30,7 +31,10 @@ vec4 packDepth(float value) {
   return packed;
 }
 
+#include "character_filter.glsl.inc"
+
 vec4 dressedTexel() {
+  if (uCut.y > 0.5) return coverageTexel();
   // Accumulate premultiplied color, then return straight color for lighting.
   vec4 body = texture(uSprites,vec3(fragmentUv,fragmentLayer));
   vec4 result = vec4(body.rgb*body.a,body.a);

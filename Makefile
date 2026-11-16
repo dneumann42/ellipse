@@ -57,6 +57,8 @@ src/ellipse/drawing/shaders/spv/%.msl: src/ellipse/drawing/shaders/spv/%.spv
 
 $(SHADER_SPVS): src/ellipse/drawing/shaders/clustered.glsl.inc
 
+src/ellipse/drawing/shaders/spv/billboard_live.frag.spv src/ellipse/drawing/shaders/spv/billboard_live_depth.frag.spv: src/ellipse/drawing/shaders/character_filter.glsl.inc
+
 shaders: $(SHADER_SPVS)
 
 shaders_portable: $(SHADER_PORTABLE)

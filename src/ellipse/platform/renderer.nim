@@ -33,6 +33,13 @@ import ../terminal/cellbuf
 import ../terminal/cellwidth as termcellwidth
 export cellbuf
 
+type CommandPainter* = proc(cmd: RenderCommand) {.nimcall, gcsafe.}
+var commandPainters {.threadvar.}: Table[pointer,CommandPainter]
+proc registerCommandPainter*(token: pointer, painter: CommandPainter) =
+  ## Native counterpart of registerCellPainter. Receives normal layout
+  ## coordinates and inherits retained-paint damage and nested clipping.
+  commandPainters[token] = painter
+
 when withSdl:
   ## --- SDL3 / SDL3_ttf bindings ---------------------------------------------------
 
@@ -773,7 +780,10 @@ when withSdl:
         if clipStack.len > 0:
           clipStack.setLen(clipStack.len - 1)
           applyClip(ren, area, limited)
-      of renderImage, renderCustom, renderOverlayStart, renderOverlayEnd:
+      of renderCustom:
+        let painter = commandPainters.getOrDefault(cmd.customData)
+        if painter != nil: painter(cmd)
+      of renderImage, renderOverlayStart, renderOverlayEnd:
         discard   # not produced by the built-in UI (yet)
     discard SDL_SetRenderClipRect(ren, nil)
     culling = false
@@ -1230,6 +1240,34 @@ proc overlayRect*(r: Rect; col: Color) =
   if terminalMode(): return
   when withSdl:
     fillRect(sdlRenderer(), r, col)
+
+proc paintPolyline*(points: openArray[Vec2], color: Color, width = 2f) =
+  ## Batched antialiased line segments. Does not alter the active clip.
+  if terminalMode() or points.len < 2: return
+  when withSdl:
+    var verts: seq[SDL_Vertex]
+    let solid = SDL_FColor(r: color.r/255,g: color.g/255,b: color.b/255,a: color.a/255)
+    var clear = solid
+    clear.a = 0
+    proc quad(a,b,c,d: SDL_FPoint, ca,cb: SDL_FColor) =
+      for (p,col) in [(a,ca),(b,ca),(c,cb),(a,ca),(c,cb),(d,cb)]:
+        verts.add SDL_Vertex(position: p,color: col)
+    let half = max(0.5f,width/2)
+    for i in 1..<points.len:
+      let a = points[i-1]
+      let b = points[i]
+      let dx = b.x-a.x
+      let dy = b.y-a.y
+      let distance = sqrt(dx*dx+dy*dy)
+      if distance <= 0.0001: continue
+      let nx = -dy/distance
+      let ny = dx/distance
+      proc offset(p: Vec2, amount: float32): SDL_FPoint =
+        SDL_FPoint(x: p.x+nx*amount,y: p.y+ny*amount)
+      quad(offset(a,half),offset(b,half),offset(b,-half),offset(a,-half),solid,solid)
+      quad(offset(a,half),offset(b,half),offset(b,half+1),offset(a,half+1),solid,clear)
+      quad(offset(b,-half),offset(a,-half),offset(a,-half-1),offset(b,-half-1),solid,clear)
+    submitGeometry(sdlRenderer(),verts)
 
 proc overlayFrame*(r: Rect; width: float32; col: Color) =
   ## A rectangle outline `width` thick, inside `r`.

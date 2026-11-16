@@ -60,28 +60,61 @@ float cloudNoise(vec2 p) {
   return mix(mix(cloudHash(cell), cloudHash(cell+ivec2(1,0)), f.x),
              mix(cloudHash(cell+ivec2(0,1)), cloudHash(cell+ivec2(1,1)), f.x), f.y);
 }
+// Match the CPU transmission field: large lobes curl slowly while
+// smaller billows shear past them. Time is continuous across clock wraps.
 float cloudField(vec2 p) {
-  return cloudNoise(p)*0.55 + cloudNoise(p*2.07+vec2(17,0))*0.27 +
-    cloudNoise(p*4.13+vec2(0,31))*0.13 + cloudNoise(p*8.21)*0.05;
+  float t = uCloudWeather.x;
+  p += t * vec2(0.014,0.004);
+  vec2 curl = vec2(
+    cloudNoise(p*0.8+t*vec2(0.009,-0.006)),
+    cloudNoise(p*0.8+vec2(23,9)+t*vec2(-0.005,0.008)));
+  vec2 q = p + (curl-0.5)*0.85;
+  return cloudNoise(q)*0.55 +
+    cloudNoise(q*2.07+vec2(17,0)+t*vec2(0.012,-0.009))*0.27 +
+    cloudNoise(q*4.13+vec2(0,31)+t*vec2(-0.018,0.014))*0.13 +
+    cloudNoise(q*8.21+t*vec2(0.025,0.011))*0.05;
 }
 vec3 cloudSky(vec3 sky, vec3 dir) {
   if (uCloudWeather.w < 0.5 || dir.y <= 0.0) return sky;
-  vec2 p = dir.xz * (2.8 / (dir.y + 0.38)) + uCloudWeather.x*vec2(0.007,0.002);
+  vec2 p = dir.xz * (2.8 / (dir.y + 0.38));
   float body = cloudField(p);
   float threshold = 0.76-uCloudWeather.y*0.62;
-  float thickness = smoothstep(0.0, 0.18, body-threshold);
-  float alpha = thickness * smoothstep(0.0,0.16,dir.y) * (0.94+uCloudWeather.y*0.055);
-  // One offset density sample approximates sunlight through the cloud's
-  // shoulder. The narrow forward lobe gives bright, translucent silver edges.
-  float shadow = cloudField(p + uCloudSun.xz*0.24) - body;
+  float thickness = smoothstep(0.015, 0.115, body-threshold);
+  float alpha = smoothstep(0.0, 0.18, body-threshold) * smoothstep(0.0,0.16,dir.y) * (0.94+uCloudWeather.y*0.055);
+  // Broad pigment masses with broken, directional brush marks. Keep the
+  // silhouette field shared with CPU celestial transmission.
+  float coverage = uCloudWeather.y;
+  float storm = smoothstep(0.60, 0.98, coverage);
   float daylight = uCloudWeather.z;
+  vec2 paintP = p + uCloudWeather.x * vec2(0.014,0.004);
+  vec2 brushP = paintP * vec2(10.0, 23.0);
+  brushP.x += cloudNoise(paintP * 5.0) * 3.0;
+  float brush = cloudNoise(brushP);
+  float mass = cloudNoise(paintP * 1.65 + vec2(8.0, 19.0));
+  float shoulder = cloudField(p + uCloudSun.xz * 0.38) - body;
+  float relief = clamp(0.60 - shoulder * 2.8 -
+    (body - threshold) * 0.48 + (mass - 0.5) * 0.24, 0.0, 1.0);
+  // Narrow transitions between paint values retain clear, irregular planes
+  // without screen-space stippling or a blurred noise texture.
+  float pigment = relief + (brush - 0.5) * 0.085;
+  float planes = 0.24 + 0.23 * smoothstep(0.25, 0.40, pigment)
+    + 0.23 * smoothstep(0.44, 0.59, pigment)
+    + 0.22 * smoothstep(0.62, 0.77, pigment);
   float silver = pow(max(dot(dir,uCloudSun.xyz),0.0),18.0)*daylight;
   float edge = 4.0*thickness*(1.0-thickness);
-  float shade = clamp(0.96-thickness*0.23-shadow*1.8+silver*(edge*0.65+0.12),0.42,1.2);
   float dusk = (1.0-smoothstep(0.0,0.375,abs(uCloudSun.y)))*daylight;
-  float warm = dusk*(0.25+silver*0.55);
-  vec3 cloud = shade*(0.10+daylight*0.90)*vec3(1.0,0.96-warm*0.24,1.0-warm*0.48);
-  cloud += vec3(warm*0.20,0.0,(1.0-daylight)*0.055);
+  vec3 shadowColor = mix(vec3(0.43,0.49,0.59), vec3(0.16,0.21,0.29), storm);
+  vec3 lightColor = mix(vec3(1.0,0.96,0.87), vec3(0.69,0.73,0.77), storm);
+  lightColor = mix(lightColor, vec3(1.0,0.63,0.39), dusk * 0.65);
+  vec3 cloud = mix(shadowColor, lightColor, planes);
+  cloud += silver * edge * vec3(0.20,0.17,0.12) * (1.0-storm*0.6);
+  cloud += (brush-0.5) * 0.025;
+  cloud *= 0.09 + daylight * 0.91;
+  cloud += vec3(0.005,0.009,0.025)*(1.0-daylight);
+  // A cool atmospheric veil closes the blue gaps under a heavy front.
+  vec3 stormSky = mix(vec3(0.39,0.45,0.53),vec3(0.23,0.29,0.38),
+    smoothstep(0.0,0.7,dir.y)) * (0.09+daylight*0.91);
+  sky = mix(sky, stormSky * max(uExposure,0.0), storm*0.85);
   return mix(sky, cloud * max(uExposure, 0.0), alpha);
 }
 

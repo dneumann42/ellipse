@@ -190,6 +190,7 @@ type
   CustomConfig* = object
     ## CUSTOM commands for content the built-in command set cannot express.
     data*: nil pointer
+    version*: uint64 ## Changes invalidate retained custom painting.
 
   AttachPoints* = object
     ## Which point of a floating element attaches to which point of its
@@ -295,6 +296,7 @@ type
       imageTint*: Color
     of renderCustom:
       customData*: nil pointer
+      customVersion*: uint64
       customCorner*: CornerRadius
       customBackground*: Color
     of renderClipStart:
@@ -459,9 +461,9 @@ proc image*(d: sink ElementDeclaration, data: pointer, tint: Color = Color()): E
   result = d
   result.image = ImageConfig(data: data, tint: tint)
 
-proc custom*(d: sink ElementDeclaration, data: pointer): ElementDeclaration =
+proc custom*(d: sink ElementDeclaration, data: pointer, version = 0'u64): ElementDeclaration =
   result = d
-  result.custom = CustomConfig(data: data)
+  result.custom = CustomConfig(data: data,version: version)
 
 proc clip*(d: sink ElementDeclaration, horizontal, vertical: bool, childOffset = Vec2()): ElementDeclaration =
   ## Makes this element a clip (scroll) container on the given axes.

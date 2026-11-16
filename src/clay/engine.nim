@@ -1025,7 +1025,7 @@ proc positionAndEmit(ctx: Context) =
               ctx.commands.add RenderCommand(
                 kind: renderCustom, box: currentBox, id: el.id,
                 zIndex: root.zIndex, userData: d.userData,
-                customData: d.custom.data, customCorner: d.corner,
+                customData: d.custom.data, customVersion: d.custom.version, customCorner: d.corner,
                 customBackground: d.background)
             if d.clip.horizontal or d.clip.vertical:
               ctx.commands.add RenderCommand(

@@ -17,7 +17,7 @@ import clustered
 ## their layer, so mipmapping never bleeds one sprite into the next. Up close
 ## texels magnify square, as pixel art should.
 
-import std/[math, tables]
+import std/[math, tables, algorithm]
 
 import ../platform/gpu
 import geometry
@@ -101,9 +101,11 @@ type
     ## What the artist draws billboards with: the pipelines, the atlas on the
     ## GPU, and the runs asked for this frame.
     device: Device
+    stableCharacters*: bool ## coverage filtering on the direct-layer path
     directLayers*: bool
     preparedDirectLayers: bool
     layeredPipeline, layeredDepthPipeline, layeredWirePipeline: Pipeline
+    layeredFringePipeline: Pipeline
     clusters: ClusteredLights
     emptyClustersStaged: bool
     pipeline, depthPipeline: Pipeline
@@ -342,11 +344,14 @@ proc newBillboardPass*(device: Device, colorFormat: TextureFormat,
   let layeredDesc = PipelineDesc(vertex: layeredVertex, fragment: layeredFragment,
     attributes: LayeredBillboardAttributes, stride: LayeredBillboardStride, instanced: true,
     colorFormat: colorFormat, depthFormat: Depth32, blend: true)
+  var fringeDesc = layeredDesc
+  fringeDesc.depthWrite = false
   var layeredWireDesc = layeredDesc.asWireframe()
   layeredWireDesc.fragment = wire
   BillboardPass(
     device: device,
     layeredPipeline: newPipeline(device,layeredDesc),
+    layeredFringePipeline: newPipeline(device,fringeDesc),
     layeredWirePipeline: newPipeline(device,layeredWireDesc),
     layeredDepthPipeline: newPipeline(device,PipelineDesc(vertex:layeredVertex,fragment:layeredDepth,
       attributes:LayeredBillboardAttributes,stride:LayeredBillboardStride,instanced:true,
@@ -623,7 +628,7 @@ proc uniformsFor(p: BillboardPass, view, viewProj: Mat4, eye, toLight: Vec3,
   )
 
 proc drawRuns(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
-              pipeline: Pipeline, base: BillboardUniforms, pushFragment: proc () {.closure, gcsafe.},
+              pipeline: Pipeline, base: BillboardUniforms, pushFragment: proc (direct: bool) {.closure, gcsafe.},
               layeredPipeline: Pipeline = nil,
               textured: bool = true, clusters: ClusteredLights = nil) =
   pass.bindPipeline(pipeline)
@@ -636,7 +641,7 @@ proc drawRuns(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
         (texture: clusters.texture, sampler: clusters.sampler)])
     else:
       pass.bindFragmentSamplers([(texture: p.texture, sampler: sampler)])
-  pushFragment()
+  pushFragment(false)
   var
     uniforms = base
     pushed = -1.0f
@@ -645,6 +650,7 @@ proc drawRuns(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
     if direct != draw.buffer.direct:
       direct = draw.buffer.direct
       pass.bindPipeline(if direct: layeredPipeline else: pipeline)
+      pushFragment(direct)
       pushed = -1.0f
     if draw.grow != pushed:
       uniforms.params.y = draw.grow
@@ -666,10 +672,56 @@ proc drawColour*(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
   p.drawRuns(cmd, pass,
     if p.wireframe: p.wireframePipeline else: p.pipeline,
     p.uniformsFor(view, viewProj, eye, toLight, intensity, ambient, 1),
-    proc () = cmd.pushFragmentUniforms(0, fragment),
+    proc (direct: bool) =
+      var values = fragment
+      if direct and p.stableCharacters: values.cut.y = 1
+      cmd.pushFragmentUniforms(0, values),
     layeredPipeline = (if p.wireframe: p.layeredWirePipeline else: p.layeredPipeline),
     textured = not p.wireframe,
     clusters = (if clusters.isNil: p.clusters else: clusters))
+
+proc drawFringe*(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
+                 view, viewProj: Mat4, eye, toLight: Vec3,
+                 intensity, ambient: float32, fog: FogUniforms, clusters: ClusteredLights = nil) =
+  ## Run after opaque scenery/planes/text and before other translucent effects.
+  let fragment = BillboardFragmentUniforms(cut: vec4(p.options.cutoff, 0, 0, 0), fog: fog)
+  if p.stableCharacters and not p.wireframe and p.pending:
+    # All opaque geometry is already present. Sort fractional character pixels
+    # across buffers/runs, not just inside one crowd. Their depth test remains
+    # enabled, but an almost-transparent edge must never occlude a later NPC.
+    type Edge = tuple[depth: float32, run, instance: int]
+    var edges: seq[Edge]
+    for run, draw in p.draws:
+      if not draw.buffer.direct: continue
+      for i in draw.first ..< draw.first+draw.count:
+        let position = draw.buffer.sources[i].position
+        # Upright quads lie in parallel vertical planes. Sort those planes
+        # by horizontal depth: feet at different elevations must not reverse
+        # their order when the camera pitches up/down.
+        let z = view.c[2]*position.x + view.c[10]*position.z
+        edges.add (z,run,i)
+    edges.sort(proc (a,b: Edge): int = cmp(a.depth,b.depth))
+    if edges.len > 0:
+      pass.bindPipeline(p.layeredFringePipeline)
+      let lighting = if clusters.isNil: p.clusters else: clusters
+      let sampler = if p.pixelated: p.pixelSampler else: p.sampler
+      pass.bindFragmentSamplers([(texture:p.texture,sampler:sampler),
+        (texture:lighting.texture,sampler:lighting.sampler)])
+      var fringe = fragment
+      fringe.cut.y = 1
+      fringe.cut.z = 1
+      cmd.pushFragmentUniforms(0,fringe)
+      var lastGrow = -1.0f
+      var uniforms = p.uniformsFor(view,viewProj,eye,toLight,intensity,ambient,1)
+      for edge in edges:
+        let draw = p.draws[edge.run]
+        if draw.grow != lastGrow:
+          uniforms.params.y = draw.grow
+          cmd.pushVertexUniforms(0,uniforms)
+          lastGrow = draw.grow
+        pass.bindVertexBuffers([BufferBinding(buffer:draw.buffer.buffer,
+          offset:edge.instance.uint32*LayeredBillboardStride)])
+        pass.drawPrimitive(6,1)
 
 proc drawDepth*(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
                 view, viewProj: Mat4, eye: Vec3, near, far, fogFade: float32) =
@@ -682,7 +734,10 @@ proc drawDepth*(p: BillboardPass, cmd: CommandBuffer, pass: RenderPass,
     cut: vec4(p.options.cutoff, 0, 0, 0))
   p.drawRuns(cmd, pass, p.depthPipeline,
     p.uniformsFor(view, viewProj, eye, vec3(0, 1, 0), 0, 0, 1),
-    proc () = cmd.pushFragmentUniforms(0, depth), layeredPipeline = p.layeredDepthPipeline)
+    proc (direct: bool) =
+      var values = depth
+      if direct and p.stableCharacters: values.cut.y = 1
+      cmd.pushFragmentUniforms(0, values), layeredPipeline = p.layeredDepthPipeline)
 
 proc reset*(p: BillboardPass) =
   p.draws.setLen(0)

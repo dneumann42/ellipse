@@ -461,3 +461,11 @@ A `focusable` widget gains `id: ElementId` first and `tabIndex = 0` last, and
 registers on the Tab chain before its body. See
 [nim-tutorial.md](nim-tutorial.md) §5 and
 [owl-tutorial.md](owl-tutorial.md) §5.
+
+
+## 13. Tables and line charts
+
+`dataTable`, `tableColumn`, `tableText`, `TableSort` and `TableAction` provide
+virtualized sortable tables with custom cells. `lineChart`, `ChartLine` and
+`ChartAction` provide line plots with checkbox legends and hover inspection.
+See [Tables and line charts](tables-and-charts.md) for API usage and behavior.

@@ -118,6 +118,7 @@ proc shapeSignature(cmd: RenderCommand; text: string): uint64 =
     mixCorner(result, cmd.customCorner)
     mixColor(result, cmd.customBackground)
     fnv(result, cast[uint64](cmd.customData))
+    fnv(result, cmd.customVersion)
   of renderClipStart:
     fnv(result, uint64(ord(cmd.clipHorizontal)))
     fnv(result, uint64(ord(cmd.clipVertical)))

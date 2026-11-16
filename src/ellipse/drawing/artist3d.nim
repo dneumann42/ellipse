@@ -4,6 +4,7 @@ import std/[math]
 
 import ../platform/[gpu, sdl]
 import clustered
+import geometrypool
 export clustered
 import billboards
 import fog
@@ -50,12 +51,14 @@ type
     ## Geometry recorded once between `beginRecording` and `endRecording`,
     ## kept in GPU buffers of its own and drawn again by `drawStatic`
     ## without being rebuilt or uploaded each frame.
-    vertexBuffer, indexBuffer: DynamicBuffer
+    lease: GeometryLease ## its ranges of the artist's shared mesh buffers
     vertices: seq[Vertex] ## held until the first present uploads them
     indices: seq[uint32]
     batches: seq[Batch] ## firstIndex counts from the mesh's own indices
     uploaded: bool
     vertexTotal: int
+    fixedLighting*: bool ## keep each batch's recorded sun and ambient
+      ## (emissive fixtures) instead of the frame's lighting
 
   InstanceDraw = object
     mesh: StaticMesh
@@ -63,7 +66,7 @@ type
 
   StaticSplatMesh* = ref object
     ## Terrain geometry retained on the GPU; shading is supplied by each frame.
-    vertexBuffer, indexBuffer: DynamicBuffer
+    lease: GeometryLease ## its ranges of the artist's shared splat buffers
     vertices: seq[SplatVertex]
     indices: seq[uint32]
     batches: seq[Batch]
@@ -114,6 +117,8 @@ type
     wireframePipeline: Pipeline ## the mesh batches' edges, for wireframe frames
     vertexBuffer: DynamicBuffer
     indexBuffer: DynamicBuffer
+    meshPool, splatPool, indexPool: GeometryPool
+      ## recorded meshes live in a few shared buffers (see geometrypool)
     vertices: seq[Vertex]
     indices: seq[uint32]
     batches: seq[Batch]
@@ -317,6 +322,9 @@ proc newArtist*(app: App): Artist3D =
     wireframePipeline: wireframePipeline,
     vertexBuffer: newDynamicBuffer(device, {VertexData}, 4096),
     indexBuffer: newDynamicBuffer(device, {IndexData}, 4096),
+    meshPool: newGeometryPool(device, {VertexData}, sizeof(Vertex).uint32),
+    splatPool: newGeometryPool(device, {VertexData}, sizeof(SplatVertex).uint32),
+    indexPool: newGeometryPool(device, {IndexData}, sizeof(uint32).uint32),
     view: identity(),
     projection: identity(),
     model: identity(),
@@ -377,11 +385,14 @@ proc newArtist*(app: App): Artist3D =
     # The sky neither tests nor writes anything the scene cares about: it
     # draws first, where the cleared depth lets every fragment through, and
     # writes none of it, so the world always lands on top of the dome.
+    # It does not test either: after a depth prepass it must still fill
+    # behind the fog-faded edge of the world, which blends over it.
     skyPipeline: newPipeline(device, PipelineDesc(
       vertex: skyVertex,
       fragment: skyFragment,
       colorFormat: app.gpuSwapchainFormat(),
       depthFormat: Depth32,
+      hasDepth: false,
       depthWrite: false,
     )),
     skySampler: newSampler(device),
@@ -803,6 +814,23 @@ proc waterQuads*(a: Artist3D, vertices: openArray[WaterVertex]) =
     a.waterIndices[k + 5] = f + 3
     k += 6
 
+proc waterIndexed*(a: Artist3D, vertices: openArray[WaterVertex],
+                   indices: openArray[uint32]) =
+  ## A vertex grid and an index list that addresses it as if it started at
+  ## zero: one copy of each vertex instead of the four a quad per vertex
+  ## would submit. Indices of a static grid rarely change; vertices do.
+  if not a.watering or vertices.len == 0 or indices.len == 0:
+    return
+  let first = a.waterVertices.len
+  a.waterVertices.setLenUninit(first + vertices.len)
+  copyMem(addr a.waterVertices[first], unsafeAddr vertices[0],
+          vertices.len * sizeof(WaterVertex))
+  let base = first.uint32
+  let k = a.waterIndices.len
+  a.waterIndices.setLenUninit(k + indices.len)
+  for n in 0 ..< indices.len:
+    a.waterIndices[k+n] = indices[n] + base
+
 proc beginWater*(a: Artist3D) =
   ## Open a batch of water under the current matrices: `waterQuad` adds to
   ## it, and `end` closes it. Water is drawn after everything else, blended
@@ -883,6 +911,11 @@ proc setBillboardDirectLayers*(a: Artist3D, enabled: bool) =
   ## Sample clothing on the body's single depth surface. Camera-facing outfit
   ## changes update instances without CPU composition or new output textures.
   a.sprites.directLayers = enabled
+
+proc setBillboardCoverageFiltering*(a: Artist3D, enabled: bool) =
+  ## Coverage-filter direct-layer characters, with opaque depth and sorted
+  ## fractional edges. Leaves scenery and retro scene resolution unchanged.
+  a.sprites.stableCharacters = enabled
 
 proc setBillboardOptions*(a: Artist3D, options: BillboardOptions) =
   a.sprites.options = options
@@ -1085,15 +1118,29 @@ proc drawStatic*(a: Artist3D, mesh: StaticMesh) =
 proc uploadStatic(a: Artist3D, cmd: CommandBuffer, mesh: StaticMesh) =
   if mesh.uploaded:
     return
-  mesh.vertexBuffer = newDynamicBuffer(a.device, {VertexData},
-    max(mesh.vertices.len * sizeof(Vertex), 1).uint32)
-  mesh.indexBuffer = newDynamicBuffer(a.device, {IndexData},
-    max(mesh.indices.len * sizeof(uint32), 1).uint32)
-  cmd.upload(mesh.vertexBuffer, mesh.vertices)
-  cmd.upload(mesh.indexBuffer, mesh.indices)
+  let lease = GeometryLease(
+    vertices: a.meshPool.allocate(mesh.vertices.len.uint32),
+    indices: a.indexPool.allocate(mesh.indices.len.uint32))
+  cmd.write(lease.vertices, mesh.vertices)
+  cmd.write(lease.indices, mesh.indices)
+  mesh.lease = lease
   mesh.vertices = @[]
   mesh.indices = @[]
   mesh.uploaded = true
+
+proc bindLease(a: Artist3D, pass: RenderPass, pool: GeometryPool,
+               lease: GeometryLease, bound: var tuple[vertex, index: int]): bool =
+  ## Bind the shared chunks holding `lease`, unless they are bound already.
+  ## False for a mesh without geometry.
+  if lease.isNil or lease.vertices.chunk < 0 or lease.indices.chunk < 0:
+    return false
+  if bound.vertex != lease.vertices.chunk:
+    pass.bindVertexBuffers([BufferBinding(buffer: pool.buffer(lease.vertices.chunk))])
+    bound.vertex = lease.vertices.chunk
+  if bound.index != lease.indices.chunk:
+    pass.bindIndexBuffer(a.indexPool.buffer(lease.indices.chunk))
+    bound.index = lease.indices.chunk
+  true
 
 proc uploadStatics(a: Artist3D, cmd: CommandBuffer) =
   for mesh in a.statics:
@@ -1130,12 +1177,12 @@ proc drawStaticInstances*(a: Artist3D, mesh: StaticMesh, models: sink seq[Mat4])
 proc uploadStaticSplats(a: Artist3D, cmd: CommandBuffer) =
   for mesh in a.staticSplats:
     if mesh.uploaded: continue
-    mesh.vertexBuffer = newDynamicBuffer(a.device, {VertexData},
-      max(mesh.vertices.len * sizeof(SplatVertex), 1).uint32)
-    mesh.indexBuffer = newDynamicBuffer(a.device, {IndexData},
-      max(mesh.indices.len * sizeof(uint32), 1).uint32)
-    cmd.upload(mesh.vertexBuffer, mesh.vertices)
-    cmd.upload(mesh.indexBuffer, mesh.indices)
+    let lease = GeometryLease(
+      vertices: a.splatPool.allocate(mesh.vertices.len.uint32),
+      indices: a.indexPool.allocate(mesh.indices.len.uint32))
+    cmd.write(lease.vertices, mesh.vertices)
+    cmd.write(lease.indices, mesh.indices)
+    mesh.lease = lease
     mesh.vertices = @[]
     mesh.indices = @[]
     mesh.uploaded = true
@@ -1206,28 +1253,42 @@ proc drawBatches(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pi
       if a.retro.pixelatedTextures: a.meshPixelSampler else: a.meshSampler
     pass.bindFragmentSamplers([(texture: a.meshTexture, sampler: sampler),
       (texture: a.clusters.texture, sampler: a.clusters.sampler)])
-  for batch in a.batches:
-    cmd.pushVertexUniforms(0, batch.uniforms)
-    if perBatchFog:
+  if not perBatchFog and not pushFragment.isNil:
+    pushFragment() # stays bound for every batch
+  for i, batch in a.batches:
+    if i == 0 or batch.uniforms != a.batches[i-1].uniforms:
+      cmd.pushVertexUniforms(0, batch.uniforms)
+    if perBatchFog and (i == 0 or batch.fog != a.batches[i-1].fog):
       cmd.pushFragmentUniforms(0, batch.fog) # this batch's own haze
-    elif not pushFragment.isNil:
-      pushFragment()
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
   if a.statics.len == 0:
     return
   let frameState = a.uniformState(a.model, a.projection * a.view)
+  # Static meshes share the frame's fragment block; push it once, and push
+  # a vertex block only when it differs from the one already bound.
+  if not pushFragment.isNil:
+    pushFragment()
+  var pushed = false
+  var last: Uniforms
+  var bound = (vertex: -1, index: -1)
   for mesh in a.statics:
-    pass.bindVertexBuffers([BufferBinding(buffer: mesh.vertexBuffer)])
-    pass.bindIndexBuffer(mesh.indexBuffer)
+    if not a.bindLease(pass, a.meshPool, mesh.lease, bound): continue
+    let firstIndex = mesh.lease.indices.first
+    let vertexOffset = mesh.lease.vertices.first.int32
     for batch in mesh.batches:
       var uniforms = frameState
       uniforms.model = batch.uniforms.model
       uniforms.color = batch.uniforms.color
       uniforms.params.w = batch.uniforms.params.w # the mesh cell
-      cmd.pushVertexUniforms(0, uniforms)
-      if not pushFragment.isNil:
-        pushFragment()
-      pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+      if mesh.fixedLighting:
+        uniforms.light = batch.uniforms.light
+        uniforms.params.x = batch.uniforms.params.x # ambient
+      if not pushed or uniforms != last:
+        cmd.pushVertexUniforms(0, uniforms)
+        last = uniforms
+        pushed = true
+      pass.drawIndexed(batch.indexCount, firstIndex = firstIndex + batch.firstIndex,
+        vertexOffset = vertexOffset)
 
 proc drawInstances(a: Artist3D, cmd: CommandBuffer, pass: RenderPass,
     depth = false) =
@@ -1243,9 +1304,11 @@ proc drawInstances(a: Artist3D, cmd: CommandBuffer, pass: RenderPass,
     let (near, far) = a.nearFar()
     a.post.newDepthUniformPusher(cmd, near, far, depthFogFade(a.fog))()
   let frameState = a.uniformState(identity(), a.projection * a.view)
+  var bound = (vertex: -1, index: -1)
   for draw in a.instanceDraws:
-    pass.bindVertexBuffers([BufferBinding(buffer: draw.mesh.vertexBuffer)])
-    pass.bindIndexBuffer(draw.mesh.indexBuffer)
+    if not a.bindLease(pass, a.meshPool, draw.mesh.lease, bound): continue
+    let firstIndex = draw.mesh.lease.indices.first
+    let vertexOffset = draw.mesh.lease.vertices.first.int32
     # A bounded uniform block avoids a per-instance upload buffer and fits
     # within the portable 16 KiB uniform limit. Large groups use more chunks.
     for first in countup(0, draw.models.high, 64):
@@ -1260,7 +1323,7 @@ proc drawInstances(a: Artist3D, cmd: CommandBuffer, pass: RenderPass,
         uniforms.params.w = batch.uniforms.params.w
         cmd.pushVertexUniforms(0, uniforms)
         pass.drawIndexed(batch.indexCount, instanceCount = count.uint32,
-          firstIndex = batch.firstIndex)
+          firstIndex = firstIndex + batch.firstIndex, vertexOffset = vertexOffset)
 
 proc drawTranslucent(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   ## The `beginTranslucent` batches, in the order they were queued.
@@ -1288,22 +1351,35 @@ proc drawSplats(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pip
       if a.retro.pixelatedTextures: a.splatPixelSampler else: a.splatSampler
     pass.bindFragmentSamplers([(texture: a.splatTexture, sampler: sampler),
       (texture: a.clusters.texture, sampler: a.clusters.sampler)])
+  # Pushed uniforms stay bound for later draws: the fragment block is the
+  # same for every splat draw, and terrain tiles mostly share one vertex
+  # block, so each is pushed only when it changes.
+  pushFragment()
+  var pushed = false
+  var last: Uniforms
   for batch in a.splatBatches:
-    cmd.pushVertexUniforms(0, batch.uniforms)
-    pushFragment()
+    if not pushed or batch.uniforms != last:
+      cmd.pushVertexUniforms(0, batch.uniforms)
+      last = batch.uniforms
+      pushed = true
     pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
 
   let frameState = a.uniformState(a.model, a.projection * a.view)
+  var bound = (vertex: -1, index: -1)
   for mesh in a.staticSplats:
-    pass.bindVertexBuffers([BufferBinding(buffer: mesh.vertexBuffer)])
-    pass.bindIndexBuffer(mesh.indexBuffer)
+    if not a.bindLease(pass, a.splatPool, mesh.lease, bound): continue
+    let firstIndex = mesh.lease.indices.first
+    let vertexOffset = mesh.lease.vertices.first.int32
     for batch in mesh.batches:
       var uniforms = frameState
       uniforms.model = batch.uniforms.model
       uniforms.color = batch.uniforms.color
-      cmd.pushVertexUniforms(0, uniforms)
-      pushFragment()
-      pass.drawIndexed(batch.indexCount, firstIndex = batch.firstIndex)
+      if not pushed or uniforms != last:
+        cmd.pushVertexUniforms(0, uniforms)
+        last = uniforms
+        pushed = true
+      pass.drawIndexed(batch.indexCount, firstIndex = firstIndex + batch.firstIndex,
+        vertexOffset = vertexOffset)
 
 proc drawWater(a: Artist3D, cmd: CommandBuffer, pass: RenderPass, pipeline: Pipeline,
                pushFragment: proc () {.closure, gcsafe.}; grounded: bool) =
@@ -1428,6 +1504,9 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
   let water = a.waterUniforms()
   a.drawWater(cmd, pass, waterPipeline,
     proc () = cmd.pushFragmentUniforms(0, water), grounded = true)
+  a.sprites.drawFringe(cmd, pass, a.view, a.projection * a.view, a.eye,
+    vec3(-a.lightDir.x, -a.lightDir.y, -a.lightDir.z), a.lightIntensity,
+    a.ambient, fog, a.clusters)
   if a.translucentBatches.len > 0 and not a.wireframe:
     a.drawTranslucent(cmd, pass)
   # Mist last of all: every wall, sprite and wavefront is already in the
@@ -1441,14 +1520,25 @@ proc drawScene(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
     a.mist.drawColour(cmd, pass, a.view, a.projection * a.view, fog, far,
       if a.ssao.enabled: a.post.depthTexture() else: nil)
 
-proc drawDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
-  ## Every batch again, packing linear depth for the occlusion pass.
+proc drawOpaqueDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
+  ## Opaque meshes and ground, packing linear depth for the occlusion pass.
+  ## Drawn before the scene, this depth also rejects hidden fragments there
+  ## before their lights and shadows are evaluated. Their colour shaders
+  ## discard nothing this depth keeps, except past the fog limit, where only
+  ## the sky would show through either way.
   let
     (near, far) = a.nearFar()
     pushDepth = a.post.newDepthUniformPusher(cmd, near, far, depthFogFade(a.fog))
   a.drawBatches(cmd, pass, a.post.depthPipeline, pushDepth)
   a.drawInstances(cmd, pass, depth = true)
   a.drawSplats(cmd, pass, a.splatDepthPipeline, pushDepth, textured = false)
+
+proc drawBlendedDepth(a: Artist3D, cmd: CommandBuffer, pass: RenderPass) =
+  ## Cut-out sprites, planes and water after the scene: their colour passes
+  ## blend or discard texels, so they must not prime the scene's depth.
+  let
+    (near, far) = a.nearFar()
+    pushDepth = a.post.newDepthUniformPusher(cmd, near, far, depthFogFade(a.fog))
   a.sprites.drawDepth(cmd, pass, a.view, a.projection * a.view, a.eye, near,
     far, depthFogFade(a.fog))
   a.planes.drawDepth(cmd, pass, a.projection * a.view, near, far,
@@ -1465,11 +1555,15 @@ proc renderSceneOnto(a: Artist3D, cmd: CommandBuffer, target, depth: gpu.Texture
   if a.ssao.enabled and not a.wireframe:
     a.post.ensureSize(width, height)
     let (near, far) = a.nearFar()
-    let scene = a.post.beginScene(cmd, clearColor, depth)
+    let prepass = a.post.beginDepth(cmd, depth, keepDepth = true)
+    a.drawOpaqueDepth(cmd, prepass)
+    prepass.endRender()
+    let scene = a.post.beginScene(cmd, clearColor, depth, loadDepth = true,
+      keepDepth = true)
     a.drawScene(cmd, scene)
     scene.endRender()
-    let depthPass = a.post.beginDepth(cmd, depth)
-    a.drawDepth(cmd, depthPass)
+    let depthPass = a.post.beginDepth(cmd, depth, load = true)
+    a.drawBlendedDepth(cmd, depthPass)
     depthPass.endRender()
     a.post.runOcclusion(cmd, a.ssao, near, far, a.fovTan)
     a.post.runComposite(cmd, target)
