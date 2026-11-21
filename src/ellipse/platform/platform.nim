@@ -56,6 +56,7 @@ when withSdl:
     WindowForeign      = 0x00000800'u32
     WindowAllowHighDPI = 0x00002000'u32
     WindowAlwaysOnTop  = 0x00010000'u32
+    WindowTransparent = 0x40000000'u32
     WindowMouseCapture = 0x00004000'u32
 
   const
@@ -296,6 +297,8 @@ when withSdl:
     importc: "SDL_GetRendererName", header: "<SDL3/SDL.h>".}
   proc SDL_CreateSoftwareRenderer(surf: ptr SDL_Surface): ptr SDL_Renderer {.
     importc: "SDL_CreateSoftwareRenderer", header: "<SDL3/SDL.h>".}
+  var SDL_EVENT_SYSTEM_THEME_CHANGED {.importc, nodecl, header: "<SDL3/SDL.h>".}: uint32
+  proc SDL_GetSystemTheme(): cint {.importc, header: "<SDL3/SDL.h>".}
   proc SDL_PollEvent(event: ptr SDL_Event): bool {.importc: "SDL_PollEvent", header: "<SDL3/SDL.h>".}
   proc SDL_PushEvent(event: ptr SDL_Event): bool {.importc: "SDL_PushEvent", header: "<SDL3/SDL.h>".}
   proc SDL_CreateProperties(): uint32 {.importc: "SDL_CreateProperties", header: "<SDL3/SDL.h>".}
@@ -341,6 +344,7 @@ when withSdl:
     PropCreateWidth {.importc: "SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER", header: "<SDL3/SDL.h>".}: cstring
     PropCreateHeight {.importc: "SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER", header: "<SDL3/SDL.h>".}: cstring
     PropCreateOpenGL {.importc: "SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN", header: "<SDL3/SDL.h>".}: cstring
+    PropCreateTransparent {.importc: "SDL_PROP_WINDOW_CREATE_TRANSPARENT_BOOLEAN", header: "<SDL3/SDL.h>".}: cstring
     PropCustomRole {.importc: "SDL_PROP_WINDOW_CREATE_WAYLAND_SURFACE_ROLE_CUSTOM_BOOLEAN", header: "<SDL3/SDL.h>".}: cstring
     PropWlDisplay {.importc: "SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER", header: "<SDL3/SDL.h>".}: cstring
     PropWlSurface {.importc: "SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER", header: "<SDL3/SDL.h>".}: cstring
@@ -532,6 +536,7 @@ type
     width*: int32 = 1280
     height*: int32 = 720
     resizable*: bool = true
+    transparent*: bool = false ## request a compositor-visible alpha channel
     hidden*: bool = false      ## start unmapped; `showWindow` maps it
     layer*: LayerConfig
 
@@ -539,7 +544,8 @@ when withSdl:
   proc createPlainWindow(app: var PlatformApplication; cfg: WindowConfig;
                          w, h: int32; flags: uint32)  =
     var title = cfg.title
-    sdlHandle(SDL_CreateWindowAndRenderer(title.cstring, w, h, flags,
+    let windowFlags = flags or (if cfg.transparent: WindowTransparent else: 0'u32)
+    sdlHandle(SDL_CreateWindowAndRenderer(title.cstring, w, h, windowFlags,
       addr app.window.raw, addr app.renderer.raw), "SDL_CreateWindowAndRenderer()")
     app.width = float32(w)
     app.height = float32(h)
@@ -566,6 +572,7 @@ when withSdl:
     var title = cfg.title
     discard SDL_SetStringProperty(props, PropCreateTitle, title.cstring)
     discard SDL_SetBooleanProperty(props, PropCustomRole, true)
+    discard SDL_SetBooleanProperty(props, PropCreateTransparent, cfg.transparent)
     # OpenGL (an EGL window): SDL resizes it on `SDL_SetWindowSize`, which is
     # the only size signal a custom surface has. Its Vulkan/GPU renderers keep
     # the swapchain they were created with, so they are not asked for.
@@ -1309,6 +1316,8 @@ when withSdl:
         requestFullRedraw()
       elif kind == EventWindowHidden or kind == EventWindowMinimized:
         app.visible = false
+      elif kind == SDL_EVENT_SYSTEM_THEME_CHANGED:
+        requestFullRedraw()
       elif kind == EventWindowDisplayChanged:
         updateRefreshPeriod(app)
         requestFullRedraw()
@@ -1464,6 +1473,14 @@ else:
   proc sdlWindow*(): nil pointer =
     ## No window without SDL.
     nil
+
+proc systemDarkMode*(): bool =
+  ## Read the desktop appearance on the UI thread. Keep the built-in dark
+  ## look when the backend has no system color scheme.
+  when withSdl:
+    terminalMode() or SDL_GetSystemTheme() != 1  # SDL_SYSTEM_THEME_LIGHT
+  else:
+    true
 
 proc showWindow*() =
   ## Map a window opened with `WindowConfig.hidden`.

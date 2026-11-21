@@ -182,6 +182,7 @@ proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
   # and find the container that owns this frame's scroll input.
   var bestIdx = -1
   var bestPriority = -1
+  var wheelX, wheelY = (index: -1, priority: -1)
 
   var i = 0
   while i < ctx.scrollDatas.len:
@@ -212,19 +213,25 @@ proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
         sd.scrollOrigin = Vec2()
         sd.momentumTime = 0
 
-      # Deepest hovered container wins the scroll input (pointerOver ids
-      # are ordered ancestor-first).
+      # Route each wheel axis to the deepest hovered container that can scroll
+      # along it. Drag scrolling still belongs to a single container.
+      let el = ctx.elements[sd.elementIndex]
       for j, over in ctx.pointerOver:
         if sd.elementId == over.id:
           if j > bestPriority:
             bestPriority = j
             bestIdx = i
+          if scrollDelta.x != 0 and j > wheelX.priority and el.decl.clip.horizontal and
+              sd.contentSize.width > el.dims.width:
+            wheelX = (i, j)
+          if scrollDelta.y != 0 and j > wheelY.priority and el.decl.clip.vertical and
+              sd.contentSize.height > el.dims.height:
+            wheelY = (i, j)
 
       ctx.scrollDatas[i] = sd
       inc i
 
   # --- pass 2: apply input to the focused container, then integrate.
-  let scrolled = scrollDelta.x != 0 or scrollDelta.y != 0
   for k in 0 ..< ctx.scrollDatas.len:
     var sd = ctx.scrollDatas[k]
     let el = ctx.elements[sd.elementIndex]
@@ -234,15 +241,15 @@ proc updateScrollContainers*(ctx: Context; dragScrolling: bool;
     let loX = -max(content.width - el.dims.width, 0)
     let loY = -max(content.height - el.dims.height, 0)
 
-    if k == bestIdx:
-      # Wheel / trackpad: Clay scales raw deltas by 10.
-      if canY and scrolled:
-        sd.target.y += scrollDelta.y * 10
-        sd.momentum.y = 0
-      if canX and scrolled:
-        sd.target.x += scrollDelta.x * 10
-        sd.momentum.x = 0
+    # Wheel / trackpad: Clay scales raw deltas by 10.
+    if k == wheelX.index:
+      sd.target.x += scrollDelta.x * 10
+      sd.momentum.x = 0
+    if k == wheelY.index:
+      sd.target.y += scrollDelta.y * 10
+      sd.momentum.y = 0
 
+    if k == bestIdx:
       if pointerActive:
         if not sd.pointerScrollActive:
           sd.pointerOrigin = ctx.pointer.position

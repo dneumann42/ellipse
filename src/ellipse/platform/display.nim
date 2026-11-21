@@ -539,6 +539,7 @@ proc pushWireEvent(ev: WireMsg, windowId: WindowID) =
     e.key.down = (ev.num3 and 1) != 0
     e.key.repeat = ((ev.num3 shr 1) and 1) != 0
     e.key.`mod` = Keymod(uint16(ev.num3 shr 16))
+    setModState(e.key.`mod`)
   of evMotion:
     let f = unpackFloats(ev.data)
     e.`type` = EVENT_MOUSE_MOTION
@@ -556,6 +557,9 @@ proc pushWireEvent(ev: WireMsg, windowId: WindowID) =
     if f.len >= 2:
       e.button.x = f[0]; e.button.y = f[1]
   of evWheel:
+    # Forward the display's live modifiers even when the client attached
+    # after a modifier key was already held.
+    setModState(Keymod(uint16(ev.num)))
     let f = unpackFloats(ev.data)
     e.`type` = EVENT_MOUSE_WHEEL
     e.wheel.windowID = windowId
@@ -741,6 +745,7 @@ type
     texture: Texture
     textureW, textureH: int
     textureFormat: PixelFormat
+    transparent: bool
 
 var serverSlot {.threadvar.}: DisplaySlot
 
@@ -777,13 +782,20 @@ proc mirrorFrame(s: DisplaySlot, m: WireMsg) =
     if s.texture == nil:
       return
     discard setTextureScaleMode(s.texture, SCALE_MODE_NEAREST)
+    if s.transparent:
+      # The offscreen GUI sends premultiplied pixels. Copy them directly to
+      # the compositor's alpha buffer without multiplying them again.
+      discard setTextureBlendMode(s.texture, BLENDMODE_NONE)
   let tex = s.texture
   if not updateTexture(tex, nil, cast[ptr uint8](pixels[0].addr), cint(w * 4)):
     return
   discard setRenderTarget(s.renderer, nil)
   # Keep pixels at their native size while the client catches up with a resize.
   # Stretching an old frame disguises a missing client resize and distorts text.
-  discard setRenderDrawColor(s.renderer, 18'u8, 20'u8, 26'u8, 255'u8)
+  if s.transparent:
+    discard setRenderDrawColor(s.renderer, 0'u8, 0'u8, 0'u8, 0'u8)
+  else:
+    discard setRenderDrawColor(s.renderer, 18'u8, 20'u8, 26'u8, 255'u8)
   discard renderClear(s.renderer)
   var dest = FRect(x: 0, y: 0, w: float32(w), h: float32(h))
   discard renderTexture(s.renderer, tex, nil, addr dest)
@@ -851,7 +863,7 @@ proc forwardEvent(s: DisplaySlot, ev: Event) =
       num3: (int64(ev.button.windowID.uint32) shl 16) or int64(ev.button.clicks),
       data: packFloats([ev.button.x * sx, ev.button.y * sy])))
   of EVENT_MOUSE_WHEEL:
-    discard c.sendMsg(WireMsg(kind: evWheel,
+    discard c.sendMsg(WireMsg(kind: evWheel, num: int64(getModState()),
       data: packFloats([ev.wheel.x, ev.wheel.y])))
   else:
     discard
@@ -932,7 +944,7 @@ proc stepServerOnce(s: DisplaySlot, timeoutMs: int) =
     else:
       discard
 
-proc serveDisplay*(title: string; width, height: int32) {.noreturn.} =
+proc serveDisplay*(title: string; width, height: int32; transparent = false) {.noreturn.} =
   ## Open the dev window and serve it forever: attach requests, mirrored
   ## frames, forwarded input. Called instead of the game loop when the app
   ## runs as `--display-serve`; the window then hosts any game that attaches.
@@ -951,8 +963,9 @@ proc serveDisplay*(title: string; width, height: int32) {.noreturn.} =
     raiseSdlError("display server: SDL init")
   var t = title
   if t.len == 0: t = "Ellipse"
-  let win = createWindow((t & " display").cstring, width.cint, height.cint,
-    WINDOW_RESIZABLE or WINDOW_HIGH_PIXEL_DENSITY)
+  let flags = WINDOW_RESIZABLE or WINDOW_HIGH_PIXEL_DENSITY or
+    (if transparent: WINDOW_TRANSPARENT else: 0'u64)
+  let win = createWindow((t & " display").cstring, width.cint, height.cint, flags)
   if win.isNil:
     raiseSdlError("display server: window")
   let ren = createRenderer(win, nil)
@@ -963,7 +976,7 @@ proc serveDisplay*(title: string; width, height: int32) {.noreturn.} =
   var w, h: cint
   discard getWindowSizeInPixels(win, w, h)
   serverSlot = DisplaySlot(window: win, renderer: ren,
-    width: int32(w), height: int32(h), title: t & " display")
+    width: int32(w), height: int32(h), title: t & " display", transparent: transparent)
   when not defined(windows):
     serverSlot.listenFd = listenUnix(displaySocketPath())
     if int(serverSlot.listenFd) < 0:

@@ -40,27 +40,27 @@ const
   wheelAccelDecay = 5.0'f32   ## how fast the spin velocity dies out
   wheelEaseRate = 16.0'f32    ## how fast pending notches bleed into motion
 
-var
-  wheelPending = 0.0'f32
-  wheelVelocity = 0.0'f32
+type WheelMotion = object
+  pending, velocity: float32
+
+var verticalWheel, horizontalWheel: WheelMotion
+
+proc smoothWheel(motion: var WheelMotion, delta, dt: float32): float32 =
+  motion.velocity *= exp(-dt * wheelAccelDecay)
+  if delta != 0.0:
+    motion.velocity += abs(delta)
+    let accel = min(wheelBaseScale + motion.velocity * wheelAccelGain, wheelAccelMax)
+    motion.pending += delta * accel
+  if motion.pending != 0.0:
+    result = motion.pending * (1.0 - exp(-dt * wheelEaseRate))
+    motion.pending -= result
+    if abs(motion.pending) < 0.02:
+      result += motion.pending
+      motion.pending = 0.0
 
 proc smoothedWheel*(rawY: float32, dt: float32): float32 =
-  ## One frame of the gothivania wheel filter: velocity-scaled accumulation
-  ## plus exponential release of the pending travel. Returns the engine-
-  ## scale wheel delta to feed `updateScrollContainers` this frame.
-  wheelVelocity *= exp(-dt * wheelAccelDecay)
-  if rawY != 0.0:
-    wheelVelocity += abs(rawY)
-    let accel = min(wheelBaseScale + wheelVelocity * wheelAccelGain,
-      wheelAccelMax)
-    wheelPending += rawY * accel
-  result = 0.0
-  if wheelPending != 0.0:
-    result = wheelPending * (1.0 - exp(-dt * wheelEaseRate))
-    wheelPending -= result
-    if abs(wheelPending) < 0.02:
-      result += wheelPending
-      wheelPending = 0.0
+  ## Accumulate and ease vertical wheel motion.
+  smoothWheel(verticalWheel, rawY, dt)
 
 ## --- press hold ----------------------------------------------------------------
 ##
@@ -189,9 +189,11 @@ proc updateUI*(skipWheel: bool = false) =
   if skipWheel or wheelHeld:
     updateScrollContainers(false, vec2(0.0, 0.0), dt)
   else:
-    updateScrollContainers(false,
-      vec2(wheel.x, smoothedWheel(wheel.y, dt)), dt)
-  if wheelPending != 0.0 or scrollAnimating():
+    let shift = keyMods().shift
+    let horizontal = smoothWheel(horizontalWheel, (if shift: wheel.y else: 0f), dt)
+    let vertical = smoothedWheel((if shift: 0f else: wheel.y), dt)
+    updateScrollContainers(false, vec2(wheel.x + horizontal, vertical), dt)
+  if verticalWheel.pending != 0.0 or horizontalWheel.pending != 0.0 or scrollAnimating():
     requestFrame()
 
   let (w, h) = windowPixelSize()

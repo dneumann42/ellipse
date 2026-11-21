@@ -149,6 +149,7 @@ type
     kind*: SizingKind = fitContent
     min*, max*: float32
     percent*: float32
+    ignoreContent*: bool      ## Use the declared minimum as the sizing basis.
 
   Sizing* = object
     ## Both axes of an element.
@@ -245,6 +246,7 @@ type
     lineHeight*: uint16 = 0       ## 0 = use the measured line height
     wrap*: WrapMode = wordWrap
     justify*: TextJustify = justifyLeft
+    ellipsis*: bool             ## Fit one line within the allocated width.
 
   ElementDeclaration* = object
     ## The full configuration of a container/visual element: the single

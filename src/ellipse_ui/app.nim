@@ -22,7 +22,8 @@ import ./widgets
 import ./debug
 import ./dialogs
 
-export clay, logger, platform, renderer, ui, widgets, debug, dialogs
+import ./appearance
+export clay, logger, platform, renderer, ui, widgets, debug, dialogs, appearance
 
 type
   AppFn* = proc () {.closure.}
@@ -42,12 +43,26 @@ type
       ## Called before whole-process re-exec. Return opaque state bytes.
     afterReload*: proc (state: string) {.closure.}
       ## Called after setup, before the first frame, only following re-exec.
+    onAppearance*: proc (dark: bool) {.closure.}
+      ## Runs on the UI thread at startup and when the desktop scheme changes.
+      ## Apps with their own palettes can select a variant here.
     input*: InputHook      ## every frame, inside `updateUI`
     before*: AppFn         ## every frame, before the layout pass
     view*: AppFn           ## every frame, inside `layout`
     after*: AppFn          ## every frame, after the layout pass
 
 var current {.threadvar.}: App
+var appliedAppearance {.threadvar.}: bool
+
+proc applyAppearance(force = false) =
+  let dark = systemDarkMode()
+  if force or dark != appliedAppearance:
+    appliedAppearance = dark
+    let callback = current.onAppearance
+    if callback == nil:
+      applyDefaultAppearance(dark)
+    else:
+      callback(dark)
 
 const reloadStateEnv = "ELLIPSE_RELOAD_STATE"
 const reloadPidEnv = "ELLIPSE_RELOAD_PID"
@@ -83,6 +98,7 @@ proc frame*()  =
   ## runs this every paced frame; a `script` drives it by hand.
   pumpProjectWakes()
   syncAttachedSurface()
+  applyAppearance()
   updateUI()
   updateDialogs()
   checkProjectSettled()
@@ -112,6 +128,7 @@ proc launch*(app: App)  =
   if prepare != nil:
     prepare()
   bootup(app.window)
+  applyAppearance(force = true)
   if app.hotApp:
     # whole-app reload: watch src/, rebuild on a save, become the new binary
     # (see `ellipse/hotload.startProjectWatching`); nothing is rebuilt or
@@ -141,8 +158,10 @@ proc runDialogProcess(app: App)  =
     prepare()
   if not startDialogProcess():
     return
-  current = App(view: dialogProcessView, after: dialogProcessAfter)
+  current = App(view: dialogProcessView, after: dialogProcessAfter,
+                onAppearance: app.onAppearance)
   bootup(dialogProcessWindow())
+  applyAppearance(force = true)
   if app.debugMode:
     installDebugMode()
   start(frame, render)
@@ -220,7 +239,7 @@ proc run*(app: App; script: AppFn = nil) =
       # own image when nothing answers the socket, so `make hot` alone keeps
       # the window through reloads.
       when not defined(windows):
-        serveDisplay(app.window.title, app.window.width, app.window.height)
+        serveDisplay(app.window.title, app.window.width, app.window.height, app.window.transparent)
     if isDialogProcess():
       runDialogProcess(app)
       return

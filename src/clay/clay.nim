@@ -41,7 +41,7 @@
 
 {.push gcsafe.}
 
-import std/[tables, algorithm, syncio, assertions, math, macros, hashes]
+import std/[tables, algorithm, syncio, assertions, math, macros, hashes, unicode]
 
 include types
 include hashing

@@ -7,6 +7,7 @@ import std/[math]
 
 import clay
 import ../ui
+import ../../ellipse/platform/pacing
 
 import ./common
 
@@ -105,9 +106,13 @@ proc thumbToPointer(container: ElementId, axis: BarAxis, offset: float32,
     return
   let top = clamp(offset, 0.0, span)
   let pos = -(top / span) * geom.maxScroll
-  var p = Vec2()
-  if axis == vertical: p.y = pos else: p.x = pos
-  setScrollPosition(container, p)
+  let previous = scrollContainerData(container).position
+  var position = previous
+  if axis == vertical: position.y = pos else: position.x = pos
+  if position != previous:
+    setScrollPosition(container, position)
+    # The content has already sampled its offset for this layout pass.
+    requestFrame()
 
 proc advanceDrag(g: var Drag; style: ScrollbarStyle) =
   ## Keep a held thumb pinned under the pointer (minus the grab offset).
@@ -127,12 +132,12 @@ proc beginDrag(container: ElementId, axis: BarAxis, grab: float32) =
   drags.add Drag(container: container.id, axis: axis, grab: grab)
 
 proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
-                   style: ScrollbarStyle, always: bool) =
+                   style: ScrollbarStyle, always: bool, anchor = ElementId()) =
   ## Draw one bar: track, then thumb, both floating over the container's
   ## edge, positioned by last frame's scroll state. The thumb is declared
   ## later and floats above the track, so a press on the thumb never
   ## reaches the track's page-jump handler.
-  let geom = barGeom(container, axis, style, always)
+  var geom = barGeom(container, axis, style, always)
   if not geom.scrollable:
     return
 
@@ -145,13 +150,20 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
   let thumbId = localId(if axis == vertical: "sb.vthumb" else: "sb.hthumb",
     id.id)
 
+  let anchorData = if anchor.id != 0: elementData(anchor) else: ElementData()
+  let attachment = if anchorData.found: anchor else: container
+  let topInset = if anchorData.found:
+    elementData(container).box.y - anchorData.box.y
+  else:
+    0f
+
   # Vertical hugs the right edge, horizontal the bottom: element top-left
   # pinned to the container's right-top / left-bottom, pushed inside.
   let (w, h) = if axis == vertical:
     (style.width, geom.track) else: (geom.track, style.width)
   let (points, offset) = if axis == vertical:
     (AttachPoints(element: pointLeftTop, parent: pointRightTop),
-     vec2(-(style.width + style.margin), style.margin))
+     vec2(-(style.width + style.margin), topInset + style.margin))
   else:
     (AttachPoints(element: pointLeftTop, parent: pointLeftBottom),
      vec2(style.margin, -(style.width + style.margin)))
@@ -164,11 +176,12 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
     .corner(style.radius)
     .floating(attachElementId,
       offset = offset, zIndex = z, points = points,
-      parentId = container.id, clipTo = clipToAttachedParent))
-  if clickedIn(trackId):
+      parentId = attachment.id, clipTo = clipToAttachedParent))
+  if pressedNow() and pointerOver(trackId):
     let local = pointerAlong(axis) -
       containerStart(container, axis) - style.margin
     thumbToPointer(container, axis, local - geom.thumb / 2.0, geom, style)
+    geom = barGeom(container, axis, style, always)
   closeElement()
 
   if geom.thumb <= 0:
@@ -178,7 +191,7 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
   let (tw, th) = if axis == vertical:
     (style.width, geom.thumb) else: (geom.thumb, style.width)
   let toffset = if axis == vertical:
-    vec2(offset.x, style.margin + geom.top)
+    vec2(offset.x, offset.y + geom.top)
   else:
     vec2(style.margin + geom.top, offset.y)
   openElement(thumbId)
@@ -188,7 +201,7 @@ proc scrollbarAxis(id: ElementId, container: ElementId, axis: BarAxis,
     .corner(style.radius)
     .floating(attachElementId,
       offset = toffset, zIndex = z + 1, points = points,
-      parentId = container.id, clipTo = clipToAttachedParent))
+      parentId = attachment.id, clipTo = clipToAttachedParent))
   if pressedNow() and pointerOver(thumbId) and geom.track > geom.thumb:
     let grab = pointerAlong(axis) -
       containerStart(container, axis) - style.margin - geom.top
@@ -212,16 +225,18 @@ proc advanceDrags*(container: ElementId, style: ScrollbarStyle) =
       inc i
 
 proc scrollbar*(id: ElementId, container: ElementId,
-                style = activeTheme.scrollbar, always = false) =
+                style = activeTheme.scrollbar, always = false,
+                verticalAnchor = ElementId()) =
   ## Draw and drive the floating scrollbar(s) of the scroll container
   ## `container`. Declare inside that container's scope, after its
   ## children. A vertical bar hugs the right edge, a horizontal one the
   ## bottom, one per axis the container clips. Each appears only while
   ## its axis actually overflows -- or, with `always`, all the time. The
   ## look comes from the live theme's `scrollbar` tokens unless a style
-  ## is passed.
+  ## is passed. A vertical anchor pins the bar to another element’s right edge
+  ## while keeping the scroll container’s height and vertical position.
   advanceDrags(container, style)
-  scrollbarAxis(id, container, vertical, style, always)
+  scrollbarAxis(id, container, vertical, style, always, verticalAnchor)
   scrollbarAxis(id, container, horizontal, style, always)
 
 template scrollPanel*(label: untyped, decl: untyped, body: untyped): untyped =

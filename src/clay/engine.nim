@@ -348,7 +348,7 @@ proc textElement*(ctx: Context; text: string; cfg: TextConfig = TextConfig()) =
     dims: Size(
       width: m.unwrapped.width,
       height: lineHeightOf(ctx, cfg, m.unwrapped.height)),
-    minDims: Size(width: m.minWidth, height: 0),
+    minDims: Size(width: (if cfg.ellipsis: 0f else: m.minWidth), height: 0),
   )
   el.minDims.height = el.dims.height
   el.preferred = m.unwrapped
@@ -412,6 +412,9 @@ proc closeElement*(ctx: Context) =
   if decl.layout.sizing.width.kind != percent:
     if decl.layout.sizing.width.max <= 0:
       decl.layout.sizing.width.max = maxFloat
+    if decl.layout.sizing.width.ignoreContent:
+      el.dims.width = decl.layout.sizing.width.min
+      el.minDims.width = el.dims.width
     el.dims.width = clamp(el.dims.width, decl.layout.sizing.width.min,
                           decl.layout.sizing.width.max)
     el.minDims.width = clamp(el.minDims.width, decl.layout.sizing.width.min,
@@ -421,6 +424,9 @@ proc closeElement*(ctx: Context) =
   if decl.layout.sizing.height.kind != percent:
     if decl.layout.sizing.height.max <= 0:
       decl.layout.sizing.height.max = maxFloat
+    if decl.layout.sizing.height.ignoreContent:
+      el.dims.height = decl.layout.sizing.height.min
+      el.minDims.height = el.dims.height
     el.dims.height = clamp(el.dims.height, decl.layout.sizing.height.min,
                            decl.layout.sizing.height.max)
     el.minDims.height = clamp(el.minDims.height, decl.layout.sizing.height.min,
@@ -525,9 +531,9 @@ proc sizeContainersAlongAxis*(ctx: Context; xAxis: bool) =
           ctx.frameAspect.add(childIndex)
 
         # Fixed and percent children are never compressed, grown, or
-        # cross-axis clamped; text only joins when it wraps on words.
+        # cross-axis clamped; wrapping and ellipsized text can shrink.
         if childSizing.kind != percent and childSizing.kind != fixed and
-            (not child.isText or child.textCfg.wrap == wordWrap):
+            (not child.isText or child.textCfg.wrap == wordWrap or (xAxis and child.textCfg.ellipsis)):
           resizable.add(childIndex)
 
         if sizingAlongAxis:
@@ -714,7 +720,9 @@ proc propagateHeights(ctx: Context) =
         if not el.isText:
           var cur = el
           let layout = cur.decl.layout
-          if layout.direction == leftToRight:
+          if layout.sizing.height.ignoreContent:
+            cur.dims.height = layout.sizing.height.min
+          elif layout.direction == leftToRight:
             for childIndex in el.children:
               let child = ctx.elements[childIndex]
               let childHeight = max(child.dims.height +

@@ -200,10 +200,39 @@ proc wrappedLines*(ctx: Context; text: string; cfg: TextConfig;
     result.add TextLine(start: int32(text.len), length: 0,
                         dims: Size(width: 0, height: lineHeight))
 
+proc fittingTextPrefix*(ctx: Context; value: string; width: float32;
+                        cfg: TextConfig; suffix = ""): int =
+  ## Number of runes that fit before an optional suffix.
+  var high = value.runeLen
+  if ctx.measureText == nil:
+    return high
+  while result < high:
+    let middle = (result + high + 1) div 2
+    if ctx.measureText(value.runeSubStr(0, middle) & suffix, cfg).width <= width:
+      result = middle
+    else:
+      high = middle - 1
+
+proc ellipsizeText*(ctx: Context; value: string; width: float32; cfg: TextConfig): string =
+  if ctx.measureText == nil or ctx.measureText(value, cfg).width <= width:
+    return value
+  const marker = "…"
+  if ctx.measureText(marker, cfg).width > width:
+    return ""
+  value.runeSubStr(0, fittingTextPrefix(ctx, value, width, cfg, marker)) & marker
+
 proc wrapTextElement*(ctx: Context; el: var LayoutElement) =
   ## Break `el`'s text into lines that fit `el.dims.width`, filling
   ## `el.lines` and updating `el.dims.height`. Clay runs this once per text
   ## element between the horizontal and vertical sizing passes; so do we.
+  if el.textCfg.ellipsis:
+    el.text = ellipsizeText(ctx, el.text, el.dims.width, el.textCfg)
+    let measured = if ctx.measureText != nil: ctx.measureText(el.text, el.textCfg).width
+                   else: el.dims.width
+    el.dims.width = min(el.dims.width, measured)
+    el.lines = @[TextLine(start: 0, length: el.text.len.int32,
+      dims: Size(width: el.dims.width, height: el.dims.height))]
+    return
   el.lines = wrappedLines(ctx, el.text, el.textCfg, el.dims.width)
   let m = measureTextCached(ctx, el.text, el.textCfg)
   let lineHeight = lineHeightOf(ctx, el.textCfg, m.unwrapped.height)

@@ -19,3 +19,7 @@ export clock, hotload, app
 
 import ellipse_ui/native_files
 export native_files
+
+template elem*(args: varargs[untyped]): untyped =
+  ## Alias for the Clay layout macro.
+  clay(args)

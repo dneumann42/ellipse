@@ -684,6 +684,8 @@ proc bootContext(width, height: float32)  =
   if terminalMode():
     setGrid(size(cellWidth, cellHeight))
 
+var clearColor* = rgb(0, 0, 0) ## What the window shows where no command paints.
+
 proc bootup*(width, height: float32 = 0.0)  =
   ## The whole GUI startup dance in one call: platform window + renderer,
   ## a clay context at `width`x`height` (0 takes the live window size) and
@@ -696,6 +698,8 @@ proc bootup*(cfg: WindowConfig)  =
   ## `bootup` with a window description -- a title, a size, or a docked
   ## layer-shell bar (`cfg.layer`).
   initialize(cfg)
+  if cfg.transparent and not terminalMode():
+    clearColor = rgb(0, 0, 0, 0)
   bootContext(0.0, 0.0)
 
 when withSdl:
@@ -800,8 +804,6 @@ when withSdl:
 ## to the backbuffer until the gesture settles, then rebuilds it.
 
 var
-  clearColor* = rgb(0, 0, 0)
-    ## What the window shows where no command paints.
   lastSigs {.threadvar.}: seq[CmdSig]
   lastValid = false          ## `retained` holds `lastSigs`' picture
   termValid = false          ## the terminal shows `termFront`

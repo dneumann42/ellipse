@@ -147,6 +147,24 @@ func defaultPalette*(): Palette =
     shadow: rgb(0, 0, 0, 70),
   )
 
+func lightPalette*(): Palette =
+  Palette(
+    bg: rgb(244, 246, 250),
+    panelBg: rgb(255, 255, 255),
+    panelBorder: rgb(170, 178, 194),
+    buttonBg: rgb(225, 230, 241),
+    buttonHoverBg: rgb(211, 220, 238),
+    buttonPressBg: rgb(194, 205, 228),
+    fieldBg: rgb(255, 255, 255),
+    selectedBg: rgb(214, 226, 249),
+    accent: rgb(37, 79, 168),
+    textColor: rgb(25, 31, 45),
+    dimColor: rgb(83, 94, 115),
+    labelColor: rgb(56, 66, 87),
+    onAccent: rgb(255, 255, 255),
+    shadow: rgb(0, 0, 0, 45),
+  )
+
 func defaultTextSizes*(): TextSizes =
   TextSizes(
     h1: 42, h2: 32, h3: 26, h4: 21, h5: 18, h6: 16,
@@ -245,12 +263,19 @@ proc forSurface(t: sink Theme): Theme =
 
 var activeTheme*: Theme = forSurface(defaultTheme())
 
+var explicitTheme {.threadvar.}: bool
+
+proc applyDefaultAppearance*(dark: bool) =
+  if not explicitTheme:
+    activeTheme.palette = if dark: defaultPalette() else: lightPalette()
+
 var themeStack {.threadvar.}: seq[Theme]
 themeStack = @[]
 
 proc setTheme*(theme: sink Theme) =
   ## Replace the live theme outright (no snapshot; `setTheme(defaultTheme())`
   ## resets to the built-in look).
+  explicitTheme = true
   activeTheme = forSurface(theme)
 
 proc pushTheme*(theme: sink Theme) =
