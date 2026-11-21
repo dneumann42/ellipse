@@ -69,3 +69,16 @@ material sample contains nine byte weights that add up to 255.
 
 Each artist uses one splat atlas and one billboard atlas per frame. Use
 `artist.renderTerrain(terrain)` if your program manages its own objects.
+
+## Generate terrain and index scenery
+
+Use `ellipse/world/noise` for seeded value noise and fractal noise, including
+tileable variants. Sample the noise into a terrain with `setHeight` as the
+editor example does, or generate the full grid before creating a terrain
+from `TerrainData`.
+
+`ellipse/world/fields` provides square sample grids and quantile
+normalization. `ellipse/world/boxblur` provides a box filter for float
+samples. These routines use OpenMP when enabled in the build and run
+serially otherwise. `ellipse/world/spatialbounds` provides a bucket index
+for querying bounds in the XZ plane.

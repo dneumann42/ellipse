@@ -3,6 +3,7 @@
 
 import std/[math, monotimes, times]
 import ellipse/worlds
+import ellipse/world/noise
 import ellipse/platform/[keyboard, sdl]
 
 proc terrainTextures(): TextureAtlas =
@@ -73,7 +74,7 @@ proc runEditor() =
     world = newWorld(terrain)
   for x in 0 ..< terrain.sampleCount:
     for z in 0 ..< terrain.sampleCount:
-      terrain.setHeight(x, z, 1.8f * sin(x.float32 * 0.13f) * cos(z.float32 * 0.11f))
+      terrain.setHeight(x, z, 6f * (fbm(x.float32 * 0.07f, z.float32 * 0.07f, seed = 29) - 0.5f))
   artist.setSplatAtlas(terrainTextures())
   artist.setSplatOptions(newSplatOptions(metersPerRepeat = 4f))
   artist.setLight(vec3(-0.5, -1, -0.3), 0.8)
