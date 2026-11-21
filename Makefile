@@ -75,6 +75,19 @@ bin/hello3d: examples/hello3d.nim $(ELLIPSE_SOURCES) $(SHADER_SPVS)
 
 build_3d: bin/hello3d
 
+.PHONY: run_terrain_editor test_world
+
+bin/terrain_editor: examples/terrain_editor.nim $(ELLIPSE_SOURCES) $(SHADER_SPVS)
+	@mkdir -p bin
+	$(NIM) $(ELLIPSE_FLAGS) c examples/terrain_editor.nim
+
+run_terrain_editor: bin/terrain_editor
+	./bin/terrain_editor $(ARGS)
+
+test_world: $(SHADER_SPVS)
+	@mkdir -p bin/tests
+	$(NIM) $(ELLIPSE_FLAGS) --outdir:bin/tests -r c tests/world_test.nim
+
 run_3d: bin/hello3d
 	./bin/hello3d $(ARGS)
 

@@ -31,7 +31,6 @@ type
     entityIndex: Table[EntityId, int]
     ids: EntitySlots
     componentBuffers: Table[ComponentKey, AbstractComponentBuffer]
-    bySlot: seq[AbstractComponentBuffer] ## the same buffers, by `typeSlot`
     views: seq[View]
 
 func hash(key: ComponentKey): Hash = key.digest
@@ -39,28 +38,16 @@ func hash(key: ComponentKey): Hash = key.digest
 func `==`(a, b: ComponentKey): bool =
   a.digest == b.digest and a.label == b.label
 
-var nextTypeSlot: Atomic[int]
-
-proc typeSlot[T](): int {.inline.} =
-  ## A small process-wide number per component type, so typed lookups index
-  ## a seq instead of hashing and comparing the type's name.
-  var slot {.global.}: Atomic[int] # 0: not assigned yet; else slot + 1
-  # Assigning the number once is the only effect, and it is invisible:
-  # every later call for T returns the same slot.
-  {.cast(gcsafe), cast(noSideEffect).}:
-    let known = slot.load(moRelaxed)
-    if known != 0: return known - 1
-    var expected = 0
-    let fresh = nextTypeSlot.fetchAdd(1) + 1
-    if slot.compareExchange(expected, fresh): return fresh - 1
-    return expected - 1
-
-proc slotBuffer[T](self: EntityManager): AbstractComponentBuffer {.inline.} =
-  let slot = typeSlot[T]()
-  if slot < self.bySlot.len: self.bySlot[slot] else: nil
-
 func componentKey(label: string): ComponentKey =
   ComponentKey(label: label, digest: hash(label))
+
+proc slotBuffer[T](self: EntityManager): AbstractComponentBuffer {.inline.} =
+  ## Look the buffer up by the component's name, not by a per-process slot
+  ## number. A number handed out lazily inside a generic can differ between
+  ## incrementally compiled modules (``--ic:on``), so ``add`` in one module
+  ## and ``get`` in another would index different slots for the same type.
+  const key = componentKey(name(T))
+  self.componentBuffers.getOrDefault(key)
 
 var slotTables: Atomic[uint64]
 
@@ -228,10 +215,7 @@ proc add*[T](self: var EntityManager, entityId: EntityId, component: T) =
   self.ensureIds()
   if not self.componentBuffers.hasKey(key):
     self.componentBuffers[key] = AbstractComponentBuffer(ComponentBuffer[T](ids: self.ids))
-  let slot = typeSlot[T]()
-  if slot >= self.bySlot.len: self.bySlot.setLen(slot + 1)
-  if self.bySlot[slot].isNil: self.bySlot[slot] = self.componentBuffers[key]
-  var buffer = cast[ComponentBuffer[T]](self.bySlot[slot])
+  var buffer = cast[ComponentBuffer[T]](self.componentBuffers[key])
   buffer.add(entityId, component)
   self.refreshViews(entityId)
 

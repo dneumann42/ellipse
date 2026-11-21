@@ -213,6 +213,7 @@ template layout*(blk: untyped) =
   blk
   endLayout()
   finishFocusReload()
+  releaseVanishedFocus()
 
 proc text*(value: string, fontSize: uint16 = activeTheme.text.control,
            color: Color = activeTheme.palette.textColor) =

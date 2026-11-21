@@ -383,6 +383,19 @@ proc main()  =
   stepFocus(@[KeyEvent(kind: kevTab)])
   expect(focusedId() == 0'u32, "focusable: empty chain, Tab is a no-op")
 
+  # a holder that left the layout releases the slot: its widget can never
+  # run the press-elsewhere release, so a stale id must not read as a
+  # live caret -- hidden panels and virtualized rows depend on this
+  setFocus(c1)
+  chips(ctx)
+  expect(focused(c1), "focusable: holder laid out keeps the slot")
+  beginLayout()
+  Spacer()
+  endLayout(ctx)
+  releaseVanishedFocus()
+  expect(focusedId() == 0'u32, "focusable: vanished holder releases the slot")
+  blur()
+
   # 8. toolbar menus: Tab stops; Down opens, arrows walk, Enter picks,
   #    Left/Right hop menus, Tab away closes
   let fileId = elementId("menu.File")

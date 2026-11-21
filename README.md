@@ -50,3 +50,9 @@ escape is an error. `\(...)` interpolates: `"\(msg) world!"`, `"\(p.name) is
 `"\((f))"` calls a fun; any value reads as `to-string` would give it. It
 reads as `(interpolate "..." value ...)`. `to-code` prints strings with the
 same escapes, so they read back unchanged.
+
+## Editable 3D worlds
+
+Import `ellipse/worlds` for heightfield terrain, texture painting, and worlds
+that draw terrain, mesh instances, and billboards through `Artist3D`.
+[World API and terrain editor](documentation/worlds.md)

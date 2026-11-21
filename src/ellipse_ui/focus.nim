@@ -185,6 +185,16 @@ proc stepFocus*(evs: seq[KeyEvent]) =
     if ev.kind == kevTab and not ev.ctrl and not ev.alt:
       moveFocus(if ev.shift: -1 else: 1)
 
+proc releaseVanishedFocus*() =
+  ## A holder absent from the frame just laid out can never run its
+  ## press-elsewhere release -- its widget left the layout (a hidden
+  ## panel, a virtualized table row, a switched tab). Without this sweep
+  ## such a holder keeps the slot forever, and the app reads the stale id
+  ## as a live caret: typing that swallows every key. Run once per
+  ## completed frame; a holder the frame still shows stays put.
+  if focusId != 0'u32 and not onChain(focusId):
+    setFocusId(0'u32)
+
 proc isSpace*(ev: KeyEvent): bool =
   ## The space bar: arrives as text, so non-text widgets test for it.
   ev.kind == kevText and ev.text == " "
