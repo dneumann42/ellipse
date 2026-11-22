@@ -26,7 +26,8 @@ import ./keyevents
 export keyevents
 import ../terminal/[tty, terminput]
 import ./fdwatch
-import ./display
+when withSdl:
+  import ./display
 export fdwatch
 export layershell
 
@@ -430,9 +431,10 @@ type
     offscreen: bool             ## no window of ours: a host app owns the
                                 ## screen and draws our picture itself (see
                                 ## `initializeOffscreen`)
-    attached*: DisplayServer    ## development mode: the display server this
-                                ## app mirrors frames to and takes input from
-                                ## (see `platform/display`); nil when local
+    when withSdl:
+      attached*: DisplayServer    ## development mode: the display server this
+                                  ## app mirrors frames to and takes input from
+                                  ## (see `platform/display`); nil when local
 
 when withSdl:
   proc `=destroy`(app: var PlatformApplication) =
