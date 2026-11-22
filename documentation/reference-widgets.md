@@ -289,6 +289,28 @@ history; `EditorStats.text` is the text to store back. Owl exposes it as
 | `typed-text` | Text typed this frame. |
 | `set-clipboard s`, `scroll-into-view id`, `scroll-to-end id` | Helpers. |
 
+### 3.10 Rope editor
+
+`ellipse_ui` exports `Rope` and `ropeEditor`. Keep the rope in your
+application state and pass it by reference each frame. The widget returns
+`true` when it edits the rope and keeps the selection, scroll position, and undo
+history under its element ID.
+
+```nim
+import ellipse_ui
+
+var source = Rope.init("echo 42")
+let mode = builtinLanguages().languageFor("example.nim")
+# In the view callback:
+ropeEditor(hashId("source"), source, RopeEditorOpts(), mode)
+```
+
+The bundled Nim mode covers `.nim`, `.nims`, and `.nimble`. Use
+`loadLanguages(directory)` for custom Owl language definitions. Set
+`RopeEditorOpts.readOnly` for a selectable source viewer. The optional
+`gutter` callback draws markers for each visible line when `gutterWidth` is
+set, and `activeLine` styles a one-based line.
+
 ---
 
 ## 4. Composite widgets

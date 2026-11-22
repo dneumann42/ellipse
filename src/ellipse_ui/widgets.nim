@@ -7,7 +7,10 @@
 
 
 import ./widgets/[common, checkboxes, comboboxes, multiselects, textfields,
-                  numberfields, datetimepickers, headings, texts, editor, tabs, cards, scrollbars, tables, charts]
+                  numberfields, datetimepickers, headings, texts, editor, ropeEditor, tabs, cards, scrollbars, tables, charts]
 
 export common, checkboxes, comboboxes, multiselects, textfields,
-       numberfields, datetimepickers, headings, texts, editor, tabs, cards, scrollbars, tables, charts
+       numberfields, datetimepickers, headings, texts, editor, ropeEditor, tabs, cards, scrollbars, tables, charts
+
+import ./[ropes, languages]
+export ropes, languages
