@@ -344,10 +344,11 @@ proc pumpProjectWakes*() =
   ## an idle attached app stops pumping entirely once its deadlines run out.
   ## Draining the socket (input, quits) and the watched descriptors (the
   ## hot-reload callback) keeps both alive; paired with `pumpEvents`.
-  if displayAttached():
-    pumpEvents()          # drains the server socket into SDL, then SDL here;
-                          # fdwatch callbacks ride the same wake thread
-  elif fdsReady():
+  when not defined(ellipseNoSdl):
+    if displayAttached():
+      pumpEvents()
+      return
+  if fdsReady():
     ## An unattached host (a scripted test, an offscreen run) that sleeps in
     ## its own loop instead of `start`: no one else takes the fdwake event,
     ## so run what is ready right here — the watcher's callback lands between

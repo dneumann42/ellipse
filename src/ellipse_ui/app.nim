@@ -14,7 +14,9 @@ import clay
 import ellipse/hotload
 export hotload
 import ellipse/logger
-import ellipse/platform/display
+import ellipse/platform/termmode
+when withSdl:
+  import ellipse/platform/display
 import ellipse/platform/platform
 import ellipse/platform/renderer
 import ./ui
@@ -232,13 +234,13 @@ proc run*(app: App; script: AppFn = nil) =
   ## that rebuilt successfully ends the loop through `takeRestart`; this is
   ## where the old image becomes the new one (see `relaunch`).
   try:
-    if displayServeRequested():
-      # `--display-serve`: this run *is* the dev window every attached app
-      # mirrors into -- no UI, no loop, it never returns (see
-      # `platform/display.serveDisplay`). An attached app raises one from its
-      # own image when nothing answers the socket, so `make hot` alone keeps
-      # the window through reloads.
-      when not defined(windows):
+    when withSdl and not defined(windows):
+      if displayServeRequested():
+        # `--display-serve`: this run *is* the dev window every attached app
+        # mirrors into -- no UI, no loop, it never returns (see
+        # `platform/display.serveDisplay`). An attached app raises one from its
+        # own image when nothing answers the socket, so `make hot` alone keeps
+        # the window through reloads.
         serveDisplay(app.window.title, app.window.width, app.window.height, app.window.transparent)
     if isDialogProcess():
       runDialogProcess(app)
